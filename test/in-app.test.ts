@@ -66,11 +66,17 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       `  target=${quoted(chatEnvDir)}/"$ORCA_AGENT_SESSION_ID"`,
       `  for name in ${CHAT_VARIABLES.join(' ')}; do eval "value=\\\${$name-}"; printf '%s=%s\\n' "$name" "$value"; done > "$target.$$.tmp" && mv "$target.$$.tmp" "$target"`,
       'fi',
-      `exec ${quoted(await realpath(CLAUDE!))} "$@"`,
+      // Its own empty settings folder: the chat's agent is signed out here on every computer, so this
+      // test never talks to a model with someone's account, and runs the same everywhere.
+      `CLAUDE_CONFIG_DIR=${quoted(join(root, 'claude-config'))} exec ${quoted(await realpath(CLAUDE!))} "$@"`,
       ''
     ].join('\n')
   )
   await chmod(join(bin, 'claude'), 0o755)
+  // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
+  // (Homebrew's among them, where an installed `claude` may be), then what it inherited. So this
+  // folder is put first the way a person would do it, in the shell's own profile.
+  for (const name of ['.zprofile', '.zshrc', '.bash_profile', '.profile']) await writeFile(join(home, name), `export PATH=${quoted(bin)}:"$PATH"\n`)
   // What a published repository holds: no node_modules, no generated typings.
   for (const name of ['orca-plugin.json', 'package.json', 'README.md', 'src', 'bin']) await cp(join(PLUGIN, name), join(copy, name), { recursive: true })
 

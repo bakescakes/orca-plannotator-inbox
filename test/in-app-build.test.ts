@@ -100,6 +100,10 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     ].join('\n')
   )
   await chmod(join(bin, 'claude'), 0o755)
+  // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
+  // (Homebrew's among them, where an installed `claude` may be), then what it inherited. So this
+  // folder is put first the way a person would do it, in the shell's own profile.
+  for (const name of ['.zprofile', '.zshrc', '.bash_profile', '.profile']) await writeFile(join(home, name), `export PATH=${quoted(bin)}:"$PATH"\n`)
   for (const name of ['orca-plugin.json', 'package.json', 'README.md', 'src', 'bin']) await cp(join(PLUGIN, name), join(copy, name), { recursive: true })
 
   // Orca gives a plugin's worker only a short list of variables (PATH, HOME, TMPDIR, …), so a release
