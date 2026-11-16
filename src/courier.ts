@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { EnvelopeError, buildEnvelope } from './envelope'
 import { InboxRefused, type InboxClient, type InboxCommand } from './inbox'
 import { Ledger, type Delivery } from './ledger'
-import { OrcaContractError, OrcaNotRun, OrcaRefused, type OrcaCli } from './orca-cli'
+import { OrcaContractError, OrcaNotRun, OrcaRefused, type MailMessage, type OrcaCli } from './orca-cli'
 import { KeyedQueue, errorText, isRecord } from './util'
 
 export type Outcome = 'acknowledged' | 'queued' | 'deferred' | 'blocked' | 'rejected'
@@ -15,9 +15,6 @@ export type Route = { session: string; raw: string }
 
 export const AMBIGUOUS = 'It is not known whether Orca received this reply, so it was not sent again.'
 const RECONCILE_AFTER_MS = 30_000
-/** When Orca can no longer show whether a chat received its mail, its own send receipt is the proof. */
-const UNCONFIRMED_AFTER_MS = 120_000
-const UNCONFIRMED_AFTER_FAILURES = 3
 
 /** The reply a mail's payload says it carries; this plugin and the adapter it replaces both name it `replyId`. */
 function replyIdOf(payload: unknown): string | null {
@@ -31,7 +28,6 @@ function replyIdOf(payload: unknown): string | null {
 
 export class Courier {
   private readonly queue = new KeyedQueue()
-  private readonly confirmFailures = new Map<string, number>()
   private readonly orca: OrcaCli
   private readonly ledger: Ledger
   private readonly now: () => number
@@ -144,24 +140,18 @@ export class Courier {
   }
 
   private async confirm(inbox: InboxClient, route: Route, command: InboxCommand, key: string, row: Delivery): Promise<Outcome> {
-    // Orca's receipt means queued, not read. The mailbox says when the chat actually got it.
-    let delivered = false
+    // Orca's receipt means queued, not read. Only the mailbox says when the chat actually got it, so
+    // while Orca cannot show the mailbox the reply stays on the way: the Inbox is never told a reply
+    // arrived on less than that.
+    let mail: MailMessage | undefined
     try {
-      const mail = (await this.orca.mailbox(row.mailbox ?? `orca_session_id:${route.session}`)).find(
-        (message) => message.id === row.message
-      )
-      delivered = typeof mail?.delivered_at === 'string' && mail.delivered_at !== ''
-      this.confirmFailures.delete(key)
+      mail = (await this.orca.mailbox(row.mailbox ?? `orca_session_id:${route.session}`)).find((message) => message.id === row.message)
     } catch (error) {
       if (!(error instanceof OrcaRefused || error instanceof OrcaContractError)) throw error
-      const failures = (this.confirmFailures.get(key) ?? 0) + 1
-      this.confirmFailures.set(key, failures)
-      if (failures < UNCONFIRMED_AFTER_FAILURES || this.now() - row.updated < UNCONFIRMED_AFTER_MS) return 'queued'
-      delivered = true
+      return 'queued'
     }
-    if (!delivered) return 'queued'
+    if (typeof mail?.delivered_at !== 'string' || mail.delivered_at === '') return 'queued'
     await this.acknowledge(inbox, route, command, key)
-    this.confirmFailures.delete(key)
     return 'acknowledged'
   }
 

@@ -114,6 +114,22 @@ test('a reply the earlier adapter already put in the chat’s mailbox is not sen
   assert.equal(t.orca.sends().length, 1)
 })
 
+test('while Orca cannot show the mailbox, a queued reply stays on the way and is never acknowledged on trust', async () => {
+  const t = await setup()
+  assert.equal(await t.courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')
+  t.orca.state.mailboxDown = true
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    t.advance(60_000)
+    assert.equal(await t.courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')
+  }
+  assert.equal(t.inboxFake.state.acknowledged.length, 0)
+  assert.equal(t.ledger.get(t.key('msg_1'))?.state, 'accepted')
+  t.orca.state.mailboxDown = false
+  t.orca.deliverAll()
+  assert.equal(await t.courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'acknowledged')
+  assert.equal(t.orca.sends().length, 1)
+})
+
 test('a lost answer is settled from Orca’s receipt, not by sending again', async () => {
   const t = await setup({ deliverAtOnce: true })
   t.orca.state.sendFault = 'answer-lost'
