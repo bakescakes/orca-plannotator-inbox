@@ -134,6 +134,11 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   already holds a thread it wrote). A reply that arrives while the chat is closed waits in the
   Inbox and is delivered when the chat is open again.
 - At most 64 chats are listened for at once.
+- On Windows a reply longer than about 12,000 bytes is not included in the mail; the chat is told
+  to read it from the thread. Elsewhere that happens from about 62,000 bytes.
+- Two Orca profiles under one user account share the launcher folder. A profile whose plugin is
+  switched off does not stop the other from delivering, but the launcher cannot tell which
+  profile a chat belongs to, so use the plugin in one profile at a time.
 - Uninstalling the plugin leaves the launcher folder and the agent entries. Press **Disconnect**
   first, then delete `~/.orca-plannotator-inbox`.
 - On Windows, CI runs the tests and the end-to-end run with the real Plannotator through the

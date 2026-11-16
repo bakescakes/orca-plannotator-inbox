@@ -9,6 +9,12 @@ import { ID, byteLength } from './util'
 
 /** Orca mail is passed as command arguments; stay well inside every platform's limit. */
 export const MAX_ENVELOPE_BYTES = 64_000
+/**
+ * Windows allows 32,767 characters for a whole command line, and quoting an argument can double
+ * it. So a mail there is at most this many bytes, which leaves room for both and for the rest of
+ * the command.
+ */
+export const MAX_ENVELOPE_BYTES_WINDOWS = 14_000
 export const SENDER = 'plannotator-inbox'
 const CLOSING = '[for context: read_thread (opt: set limit) or search · help: plannotator inbox --help]'
 const ANSWER = 'When they need to hear back, answer in the same thread: Plannotator Inbox send_message with reply_to set to the id in parentheses on the line above.'
@@ -38,7 +44,8 @@ function instruction(command: InboxCommand): string {
 }
 
 /** Deterministic for the same command and session, except `url`, which is why the result is frozen in the ledger. */
-export function buildEnvelope(inboxKey: string, session: string, command: InboxCommand): Envelope {
+export function buildEnvelope(inboxKey: string, session: string, command: InboxCommand, platform: NodeJS.Platform = process.platform): Envelope {
+  const limit = platform === 'win32' ? MAX_ENVELOPE_BYTES_WINDOWS : MAX_ENVELOPE_BYTES
   if (!ID.test(command.id) || !ID.test(command.thread_id)) throw new EnvelopeError('The reply has no usable id.')
   const title = oneLine(command.subject, command.type === 'message' ? 'a message' : 'a reply')
   if (title.length > 1000) throw new EnvelopeError('The thread title is too long to deliver.')
@@ -58,7 +65,7 @@ export function buildEnvelope(inboxKey: string, session: string, command: InboxC
   ]
   if (hasContext) {
     lines.push(
-      byteLength(contextJson) <= MAX_CONTEXT_BYTES
+      byteLength(contextJson) <= Math.min(MAX_CONTEXT_BYTES, limit / 4)
         ? `Context: ${contextJson}`
         : `Context: more came with this (${Object.keys(context).join(', ')}); read the thread with read_thread for it.`
     )
@@ -66,7 +73,7 @@ export function buildEnvelope(inboxKey: string, session: string, command: InboxC
   const head = lines.join('\n')
   let body = `${head}\n\n${command.body}\n\n${CLOSING}`
   // Too long for one mail: the wake still arrives, and the agent reads the words from the Inbox.
-  if (byteLength(body) > MAX_ENVELOPE_BYTES - 2000) {
+  if (byteLength(body) > limit - 2000) {
     body = `${head}\n\nTheir reply is too long to include here. Read it now with read_thread (thread_id ${command.thread_id}, message_id ${command.id}).\n\n${CLOSING}`
   }
   const payload = JSON.stringify({
@@ -79,7 +86,7 @@ export function buildEnvelope(inboxKey: string, session: string, command: InboxC
     session
   })
   const envelope = { session, subject: `Plannotator: ${title}`.slice(0, 300), body, payload }
-  if (byteLength(envelope.body) + byteLength(envelope.payload) + byteLength(envelope.subject) > MAX_ENVELOPE_BYTES) {
+  if (byteLength(envelope.body) + byteLength(envelope.payload) + byteLength(envelope.subject) > limit) {
     throw new EnvelopeError('The reply cannot be fitted into one Orca mail.')
   }
   return envelope

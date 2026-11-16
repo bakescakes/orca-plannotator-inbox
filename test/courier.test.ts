@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { AMBIGUOUS, Courier } from '../src/courier'
-import { buildEnvelope, MAX_ENVELOPE_BYTES } from '../src/envelope'
+import { buildEnvelope, MAX_ENVELOPE_BYTES, MAX_ENVELOPE_BYTES_WINDOWS } from '../src/envelope'
 import { InboxClient } from '../src/inbox'
 import { Ledger } from '../src/ledger'
 import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises'
@@ -211,6 +211,19 @@ test('a very long reply still wakes the chat and points at the thread', () => {
   assert.ok(Buffer.byteLength(envelope.body) < MAX_ENVELOPE_BYTES)
   assert.match(envelope.body, /too long to include here/)
   assert.match(envelope.body, /read_thread \(thread_id thr_1, message_id msg_1\)/)
+})
+
+test('on Windows a mail fits one command line, so a shorter reply already points at the thread', () => {
+  const short = buildEnvelope('k'.repeat(64), SESSION, reply('msg_1', { body: 'word '.repeat(1000) }), 'win32')
+  assert.match(short.body, /word word/)
+  const long = buildEnvelope('k'.repeat(64), SESSION, reply('msg_1', { body: 'x'.repeat(40_000) }), 'win32')
+  assert.match(long.body, /too long to include here/)
+  // Quoting can double an argument; twice the whole mail still leaves room in Windows' 32,767 characters.
+  for (const envelope of [short, long]) {
+    assert.ok(2 * (Buffer.byteLength(envelope.body) + Buffer.byteLength(envelope.payload) + Buffer.byteLength(envelope.subject)) <= 2 * MAX_ENVELOPE_BYTES_WINDOWS)
+  }
+  assert.ok(2 * MAX_ENVELOPE_BYTES_WINDOWS < 32_767 - 2000)
+  assert.match(buildEnvelope('k'.repeat(64), SESSION, reply('msg_1', { body: 'x'.repeat(40_000) }), 'darwin').body, /x{40000}/)
 })
 
 test('what else the person did travels with the reply', () => {

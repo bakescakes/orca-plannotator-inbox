@@ -132,6 +132,24 @@ test('switched off: nothing is polled and agents are not told replies arrive by 
   }
 })
 
+test('a worker that is not delivering leaves another profile’s live heartbeat alone', async () => {
+  const t = await setup({ settings: { enabled: false } })
+  // A second Orca profile under the same account: its worker is another process and it delivers.
+  const theirs = (at: number) => writeFile(join(t.shared, 'state.json'), JSON.stringify({ v: 1, pid: process.pid + 1, at, dataDir: t.dataDir, delivering: true }))
+  await theirs(Date.now())
+  t.engine.start()
+  try {
+    assert.equal((await t.engine.refresh()).phase, 'off')
+    assert.equal((await t.heartbeat()).delivering, true, 'still the other worker’s word')
+    // That worker is gone: its heartbeat is no longer renewed, and this one says what is true now.
+    await theirs(Date.now() - 5 * 60_000)
+    await t.engine.refresh()
+    assert.equal((await t.heartbeat()).delivering, false)
+  } finally {
+    await t.engine.stop()
+  }
+})
+
 test('a stopped Inbox still counts as deliverable: the chat’s first message starts it', async () => {
   const t = await setup()
   t.inbox.state.up = false

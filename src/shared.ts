@@ -10,6 +10,8 @@ import { join } from 'node:path'
 import { canonicalSession, isRecord } from './util'
 
 export const HEARTBEAT_MS = 15_000
+/** How long another worker's "delivering" stands without being renewed. */
+const OTHER_WORKER_FRESH_MS = 45_000
 const REGISTRATION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_REGISTRATIONS = 512
 
@@ -67,6 +69,21 @@ export async function installShared(dir: string, wrapperSource: string, node: st
 
 export async function writeHeartbeat(dir: string, heartbeat: Omit<Heartbeat, 'v' | 'pid'>): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 })
+  if (!heartbeat.delivering) {
+    // A second Orca profile under the same account shares this file. A worker that is not delivering
+    // (switched off there, say) must not take away the word of one that is.
+    const current: unknown = await readFile(join(dir, 'state.json'), 'utf8').then(JSON.parse, () => null)
+    if (
+      isRecord(current) &&
+      current.delivering === true &&
+      typeof current.pid === 'number' &&
+      current.pid !== process.pid &&
+      typeof current.at === 'number' &&
+      Math.abs(heartbeat.at - current.at) <= OTHER_WORKER_FRESH_MS
+    ) {
+      return
+    }
+  }
   await writeAtomic(join(dir, 'state.json'), `${JSON.stringify({ v: 1, pid: process.pid, ...heartbeat })}\n`, 0o600)
 }
 
