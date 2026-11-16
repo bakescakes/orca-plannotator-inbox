@@ -76,8 +76,11 @@ test('codex: Plannotator’s plain entry is replaced and put back', async () => 
   assert.equal((await codexLink(t.deps)).state, 'plannotator')
   await connectCodex(t.deps)
   const connected = await readFile(t.codex, 'utf8')
-  assert.ok(!connected.includes('/.local/bin/plannotator'))
-  assert.ok(connected.includes(`${codexBlock(LAUNCHER)}\nenv = { PLANNOTATOR_DATA_DIR = "/data/inbox" }\n`), 'the launcher opens the Inbox that entry opened')
+  assert.ok(!connected.includes('command = "/Users/someone/.local/bin/plannotator"'))
+  assert.ok(
+    connected.includes(`${codexBlock(LAUNCHER)}\nenv = { PLANNOTATOR_BIN = "/Users/someone/.local/bin/plannotator", PLANNOTATOR_DATA_DIR = "/data/inbox" }\n`),
+    'the launcher runs the binary that entry ran and opens the Inbox it opened'
+  )
   assert.ok(connected.includes('[projects."/x"]\ntrust_level = "trusted"'))
   assert.equal((await codexLink(t.deps)).state, 'connected')
   await disconnectCodex(t.deps)
@@ -136,8 +139,8 @@ test('claude: Plannotator’s plain entry is replaced and put back; other entrie
   assert.equal((await claudeLink(t.deps)).state, 'connected')
   assert.deepEqual(
     JSON.parse(await readFile(t.claude, 'utf8')).mcpServers['plannotator-inbox'],
-    { type: 'stdio', command: LAUNCHER, args: [], env: { PLANNOTATOR_DATA_DIR: '/data/inbox' } },
-    'the launcher opens the Inbox that entry opened'
+    { type: 'stdio', command: LAUNCHER, args: [], env: { PLANNOTATOR_DATA_DIR: '/data/inbox', PLANNOTATOR_BIN: '/Users/someone/.local/bin/plannotator' } },
+    'the launcher runs the binary that entry ran and opens the Inbox it opened'
   )
   await disconnectClaude(t.deps)
   assert.deepEqual(JSON.parse(await readFile(t.claude, 'utf8')).mcpServers['plannotator-inbox'], stock)

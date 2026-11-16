@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { copyFile, readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { basename, delimiter, join } from 'node:path'
+import { basename, delimiter, isAbsolute, join } from 'node:path'
 import type { KeyValue } from './ledger'
 import type { Env } from './paths'
 import type { ActionResult, AgentLink } from './protocol'
@@ -190,10 +190,12 @@ export async function connectClaude(deps: ConnectDeps): Promise<ActionResult> {
   if (link.state === 'plannotator') {
     const current = await readClaude(deps)
     await deps.store.set(CLAUDE_ORIGINAL, current!.entry as Json)
-    const earlier = isRecord(current!.entry) && isRecord(current!.entry.env) ? current!.entry.env : {}
-    for (const [name, value] of Object.entries(earlier)) {
+    const entry = isRecord(current!.entry) ? current!.entry : {}
+    for (const [name, value] of Object.entries(isRecord(entry.env) ? entry.env : {})) {
       if (typeof value === 'string') env[name] = value
     }
+    // The launcher looks for Plannotator itself; a binary that entry named by its full path is the one to run.
+    if (typeof entry.command === 'string' && isAbsolute(entry.command) && !env.PLANNOTATOR_BIN) env.PLANNOTATOR_BIN = entry.command
   }
   await setClaudeEntry(deps, { type: 'stdio', command: deps.launcher, args: [], env })
   return { ok: true, message: 'Claude Code is connected. It applies to chats started from now on.' }
@@ -356,6 +358,12 @@ export async function connectCodex(deps: ConnectDeps): Promise<ActionResult> {
     await deps.store.set(CODEX_ORIGINAL, original)
     // What that entry set for its server (which Inbox, which binary) still applies to the launcher.
     env = original.split('\n').find((line) => /^\s*env\s*=\s*\{.*\}\s*(?:#.*)?$/.test(line))?.trim() ?? null
+    // The launcher looks for Plannotator itself; a binary that entry named by its full path is the one to run.
+    const command = tomlString(original, 'command')
+    if (typeof command === 'string' && isAbsolute(command) && !/\bPLANNOTATOR_BIN\b/.test(env ?? '')) {
+      const binary = `PLANNOTATOR_BIN = ${JSON.stringify(command)}`
+      env = env === null ? `env = { ${binary} }` : env.replace(/\{\s*(\})?/, (_all, empty) => (empty ? `{ ${binary} }` : `{ ${binary}, `))
+    }
   }
   await rewriteCodex(deps, view, codexBlock(deps.launcher, env))
   return { ok: true, message: 'Codex is connected. It applies to chats started from now on.' }

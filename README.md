@@ -24,7 +24,8 @@ Then, in Orca:
    adds one `plannotator-inbox` MCP server to Claude Code and Codex at user level. It is the only
    time the plugin writes outside its own folders, it happens only when you press it, and
    **Disconnect** puts back what was there. An entry that ran Plannotator directly keeps its
-   environment settings (such as `PLANNOTATOR_DATA_DIR`), so the same Inbox is used.
+   environment settings (such as `PLANNOTATOR_DATA_DIR`) and its binary, so the same Plannotator
+   and the same Inbox are used.
 3. Start a new chat. Connections apply to chats started afterwards.
 
 The status bar shows an **Inbox** item; pressing it opens the Inbox window.
