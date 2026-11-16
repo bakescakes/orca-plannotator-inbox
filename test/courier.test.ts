@@ -85,6 +85,35 @@ test('a plugin installed in a second Orca profile asks that profile’s Orca', a
   assert.equal(orca.state.envs[0]?.ORCA_AGENT_SESSION_ID, undefined)
 })
 
+test('a reply the earlier adapter already put in the chat’s mailbox is not sent again', async () => {
+  const t = await setup()
+  const courier = new Courier(new OrcaCli({ command: ['orca'], exec: t.orca.exec, env: {} }), t.ledger, () => 1_000_000, () => 'plannotator-orca-adapter')
+  // The adapter queued msg_1 for this chat and stopped before it told the Inbox.
+  t.orca.state.mail.push({
+    id: 'mail_theirs',
+    from_handle: 'plannotator-orca-adapter',
+    to_handle: `orca_session_id:${SESSION}`,
+    subject: 'Plannotator: Ship it?',
+    body: 'Plannotator Inbox item',
+    payload: JSON.stringify({ adapter: 'plannotator-orca-adapter', version: 1, replyId: 'msg_1', nativeSessionId: SESSION }),
+    delivered_at: null
+  })
+  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')
+  assert.equal(t.ledger.get(t.key('msg_1'))?.message, 'mail_theirs')
+  t.orca.deliverAll()
+  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'acknowledged')
+  assert.deepEqual(t.inboxFake.state.acknowledged, [{ session: SESSION, id: 'msg_1' }])
+  // A reply the adapter never queued is this plugin's to send.
+  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_2')), 'queued')
+  assert.deepEqual(t.orca.sends().map((args) => args[args.indexOf('--from') + 1]), ['plannotator-inbox'])
+
+  // While Orca cannot show the mailbox, nothing is recorded or sent.
+  t.orca.state.mailboxDown = true
+  await assert.rejects(courier.deliver(t.inbox, ROUTE, reply('msg_3')))
+  assert.equal(t.ledger.get(t.key('msg_3')), null)
+  assert.equal(t.orca.sends().length, 1)
+})
+
 test('a lost answer is settled from Orca’s receipt, not by sending again', async () => {
   const t = await setup({ deliverAtOnce: true })
   t.orca.state.sendFault = 'answer-lost'

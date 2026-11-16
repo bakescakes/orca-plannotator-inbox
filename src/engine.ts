@@ -22,6 +22,8 @@ const AUTHORS_EVERY_MS = 60_000
 const VERSION_EVERY_MS = 5 * 60_000
 /** The Python adapter this plugin replaces writes its status this often or faster. */
 const LEGACY_FRESH_MS = 90_000
+/** The name that adapter sends Orca mail under. */
+const LEGACY_SENDER = 'plannotator-orca-adapter'
 
 export type EngineSettings = { enabled: boolean; dataDir: string; orcaCliPath: string }
 export type EngineStatus = {
@@ -91,6 +93,8 @@ export class Engine {
   private orcaKey = ''
   private orcaVersion: { value: string | null; at: number } | null = null
   private courier: Courier | null = null
+  /** True where the adapter this plugin replaces served this Inbox and has stopped. */
+  private tookOver = false
   private authors: { list: ThreadAuthor[]; at: number } = { list: [], at: 0 }
   private readonly routes = new Map<string, RouteState>()
   private readonly pollers = new Set<Promise<void>>()
@@ -198,9 +202,11 @@ export class Engine {
   private async assess(settings: EngineSettings, dataDir: string): Promise<Look> {
     const at = (phase: Phase, detail: string | null): Look => ({ phase, headline: HEADLINES[phase], detail })
     if (!settings.enabled) return at('off', 'Reply delivery is switched off in Settings. Replies wait in the Inbox.')
-    if (await this.legacyOwns(dataDir)) {
+    const legacy = await this.legacy(dataDir)
+    if (legacy === 'alive') {
       return at('standby', 'Another Plannotator adapter for Orca already delivers replies for this Inbox. This plugin takes over when that adapter is stopped.')
     }
+    this.tookOver = legacy === 'stopped'
     if (!this.ledgerLoaded) {
       await this.ledger.load()
       this.ledgerLoaded = true
@@ -214,7 +220,7 @@ export class Engine {
       this.orca = new OrcaCli({ command, exec: this.deps.exec, env: this.deps.env, profile: this.deps.profile })
       this.orcaKey = key
       this.orcaVersion = null
-      this.courier = new Courier(this.orca, this.ledger, this.now)
+      this.courier = new Courier(this.orca, this.ledger, this.now, () => (this.tookOver ? LEGACY_SENDER : null))
       this.stopRoutes()
     }
     if (!this.orcaVersion || this.now() - this.orcaVersion.at > VERSION_EVERY_MS) {
@@ -248,21 +254,27 @@ export class Engine {
     return at('ready', null)
   }
 
-  /** True while the Python adapter this plugin replaces is alive and serves the same Inbox. */
-  private async legacyOwns(dataDir: string): Promise<boolean> {
+  /** The Python adapter this plugin replaces, for the same Inbox: alive, stopped, or never set up here. */
+  private async legacy(dataDir: string): Promise<'alive' | 'stopped' | 'none'> {
     const path = this.deps.legacyConfig === undefined ? join(this.deps.home, '.config', 'lookout', 'plannotator-adapter.json') : this.deps.legacyConfig
-    if (path === null) return false
+    if (path === null) return 'none'
+    let stateDir: string
     try {
       const config: unknown = JSON.parse(await readFile(path, 'utf8'))
-      if (!isRecord(config) || typeof config.stateDir !== 'string' || !Array.isArray(config.dataDirs)) return false
+      if (!isRecord(config) || typeof config.stateDir !== 'string' || !Array.isArray(config.dataDirs)) return 'none'
       const mine = await real(dataDir)
       const served = await Promise.all(config.dataDirs.filter((dir): dir is string => typeof dir === 'string').map(real))
-      if (!served.includes(mine)) return false
-      const status: unknown = JSON.parse(await readFile(join(config.stateDir, 'status.json'), 'utf8'))
-      const at = isRecord(status) && typeof status.at === 'string' ? Date.parse(status.at) : Number.NaN
-      return Number.isFinite(at) && Math.abs(this.now() - at) <= LEGACY_FRESH_MS
+      if (!served.includes(mine)) return 'none'
+      stateDir = config.stateDir
     } catch {
-      return false
+      return 'none'
+    }
+    try {
+      const status: unknown = JSON.parse(await readFile(join(stateDir, 'status.json'), 'utf8'))
+      const at = isRecord(status) && typeof status.at === 'string' ? Date.parse(status.at) : Number.NaN
+      return Number.isFinite(at) && Math.abs(this.now() - at) <= LEGACY_FRESH_MS ? 'alive' : 'stopped'
+    } catch {
+      return 'stopped'
     }
   }
 
@@ -281,16 +293,19 @@ export class Engine {
         this.deps.log(`thread list not read: ${errorText(error)}`)
       }
     }
+    // One chat can have written under two spellings of its id (bare, and with Orca's mail prefix). The
+    // Inbox keeps a separate reply queue for each, so each spelling is listened for; the courier still
+    // delivers to the chat one reply at a time and records a reply once.
     for (const author of this.authors.list) {
-      candidates.set(author.session, { session: author.session, raw: author.raw, projectPath: author.projectRoot })
+      candidates.set(author.raw, { session: author.session, raw: author.raw, projectPath: author.projectRoot })
     }
     const mine = await real(dataDir)
     const justSent: string[] = []
     for (const registration of await readRegistrations(this.deps.sharedDir, this.now())) {
       if (registration.dataDir !== null && (await real(registration.dataDir)) !== mine) continue
       if (this.now() - registration.at < 60_000) justSent.push(registration.session)
-      // The launcher saw the id exactly as the agent sent it, so it wins over the thread list.
-      candidates.set(registration.session, { session: registration.session, raw: registration.raw, projectPath: registration.projectPath })
+      // The launcher knows the chat's own folder, so it wins over the thread list for the same spelling.
+      candidates.set(registration.raw, { session: registration.session, raw: registration.raw, projectPath: registration.projectPath })
     }
     if (candidates.size === 0) {
       this.stopRoutes()
@@ -303,23 +318,22 @@ export class Engine {
       return { phase: 'no-orca', headline: HEADLINES['no-orca'], detail: `Orca did not list its chats (${errorText(error)}).` }
     }
     const wanted = [...candidates.values()].filter((candidate) => open.has(candidate.session)).slice(0, MAX_ROUTES)
-    const keep = new Set(wanted.map((candidate) => candidate.session))
-    for (const [session, route] of this.routes) {
-      if (!keep.has(session)) {
+    const keep = new Set(wanted.map((candidate) => candidate.raw))
+    for (const [raw, route] of this.routes) {
+      if (!keep.has(raw)) {
         route.stop.abort()
-        this.routes.delete(session)
+        this.routes.delete(raw)
       }
     }
     for (const candidate of wanted) {
       const chat = open.get(candidate.session)!
-      const existing = this.routes.get(candidate.session)
-      if (existing && existing.raw === candidate.raw) {
+      const existing = this.routes.get(candidate.raw)
+      if (existing) {
         existing.busy = chat.busy
         existing.title = chat.title
         existing.provider = chat.provider
         continue
       }
-      existing?.stop.abort()
       const route: RouteState = {
         session: candidate.session,
         raw: candidate.raw,
@@ -331,7 +345,7 @@ export class Engine {
         note: null,
         stop: new AbortController()
       }
-      this.routes.set(candidate.session, route)
+      this.routes.set(candidate.raw, route)
       // An escaped rejection would end the whole worker; a poll that dies is found again on the next look.
       const poller: Promise<void> = this.poll(inbox, route)
         .catch((error) => this.deps.log(`poll ended: ${errorText(error)}`))
@@ -412,13 +426,18 @@ export class Engine {
   }
 
   private sessions(): SessionStatus[] {
-    return [...this.routes.values()].map((route) => ({
-      session: route.session,
-      title: route.title,
-      provider: route.provider,
-      listening: route.listening,
-      note: route.note
-    }))
+    // One line per chat, however many spellings of its id are listened for.
+    const chats = new Map<string, SessionStatus>()
+    for (const route of this.routes.values()) {
+      const shown = chats.get(route.session)
+      if (shown) {
+        shown.listening = shown.listening && route.listening
+        shown.note ??= route.note
+      } else {
+        chats.set(route.session, { session: route.session, title: route.title, provider: route.provider, listening: route.listening, note: route.note })
+      }
+    }
+    return [...chats.values()]
   }
 
   private publish(look: Look, dataDir: string): void {

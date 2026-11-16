@@ -49,6 +49,7 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
     sendFault: null as SendFault,
     deliverAtOnce: options.deliverAtOnce ?? false,
     reachable: true,
+    mailboxDown: false,
     inventoryShape: 'current' as 'current' | 'renamed'
   }
   const ok = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ ok: true, result }) })
@@ -98,6 +99,7 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
       return ok(message ? { state: 'completed', receipt: { message } } : { state: 'unknown' })
     }
     if (command === 'orchestration inbox') {
+      if (state.mailboxDown) return refuse('runtime_unavailable')
       return ok({ messages: state.mail.filter((message) => message.to_handle === option(args, '--terminal')) })
     }
     return refuse('unknown_command')

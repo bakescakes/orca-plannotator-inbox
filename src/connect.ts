@@ -184,11 +184,18 @@ export async function connectClaude(deps: ConnectDeps): Promise<ActionResult> {
   const link = await claudeLink(deps)
   if (link.state === 'connected') return { ok: true, message: 'Claude Code is already connected.' }
   if (link.state === 'builtin' || link.state === 'missing' || link.state === 'other') return { ok: link.state !== 'other', message: `Claude Code: ${link.detail}` }
+  // What the earlier Plannotator entry set for its server (which Inbox, which binary) still applies:
+  // the launcher starts the same server and reads the same variables.
+  const env: Record<string, string> = {}
   if (link.state === 'plannotator') {
     const current = await readClaude(deps)
     await deps.store.set(CLAUDE_ORIGINAL, current!.entry as Json)
+    const earlier = isRecord(current!.entry) && isRecord(current!.entry.env) ? current!.entry.env : {}
+    for (const [name, value] of Object.entries(earlier)) {
+      if (typeof value === 'string') env[name] = value
+    }
   }
-  await setClaudeEntry(deps, { type: 'stdio', command: deps.launcher, args: [], env: {} })
+  await setClaudeEntry(deps, { type: 'stdio', command: deps.launcher, args: [], env })
   return { ok: true, message: 'Claude Code is connected. It applies to chats started from now on.' }
 }
 
@@ -317,13 +324,15 @@ export async function codexLink(deps: ConnectDeps): Promise<AgentLink> {
   return link('other', 'Has its own `plannotator-inbox` server, which this plugin leaves alone.')
 }
 
-export function codexBlock(launcher: string): string {
+/** `env` is the earlier entry's own `env = { … }` line, kept as it was written. */
+export function codexBlock(launcher: string, env: string | null = null): string {
   return [
     `[${TABLE}]`,
     MARK,
     `command = ${JSON.stringify(launcher)}`,
     'args = []',
-    `env_vars = ${JSON.stringify(CODEX_ENV_VARS)}`
+    `env_vars = ${JSON.stringify(CODEX_ENV_VARS)}`,
+    ...(env ? [env] : [])
   ].join('\n')
 }
 
@@ -341,8 +350,14 @@ export async function connectCodex(deps: ConnectDeps): Promise<ActionResult> {
   if (link.state === 'connected') return { ok: true, message: 'Codex is already connected.' }
   if (link.state === 'missing' || link.state === 'other') return { ok: link.state === 'missing', message: `Codex: ${link.detail}` }
   const view = await readCodex(deps)
-  if (link.state === 'plannotator' && view) await deps.store.set(CODEX_ORIGINAL, ownText(view))
-  await rewriteCodex(deps, view, codexBlock(deps.launcher))
+  let env: string | null = null
+  if (link.state === 'plannotator' && view) {
+    const original = ownText(view)
+    await deps.store.set(CODEX_ORIGINAL, original)
+    // What that entry set for its server (which Inbox, which binary) still applies to the launcher.
+    env = original.split('\n').find((line) => /^\s*env\s*=\s*\{.*\}\s*(?:#.*)?$/.test(line))?.trim() ?? null
+  }
+  await rewriteCodex(deps, view, codexBlock(deps.launcher, env))
   return { ok: true, message: 'Codex is connected. It applies to chats started from now on.' }
 }
 

@@ -94,6 +94,30 @@ test('chats that wrote before are found from the Inbox’s own thread list', asy
   }
 })
 
+test('a chat that wrote under both spellings of its id gets the replies from both queues', async () => {
+  const t = await setup({ register: [] })
+  const prefixed = `orca_session_id:${SESSION}`
+  t.inbox.state.threads = {
+    projects: [],
+    sections: [{ threads: [{ id: 'thr_1', author: { kind: 'agent', host: 'orca', session: SESSION } }, { id: 'thr_2', author: { kind: 'agent', host: 'orca', session: prefixed } }] }]
+  }
+  t.inbox.state.queue.set(SESSION, [reply('msg_1')])
+  t.inbox.state.queue.set(prefixed, [reply('msg_2', { thread_id: 'thr_2' })])
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.acknowledged.length === 2, 'both acknowledgements')
+    assert.deepEqual(
+      t.inbox.state.acknowledged.map((ack) => `${ack.session} ${ack.id}`).sort(),
+      [`${SESSION} msg_1`, `${prefixed} msg_2`].sort(),
+      'each reply is acknowledged in the queue it came from'
+    )
+    assert.equal(t.orca.sends().length, 2)
+    assert.deepEqual((await t.engine.refresh()).sessions.map((chat) => chat.session), [SESSION], 'still one chat')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
 test('switched off: nothing is polled and agents are not told replies arrive by themselves', async () => {
   const t = await setup({ settings: { enabled: false } })
   t.engine.start()
@@ -176,6 +200,19 @@ test('it stands by while the adapter it replaces is alive for the same Inbox', a
     // The adapter stopped: its status goes stale and the plugin takes over.
     await writeFile(join(stateDir, 'status.json'), JSON.stringify({ version: 1, at: new Date(Date.now() - 10 * 60_000).toISOString() }))
     assert.equal((await t.engine.refresh()).phase, 'ready')
+    // What the adapter had already put in the chat's mailbox is finished, not sent a second time.
+    t.orca.state.mail.push({
+      id: 'mail_theirs',
+      from_handle: 'plannotator-orca-adapter',
+      to_handle: `orca_session_id:${SESSION}`,
+      subject: 'Plannotator: Ship it?',
+      body: 'Plannotator Inbox item',
+      payload: JSON.stringify({ adapter: 'plannotator-orca-adapter', version: 1, replyId: 'msg_1', nativeSessionId: SESSION }),
+      delivered_at: '2026-01-01T00:00:00Z'
+    })
+    t.inbox.state.queue.set(SESSION, [reply('msg_1')])
+    await until(() => t.inbox.state.acknowledged.length === 1, 'the acknowledgement')
+    assert.equal(t.orca.sends().length, 0)
   } finally {
     await t.engine.stop()
   }

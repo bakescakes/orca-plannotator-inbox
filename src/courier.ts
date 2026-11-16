@@ -8,7 +8,7 @@ import { EnvelopeError, buildEnvelope } from './envelope'
 import { InboxRefused, type InboxClient, type InboxCommand } from './inbox'
 import { Ledger, type Delivery } from './ledger'
 import { OrcaContractError, OrcaNotRun, OrcaRefused, type OrcaCli } from './orca-cli'
-import { KeyedQueue, errorText } from './util'
+import { KeyedQueue, errorText, isRecord } from './util'
 
 export type Outcome = 'acknowledged' | 'queued' | 'deferred' | 'blocked' | 'rejected'
 export type Route = { session: string; raw: string }
@@ -19,17 +19,30 @@ const RECONCILE_AFTER_MS = 30_000
 const UNCONFIRMED_AFTER_MS = 120_000
 const UNCONFIRMED_AFTER_FAILURES = 3
 
+/** The reply a mail's payload says it carries; this plugin and the adapter it replaces both name it `replyId`. */
+function replyIdOf(payload: unknown): string | null {
+  try {
+    const parsed: unknown = typeof payload === 'string' ? JSON.parse(payload) : payload
+    return isRecord(parsed) && typeof parsed.replyId === 'string' ? parsed.replyId : null
+  } catch {
+    return null
+  }
+}
+
 export class Courier {
   private readonly queue = new KeyedQueue()
   private readonly confirmFailures = new Map<string, number>()
   private readonly orca: OrcaCli
   private readonly ledger: Ledger
   private readonly now: () => number
+  private readonly earlier: () => string | null
 
-  constructor(orca: OrcaCli, ledger: Ledger, now: () => number = Date.now) {
+  /** `earlier` names the sender of an adapter that delivered for this Inbox before and has stopped, if any. */
+  constructor(orca: OrcaCli, ledger: Ledger, now: () => number = Date.now, earlier: () => string | null = () => null) {
     this.orca = orca
     this.ledger = ledger
     this.now = now
+    this.earlier = earlier
   }
 
   /** One session's deliveries run one at a time, so retries and restarts never overlap. */
@@ -50,6 +63,15 @@ export class Courier {
     const key = Ledger.key(inbox.key, command.id, route.session)
     let row = this.ledger.get(key)
     if (row === null) {
+      // The adapter that delivered here before may have put this very reply in the chat's mailbox and
+      // stopped before it told the Inbox. Its mail is then the delivery, and nothing is sent again.
+      // Read before anything is recorded: if Orca cannot say, this reply is looked at afresh next time.
+      const earlier = this.earlier()
+      const theirs = earlier
+        ? (await this.orca.mailbox(`orca_session_id:${route.session}`)).find(
+            (mail) => mail.from_handle === earlier && replyIdOf(mail.payload) === command.id
+          )
+        : undefined
       try {
         const envelope = buildEnvelope(inbox.key, route.session, command)
         row = await this.ledger.create(
@@ -67,6 +89,7 @@ export class Courier {
         await this.ledger.reject(key, { session: route.session, replyId: command.id }, error.message)
         return 'rejected'
       }
+      if (theirs) row = await this.ledger.update(key, { state: 'accepted', message: theirs.id, mailbox: theirs.to_handle })
     }
     if (row.state === 'rejected') return 'rejected'
     if (row.state === 'acknowledged') {

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   claudeLink,
+  codexBlock,
   codexLink,
   connectAgents,
   connectClaude,
@@ -70,12 +71,13 @@ test('codex: connect adds one table and disconnect removes exactly it', async ()
 
 test('codex: Plannotator’s plain entry is replaced and put back', async () => {
   const t = await setup()
-  const stock = `[mcp_servers.plannotator-inbox]\ncommand = "/Users/someone/.local/bin/plannotator"\nargs = ["inbox", "mcp"]`
+  const stock = `[mcp_servers.plannotator-inbox]\ncommand = "/Users/someone/.local/bin/plannotator"\nargs = ["inbox", "mcp"]\nenv = { PLANNOTATOR_DATA_DIR = "/data/inbox" }`
   await writeFile(t.codex, `${CODEX_BASE}\n${stock}\n\n[projects."/x"]\ntrust_level = "trusted"\n`)
   assert.equal((await codexLink(t.deps)).state, 'plannotator')
   await connectCodex(t.deps)
   const connected = await readFile(t.codex, 'utf8')
   assert.ok(!connected.includes('/.local/bin/plannotator'))
+  assert.ok(connected.includes(`${codexBlock(LAUNCHER)}\nenv = { PLANNOTATOR_DATA_DIR = "/data/inbox" }\n`), 'the launcher opens the Inbox that entry opened')
   assert.ok(connected.includes('[projects."/x"]\ntrust_level = "trusted"'))
   assert.equal((await codexLink(t.deps)).state, 'connected')
   await disconnectCodex(t.deps)
@@ -127,11 +129,16 @@ test('claude: the entry is written beside everything else and removed again', as
 
 test('claude: Plannotator’s plain entry is replaced and put back; other entries are left alone', async () => {
   const t = await setup()
-  const stock = { type: 'stdio', command: '/Users/someone/.local/bin/plannotator', args: ['inbox', 'mcp'] }
+  const stock = { type: 'stdio', command: '/Users/someone/.local/bin/plannotator', args: ['inbox', 'mcp'], env: { PLANNOTATOR_DATA_DIR: '/data/inbox' } }
   await writeFile(t.claude, JSON.stringify({ mcpServers: { 'plannotator-inbox': stock } }))
   assert.equal((await claudeLink(t.deps)).state, 'plannotator')
   await connectClaude(t.deps)
   assert.equal((await claudeLink(t.deps)).state, 'connected')
+  assert.deepEqual(
+    JSON.parse(await readFile(t.claude, 'utf8')).mcpServers['plannotator-inbox'],
+    { type: 'stdio', command: LAUNCHER, args: [], env: { PLANNOTATOR_DATA_DIR: '/data/inbox' } },
+    'the launcher opens the Inbox that entry opened'
+  )
   await disconnectClaude(t.deps)
   assert.deepEqual(JSON.parse(await readFile(t.claude, 'utf8')).mcpServers['plannotator-inbox'], stock)
 
