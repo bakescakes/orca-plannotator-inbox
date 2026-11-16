@@ -100,9 +100,11 @@ guessing: replies stay saved in the Inbox, the panel says what is wrong, and age
 told that replies arrive by themselves.
 
 CI runs every day against the newest released Orca and Plannotator (`.github/workflows/ci.yml`),
-so a breaking update shows up as a failed run rather than as a missing reply. It has two jobs:
+so a breaking update shows up as a failed run rather than as a missing reply. It has three jobs:
 
-- an end-to-end run with the real, unmodified `plannotator` binary, and
+- an end-to-end run with the real, unmodified `plannotator` binary, through the launcher as an
+  agent's settings run it,
+- the same tests and end-to-end run on Windows, and
 - the plugin **inside a real Orca, across an update**: the previous Orca and Plannotator releases
   start in a throwaway profile, the plugin is installed and delivers a reply to a real native
   chat; then the newest releases take over the same profile and the same Inbox data, nothing is
@@ -132,7 +134,8 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
 - At most 64 chats are listened for at once.
 - Uninstalling the plugin leaves the launcher folder and the agent entries. Press **Disconnect**
   first, then delete `~/.orca-plannotator-inbox`.
-- Windows is untested.
+- On Windows, CI runs the tests and the end-to-end run with the real Plannotator through the
+  launcher. The plugin has not been run inside Orca on Windows, nor with a real agent there.
 
 ## Development
 
