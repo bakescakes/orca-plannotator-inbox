@@ -108,3 +108,53 @@ jobs:
           npm ci
           "$ORCA" plugin types .
           "$ORCA" plugin test .
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Newest Orca
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'orca'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download --repo stablyai/orca --pattern 'orca-windows-setup.exe' --dir $dir
+          Start-Process -FilePath (Join-Path $dir 'orca-windows-setup.exe') -ArgumentList '/S' -Wait
+          $cli = Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter 'orca.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cli) { throw 'the Orca CLI was not found after installing' }
+          "ORCA=$($cli.FullName)" >> $env:GITHUB_ENV
+
+      - name: Newest Plannotator
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'plannotator'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download --repo backnotprop/plannotator --pattern 'plannotator-win32-x64.exe' --pattern 'plannotator-win32-x64.exe.sha256' --dir $dir
+          $want = ((Get-Content (Join-Path $dir 'plannotator-win32-x64.exe.sha256')) -split '\s+')[0].ToLower()
+          $have = (Get-FileHash (Join-Path $dir 'plannotator-win32-x64.exe') -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $have) { throw 'the Plannotator download does not match its checksum' }
+          "PLANNOTATOR_E2E_BIN=$(Join-Path $dir 'plannotator-win32-x64.exe')" >> $env:GITHUB_ENV
+
+      - name: Types, type-check, manifest
+        run: |
+          npm ci
+          & $env:ORCA plugin types .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:ORCA plugin validate . --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Tests, including the end-to-end run with the real Plannotator
+        run: |
+          & $env:ORCA plugin test .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
