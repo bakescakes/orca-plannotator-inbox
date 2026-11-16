@@ -102,7 +102,7 @@ const tools = [
 for await (const line of createInterface({ input: process.stdin })) {
   const message = JSON.parse(line)
   if (message.id === undefined) continue
-  let result = { echo: message.params ?? null, argv: process.argv.slice(2), electron: process.env.ELECTRON_RUN_AS_NODE ?? null }
+  let result = { echo: message.params ?? null, argv: process.argv.slice(2), electron: process.env.ELECTRON_RUN_AS_NODE ?? null, dataDir: process.env.PLANNOTATOR_DATA_DIR ?? null }
   if (message.method === 'initialize') result = { instructions: 'stock instructions', serverInfo: { name: 'plannotator-inbox' } }
   if (message.method === 'tools/list') result = { tools }
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n')
@@ -190,6 +190,26 @@ test('in an Orca chat, a real run fills the identity from the server’s own too
   assert.equal(registration.session, SESSION)
   assert.equal(registration.projectPath, '/work/project', 'the chat\u2019s own folder, not the message\u2019s')
   assert.equal(registration.dataDir, box.data)
+})
+
+test('an Orca chat whose environment names no Inbox uses the one the plugin delivers for', async () => {
+  const box = sandbox()
+  // The plugin's "Plannotator data folder" setting points away from the default, and the worker says so.
+  writeFileSync(join(box.shared, 'state.json'), JSON.stringify({ v: 1, at: Date.now(), dataDir: box.data, delivering: true }))
+  const home = { HOME: box.root, USERPROFILE: box.root }
+  const lines = [{ jsonrpc: '2.0', id: 0, method: 'initialize', params: {} }, call('send_message', { body: 'Hello' })]
+  const chat = await converse({ ...CHAT, ...home, PLANNOTATOR_BIN: box.bin, ORCA_PLANNOTATOR_HOME: box.shared }, lines)
+  assert.equal(chat.answers[1].result.dataDir, box.data, 'Plannotator opens the Inbox the worker polls')
+  assert.equal(chat.answers[1].result.echo.arguments.agent_host, 'orca', 'and the chat is the author')
+  assert.equal(JSON.parse(readFileSync(join(box.shared, 'sessions', `${SESSION}.json`), 'utf8')).dataDir, box.data)
+
+  // A folder the agent's own environment names is never replaced, and outside an Orca chat nothing is added.
+  const elsewhere = join(box.root, 'elsewhere')
+  const named = await converse({ ...CHAT, ...home, PLANNOTATOR_BIN: box.bin, ORCA_PLANNOTATOR_HOME: box.shared, PLANNOTATOR_DATA_DIR: elsewhere }, lines)
+  assert.equal(named.answers[1].result.dataDir, elsewhere)
+  assert.equal(named.answers[1].result.echo.arguments.agent_host, undefined)
+  const plain = await converse({ ...home, PLANNOTATOR_BIN: box.bin, ORCA_PLANNOTATOR_HOME: box.shared }, lines)
+  assert.equal(plain.answers[1].result.dataDir, null)
 })
 
 test('outside an Orca chat it is Plannotator’s server, byte for byte', async () => {

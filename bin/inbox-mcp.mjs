@@ -111,21 +111,27 @@ export function findPlannotator(env, home = homedir()) {
   return null
 }
 
-/** True while the plugin's worker says it is delivering replies for this Inbox. */
-export function workerDelivers(shared, inboxDir, now = Date.now()) {
+/** The Inbox folder the plugin's worker says it is delivering replies for, or null while it is not. */
+export function workerInbox(shared, now = Date.now()) {
   try {
     const state = JSON.parse(readFileSync(join(shared, 'state.json'), 'utf8'))
-    return (
+    const delivering =
       isRecord(state) &&
       state.delivering === true &&
       typeof state.at === 'number' &&
       Math.abs(now - state.at) <= HEARTBEAT_FRESH_MS &&
       typeof state.dataDir === 'string' &&
-      real(state.dataDir) === real(inboxDir)
-    )
+      state.dataDir !== ''
+    return delivering ? state.dataDir : null
   } catch {
-    return false
+    return null
   }
+}
+
+/** True while the plugin's worker says it is delivering replies for this Inbox. */
+export function workerDelivers(shared, inboxDir, now = Date.now()) {
+  const served = workerInbox(shared, now)
+  return served !== null && real(served) === real(inboxDir)
 }
 
 /** Tells the worker this chat uses the Inbox, so it listens for its replies before the first one. */
@@ -275,6 +281,15 @@ export function main(env = process.env) {
   const childEnv = { ...env }
   // The launcher runs this file with Orca's own binary in Node mode; nothing started from here may inherit that.
   delete childEnv.ELECTRON_RUN_AS_NODE
+  const session = nativeSession(env)
+  const shared = sharedDir(env)
+  if (session && (env.PLANNOTATOR_DATA_DIR ?? '').trim() === '') {
+    // The plugin's "Plannotator data folder" setting can move the Inbox, and an agent's settings do
+    // not know that. An Orca chat whose own environment names no folder uses the one the worker
+    // delivers for, so its messages and their replies meet in the same Inbox.
+    const served = workerInbox(shared)
+    if (served !== null && real(served) !== real(dataDir(env))) childEnv.PLANNOTATOR_DATA_DIR = served
+  }
   const failed = (error) => {
     process.stderr.write(`Could not start Plannotator: ${error.message}\n`)
     process.exit(1)
@@ -292,7 +307,6 @@ export function main(env = process.env) {
   child.stdin.on('error', () => undefined)
   process.stdout.on('error', () => undefined)
 
-  const session = nativeSession(env)
   if (!session) {
     // Not an Orca chat: exactly Plannotator's own server, byte for byte.
     pump(process.stdin, child.stdin)
@@ -300,8 +314,7 @@ export function main(env = process.env) {
     return
   }
 
-  const shared = sharedDir(env)
-  const inboxDir = dataDir(env)
+  const inboxDir = dataDir(childEnv)
   const schemas = new Map()
   const listRequests = new Set()
   const initRequests = new Set()

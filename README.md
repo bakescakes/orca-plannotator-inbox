@@ -121,7 +121,7 @@ Plannotator 0.28.66.
 | --- | --- | --- |
 | Deliver replies to Orca chats | on | Off: replies wait in the Inbox. |
 | Notify when a reply needs you | on | A desktop notification when a reply is blocked. |
-| Plannotator data folder | empty | Empty follows Plannotator: `PLANNOTATOR_DATA_DIR`, then `~/.plannotator`. |
+| Plannotator data folder | empty | Empty follows Plannotator: `PLANNOTATOR_DATA_DIR`, then `~/.plannotator`. When set, Orca chats send to that Inbox too, unless the agent's own environment names a folder. |
 | Orca CLI path | empty | Empty uses the CLI inside this Orca. |
 
 Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agents**.
