@@ -420,10 +420,13 @@ test('a Stop holds older replies; a person’s new reply goes through and resume
   assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_new', threadId: 'thr_launch' }), true)
   const catalog = await t.life.handle('catalog')
   assert.equal((catalog.sessions as Record<string, { stopped: boolean }>)[chat]!.stopped, false)
-  // A second Stop after it holds even that reply again.
+  // The chat runs again, so the reply that was held goes along.
+  assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_old', threadId: 'thr_launch' }), true)
+  // A second Stop after it holds both again.
   t.state.clock = stoppedAt + 5000
   assert.equal((await t.life.handle('stop', t.action(chat))).ok, true)
   assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_new', threadId: 'thr_launch' }), false)
+  assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_old', threadId: 'thr_launch' }), false)
 })
 
 test('Resume clears a Stop, starts nothing, and reports delivery truthfully', async () => {
@@ -431,11 +434,16 @@ test('Resume clears a Stop, starts nothing, and reports delivery truthfully', as
   const { session } = await t.life.handle('start', START)
   const chat = String(session)
   await t.life.handle('stop', t.action(chat))
+  // A reply the person wrote before the Stop is held while the chat is stopped.
+  t.inbox.state.details.set('thr_launch', launchThread('thr_launch', '/work/project', LAUNCH, [personMessage('msg_held', 'thr_launch', { created_at: new Date(t.state.clock - 1000).toISOString() })]))
+  assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_held', threadId: 'thr_launch' }), false)
   t.state.clock += 1000
   const resumed = await t.life.handle('resume', t.action(chat))
   assert.deepEqual(resumed, { ok: true, session: chat, retained: true, initialDelivery: 'courier-pending' })
   assert.equal(t.orca.state.created, 1)
   assert.equal(((await t.life.handle('catalog')).sessions as Record<string, { stopped: boolean }>)[chat]!.stopped, false)
+  // The person pressed Resume: the held reply is delivered, as the Inbox now shows the chat running.
+  assert.equal(await t.life.deliveryAllowed(chat, { id: 'msg_held', threadId: 'thr_launch' }), true)
   assert.deepEqual(await t.life.handle('resume', t.action(chat, { deliver: true })), { ok: true, session: chat, state: 'queued' })
   t.state.verdict = 'acknowledged'
   assert.deepEqual(await t.life.handle('resume', t.action(chat, { deliver: true })), { ok: true, session: chat, state: 'acknowledged' })

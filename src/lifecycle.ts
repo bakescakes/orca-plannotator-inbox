@@ -958,9 +958,10 @@ export class Lifecycle {
 
   /**
    * Whether a reply may be delivered to this chat now. A chat no launch owns is not this
-   * module's to judge (true). An owned chat that was stopped receives only a person's reply
-   * written after the Stop, which also resumes it; older replies are held in the Inbox. A chat
-   * two launches name, or whose launch was removed, receives nothing. Never throws.
+   * module's to judge (true). An owned chat that is stopped receives only a person's reply
+   * written after the Stop, which also resumes it; older replies are held in the Inbox until it
+   * runs again (that newer reply, or Resume), and then go along. A chat two launches name, or
+   * whose launch was removed, receives nothing. Never throws.
    */
   async deliveryAllowed(session: string, reply: { id: string; threadId: string }): Promise<boolean> {
     try {
@@ -974,6 +975,9 @@ export class Lifecycle {
       const stoppedAt = row.result.stoppedAt
       if (stoppedAt === undefined) return true
       if (typeof stoppedAt !== 'number' || !Number.isFinite(stoppedAt)) return false
+      // Resumed since that Stop, as `catalog` reads it: nothing is held any more.
+      const resumedAt = row.result.resumeRequestedAt
+      if (typeof resumedAt === 'number' && Number.isFinite(resumedAt) && resumedAt >= stoppedAt) return true
       if (!ID.test(reply.id) || !ID.test(reply.threadId)) return false
       const thread = await this.inbox().thread(reply.threadId)
       const messages = Array.isArray(thread.messages) ? thread.messages : []
