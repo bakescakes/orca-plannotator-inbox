@@ -1,0 +1,19 @@
+{
+  "name": "orca-plannotator-inbox",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Development tooling only. The plugin itself has no dependencies and no build step.",
+  "scripts": {
+    "types": "orca plugin types .",
+    "typecheck": "node node_modules/typescript/bin/tsc -p .",
+    "validate": "orca plugin validate . --json",
+    "test": "orca plugin test .",
+    "check": "orca plugin check . --json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "manifestVersion": 2,
+  "id": "plannotator-inbox",
+  "name": "Plannotator Inbox",
+  "version": "0.1.0",
+  "description": "Brings your Plannotator Inbox replies back into the Orca chat that asked. Works with the stock Plannotator Inbox; nothing is patched.",
+  "author": {
+    "name": "bakescakes",
+    "url": "https://github.com/bakescakes"
+  },
+  "repository": "https://github.com/bakescakes/orca-plannotator-inbox",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "inbox",
+        "title": "Plannotator Inbox",
+        "icon": "bell",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      {
+        "id": "inbox.open",
+        "title": "Plannotator Inbox: Open Inbox"
+      },
+      {
+        "id": "inbox.status",
+        "title": "Plannotator Inbox: Show Status"
+      },
+      {
+        "id": "agents.connect",
+        "title": "Plannotator Inbox: Connect Agents"
+      },
+      {
+        "id": "agents.disconnect",
+        "title": "Plannotator Inbox: Disconnect Agents"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "inbox",
+        "text": "Inbox",
+        "icon": "bell",
+        "tooltip": "Plannotator Inbox. Press to open it.",
+        "command": "inbox.open"
+      }
+    ],
+    "settings": [
+      {
+        "key": "enabled",
+        "title": "Deliver replies to Orca chats",
+        "description": "When off, replies wait in the Inbox and agents read them the next time they look.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "notifyBlocked",
+        "title": "Notify when a reply needs you",
+        "description": "A desktop notification when Orca cannot confirm a reply was delivered.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "dataDir",
+        "title": "Plannotator data folder",
+        "description": "Leave empty to use Plannotator's own default (PLANNOTATOR_DATA_DIR, then ~/.plannotator).",
+        "type": "string",
+        "default": "",
+        "placeholder": "~/.plannotator"
+      },
+      {
+        "key": "orcaCliPath",
+        "title": "Orca CLI path",
+        "description": "Leave empty to use the CLI inside this Orca. Set it only if delivery reports that the CLI was not found.",
+        "type": "string",
+        "default": ""
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "notifications:show"
+    }
+  ]
+}
