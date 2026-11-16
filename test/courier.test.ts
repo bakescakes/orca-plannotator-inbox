@@ -98,7 +98,16 @@ test('a reply the earlier adapter already put in the chat’s mailbox is not sen
     payload: JSON.stringify({ adapter: 'plannotator-orca-adapter', version: 1, replyId: 'msg_1', nativeSessionId: SESSION }),
     delivered_at: null
   })
+  // The record starts as accepted in its first and only write: a stop right after it leaves nothing to send.
+  const writes: unknown[] = []
+  const set = t.store.set
+  t.store.set = async (name, value) => {
+    if (!String(name).startsWith('envelope.')) writes.push(structuredClone(value))
+    await set(name, value)
+  }
   assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')
+  t.store.set = set
+  assert.deepEqual(writes.map((saved) => (saved as Record<string, { state: string; message: string }>)[t.key('msg_1')]?.state), ['accepted'])
   assert.equal(t.ledger.get(t.key('msg_1'))?.message, 'mail_theirs')
   t.orca.deliverAll()
   assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'acknowledged')

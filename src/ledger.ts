@@ -112,11 +112,16 @@ export class Ledger {
     return counts
   }
 
-  /** Records a new delivery and its frozen envelope; returns the existing row when there is one. */
+  /**
+   * Records a new delivery and its frozen envelope; returns the existing row when there is one.
+   * `already` is a mail that is known to carry this reply: the row then starts as accepted, in the
+   * same write, so no restart can find it as something still to send.
+   */
   async create(
     key: string,
     fields: { session: string; replyId: string; threadId: string | null; subject: string | null },
-    envelope: Envelope
+    envelope: Envelope,
+    already: { message: string; mailbox: string } | null = null
   ): Promise<Delivery> {
     this.assertLoaded()
     const existing = this.rows.get(key)
@@ -125,13 +130,13 @@ export class Ledger {
     await this.store.set(this.envelopeKey(key), envelope)
     const row: Delivery = {
       request: randomUUID(),
-      state: 'prepared',
+      state: already ? 'accepted' : 'prepared',
       session: fields.session,
       replyId: fields.replyId,
       threadId: fields.threadId,
       subject: fields.subject ? fields.subject.slice(0, 120) : null,
-      message: null,
-      mailbox: null,
+      message: already?.message ?? null,
+      mailbox: already?.mailbox ?? null,
       error: null,
       updated: this.now()
     }

@@ -78,14 +78,14 @@ export class Courier {
             threadId: command.thread_id,
             subject: typeof command.subject === 'string' ? command.subject : null
           },
-          envelope
+          envelope,
+          theirs ? { message: theirs.id, mailbox: theirs.to_handle } : null
         )
       } catch (error) {
         if (!(error instanceof EnvelopeError)) throw error
         await this.ledger.reject(key, { session: route.session, replyId: command.id }, error.message)
         return 'rejected'
       }
-      if (theirs) row = await this.ledger.update(key, { state: 'accepted', message: theirs.id, mailbox: theirs.to_handle })
     }
     if (row.state === 'rejected') return 'rejected'
     if (row.state === 'acknowledged') {
