@@ -55,10 +55,15 @@ export type EngineStatus = {
   projects: string[]
 }
 
-/** True when `path` is `folder` or inside it. Both must be absolute, normalised real paths. */
-export function isInside(folder: string, path: string): boolean {
-  if (path === folder) return true
-  return path.startsWith(folder.endsWith(sep) ? folder : `${folder}${sep}`)
+/**
+ * True when `path` is `folder` or inside it. Both must be absolute, normalised real paths. On
+ * Windows either slash separates folders, so both are read the same way.
+ */
+export function isInside(folder: string, path: string, separator: string = sep): boolean {
+  const plain = (value: string): string => (separator === '\\' ? value.replaceAll('/', '\\') : value)
+  const [outer, inner] = [plain(folder), plain(path)]
+  if (inner === outer) return true
+  return inner.startsWith(outer.endsWith(separator) ? outer : `${outer}${separator}`)
 }
 
 /**

@@ -148,6 +148,11 @@ test('a folder is inside another only along whole path segments', () => {
   assert.equal(isInside('/a/b', '/a'), false)
   assert.equal(isInside('/a/b/', '/a/b/c'), true)
   assert.equal(isInside('/', '/anything'), true)
+  // Windows: either slash separates folders.
+  assert.equal(isInside('C:\\a\\b', 'C:\\a\\b\\c', '\\'), true)
+  assert.equal(isInside('C:\\a\\b', 'C:/a/b/c', '\\'), true)
+  assert.equal(isInside('C:/a/b', 'C:\\a\\bc', '\\'), false)
+  assert.equal(isInside('C:\\a\\b', 'C:\\a', '\\'), false)
 })
 
 test('chosen project folders are resolved to real absolute paths', async () => {

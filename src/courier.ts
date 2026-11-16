@@ -9,6 +9,7 @@
 // reply that fails is never sent and never acknowledged: it is recorded as rejected, with a reason.
 import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
+import { isAbsolute, resolve } from 'node:path'
 import { EnvelopeError, buildEnvelope } from './envelope'
 import { InboxRefused, InboxUnavailable, type InboxClient, type InboxCommand, type ThreadSource } from './inbox'
 import { Ledger, type Delivery } from './ledger'
@@ -231,7 +232,7 @@ export class Courier {
       throw error
     }
     const roots = route.roots && route.roots.length > 0 ? await Promise.all(route.roots.map(realOrSelf)) : undefined
-    return judgeSource(source, command.id, route.session, { boundary, roots, threadRoot: await realOrSelf(source.root) })
+    return judgeSource(source, command.id, route.session, { boundary, roots, threadRoot: await realOrSelf(isAbsolute(source.root) ? resolve(source.root) : source.root) })
   }
 
   private async reconcile(key: string, row: Delivery, envelope: NonNullable<Awaited<ReturnType<Ledger['envelope']>>>): Promise<Delivery> {

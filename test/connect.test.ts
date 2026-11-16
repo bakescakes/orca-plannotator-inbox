@@ -410,7 +410,7 @@ test('opencode: missing without a settings file, and nothing is created (stock P
   const t = await setup({ find: (name) => (name === 'opencode2' ? '/bin/opencode2' : null) })
   const link = await openCodeLink(t.deps)
   assert.equal(link.state, 'missing')
-  assert.match(link.detail, /has no settings file\. Create .*\.config\/opencode\/opencode\.json/)
+  assert.match(link.detail, /has no settings file\. Create .*\.config[\\/]opencode[\\/]opencode\.json/)
   assert.equal((await connectOpenCode(t.deps)).ok, true)
   assert.equal(existsSync(join(t.home, '.config')), false)
 })

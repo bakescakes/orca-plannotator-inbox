@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { chmod, lstat, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { BRIDGE_HEARTBEAT_MS, BridgeFileError, bridgeConfigFile, bridgeHealth, ensureBridgeDir, loadBridgeKey, startBridge, type Bridge, type BridgeConfig } from '../src/bridge'
 import type { EngineStatus } from '../src/engine'
@@ -14,6 +14,8 @@ import { fakeInbox, fakeLifecycleOrca, fakeNative, launchThread, memoryStore, te
 
 const KEY = Buffer.alloc(32, 0xab)
 const BEARER = `Bearer ${KEY.toString('hex')}`
+// Windows has no owner-only file modes; the bridge skips those checks there.
+const POSIX = process.platform !== 'win32'
 const LAUNCH = { id: 'launch_1', agent: 'codex', folder: '/work/project' }
 const START = { launchId: 'launch_1', threadId: 'thr_launch', messageId: 'thr_launch', provider: 'codex', folder: '/work/project', ownerAction: true }
 
@@ -101,7 +103,7 @@ const plannotator = {
     body.version === 1 && ['ready', 'waiting', 'error'].includes(String(body.level)) && typeof body.fresh === 'boolean' && ['connected', 'conversations', 'delivered', 'waiting', 'blocked'].every((name) => Number.isSafeInteger(body[name])),
   catalog: (body: Record<string, unknown>) =>
     body.ok === true && Array.isArray(body.workspaces) && Array.isArray(body.providers) && typeof body.sessions === 'object' && body.sessions !== null && !Array.isArray(body.sessions) && Array.isArray(body.projects) && (body.projects as unknown[]).length <= 1000 &&
-    (body.projects as { root: unknown; name: unknown }[]).every((project) => typeof project.root === 'string' && project.root.startsWith('/') && project.root.length <= 4096 && typeof project.name === 'string' && project.name.length >= 1 && project.name.length <= 200),
+    (body.projects as { root: unknown; name: unknown }[]).every((project) => typeof project.root === 'string' && isAbsolute(project.root) && project.root.length <= 4096 && typeof project.name === 'string' && project.name.length >= 1 && project.name.length <= 200),
   started: (body: Record<string, unknown>) => body.ok === true && typeof body.session === 'string' && body.ref === body.session,
   owned: (body: Record<string, unknown>, session: string) => {
     const launches = Array.isArray(body.launches) ? (body.launches as Record<string, unknown>[]) : []
@@ -113,14 +115,16 @@ const plannotator = {
 
 test('the bridge files are owner-only and in the fixed shapes', async () => {
   const t = await setup({ config: { upgradeCommand: ['/opt/update'] } })
-  assert.equal((await lstat(t.dir)).mode & 0o777, 0o700)
-  for (const name of ['link-key', 'navigation.json', 'config.json']) assert.equal((await lstat(join(t.dir, name))).mode & 0o777, 0o600, name)
+  if (POSIX) {
+    assert.equal((await lstat(t.dir)).mode & 0o777, 0o700)
+    for (const name of ['link-key', 'navigation.json', 'config.json']) assert.equal((await lstat(join(t.dir, name))).mode & 0o777, 0o600, name)
+  }
   assert.deepEqual(await readFile(join(t.dir, 'link-key')), KEY)
   assert.deepEqual(JSON.parse(await readFile(join(t.dir, 'navigation.json'), 'utf8')), { version: 1, port: t.bridge.port, pid: process.pid, at: t.state.clock })
   assert.deepEqual(JSON.parse(await readFile(join(t.dir, 'config.json'), 'utf8')), {
     v: 1,
-    canonicalDataDir: '/data',
-    dataDirs: ['/data'],
+    canonicalDataDir: resolve('/data'),
+    dataDirs: [resolve('/data')],
     stateDir: t.dir,
     mcpCommand: [join(t.shared, 'inbox-mcp')],
     upgradeCommand: ['/opt/update'],
@@ -128,11 +132,11 @@ test('the bridge files are owner-only and in the fixed shapes', async () => {
     upgradeBackoffMs: 21_600_000
   })
   assert.deepEqual(bridgeConfigFile('/s', { dataDir: '/d/../e', launcher: '/l', upgradeCommand: null, projects: [] }).upgradeCommand, [])
-  assert.equal(bridgeConfigFile('/s', { dataDir: '/d/../e', launcher: '/l', upgradeCommand: null, projects: [] }).canonicalDataDir, '/e')
+  assert.equal(bridgeConfigFile('/s', { dataDir: '/d/../e', launcher: '/l', upgradeCommand: null, projects: [] }).canonicalDataDir, resolve('/e'))
 
   await t.bridge.configure({ dataDir: '/other', launcher: join(t.shared, 'inbox-mcp'), upgradeCommand: null, projects: [] })
   const changed = JSON.parse(await readFile(join(t.dir, 'config.json'), 'utf8'))
-  assert.deepEqual([changed.canonicalDataDir, changed.upgradeCommand], ['/other', []])
+  assert.deepEqual([changed.canonicalDataDir, changed.upgradeCommand], [resolve('/other'), []])
   await assert.rejects(t.bridge.configure({ dataDir: 'relative', launcher: '/l', upgradeCommand: null, projects: [] }), BridgeFileError)
 
   await t.bridge.stop()
@@ -145,10 +149,12 @@ test('a bridge key that is not exactly 32 private bytes of this user is refused,
   const created = await loadBridgeKey(dir)
   assert.equal(created.length, 32)
   assert.deepEqual(await loadBridgeKey(dir), created, 'created once')
-  await chmod(join(dir, 'link-key'), 0o644)
-  await assert.rejects(loadBridgeKey(dir), /read by others/)
-  await chmod(join(dir, 'link-key'), 0o600)
-  await assert.rejects(loadBridgeKey(dir, { uid: (process.getuid?.() ?? 0) + 1 }), /someone else/)
+  if (POSIX) {
+    await chmod(join(dir, 'link-key'), 0o644)
+    await assert.rejects(loadBridgeKey(dir), /read by others/)
+    await chmod(join(dir, 'link-key'), 0o600)
+    await assert.rejects(loadBridgeKey(dir, { uid: (process.getuid?.() ?? 0) + 1 }), /someone else/)
+  }
   await writeFile(join(dir, 'link-key'), Buffer.alloc(31))
   await assert.rejects(loadBridgeKey(dir), /not a bridge key/)
   assert.equal((await readFile(join(dir, 'link-key'))).length, 31)
