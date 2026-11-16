@@ -172,7 +172,7 @@ test('a bridge key that is not exactly 32 private bytes of this user is refused,
   await mkdir(join(loose, 'bridge'), { mode: 0o755 })
   await chmod(join(loose, 'bridge'), 0o755)
   await ensureBridgeDir(loose)
-  assert.equal((await lstat(join(loose, 'bridge'))).mode & 0o777, 0o700)
+  if (POSIX) assert.equal((await lstat(join(loose, 'bridge'))).mode & 0o777, 0o700)
 })
 
 test('only this computer’s own address and the bearer key are answered', async () => {

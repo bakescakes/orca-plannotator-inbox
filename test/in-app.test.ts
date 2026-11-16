@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, cp, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -214,7 +214,9 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       return `Orca ${version}, Plannotator ${health.version} (link opened ${how})`
     } catch (error) {
       const logs = await run(cli, ['plugin', 'logs', 'local.plannotator-inbox', '--json'])
-      process.stderr.write(`second Orca said:\n${serveLog.slice(-2000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\n`)
+      const seen = await readdir(chatEnvDir).catch(() => [] as string[])
+      const agentSays = await run(join(bin, 'claude'), ['--version'])
+      process.stderr.write(`second Orca said:\n${serveLog.slice(-12_000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\nchats whose agent started: ${JSON.stringify(seen)}\nthe agent program (${await realpath(CLAUDE!)}) says: ${agentSays.trim() || 'nothing'}\n`)
       throw error
     } finally {
       agent?.stdin?.end()
