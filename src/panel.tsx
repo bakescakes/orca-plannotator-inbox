@@ -20,7 +20,7 @@ import {
   Text,
   type PanelContext
 } from 'orca'
-import type { ActionResult, AgentLink, Phase, Status } from './protocol'
+import type { ActionResult, AgentLink, BuildInfo, Phase, ServerMode, Status } from './protocol'
 
 type Tone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger'
 
@@ -31,7 +31,6 @@ const busy = atom(false)
 const PHASE_TONE: Record<Phase, Tone> = {
   ready: 'success',
   off: 'neutral',
-  standby: 'neutral',
   'inbox-stopped': 'neutral',
   'no-plannotator': 'warning',
   'no-orca': 'warning',
@@ -116,6 +115,45 @@ function Agents({ agents }: { agents: readonly AgentLink[] }) {
   )
 }
 
+/** The Orca build of Plannotator: which one is in use, and anything about it that needs a person. */
+function Build({ build, server }: { build: BuildInfo; server: ServerMode | undefined }) {
+  const inUse = build.mode === 'orca-build'
+  const newer = build.latestKnown && (build.latestKnown.version !== build.version || build.latestKnown.build !== build.build) ? build.latestKnown : null
+  return (
+    <Card
+      title="Plannotator for Orca"
+      description="Plannotator with Orca support added: the Inbox can start, stop and resume Orca chats and shows each agent's icon. This plugin downloads it and keeps it up to date."
+    >
+      <Stack gap="sm">
+        <Row justify="between" align="center">
+          <Text weight="medium">{inUse ? `Plannotator ${build.version} (${build.build})` : 'Standard Plannotator'}</Text>
+          <Badge tone={inUse ? 'success' : 'neutral'}>{build.updating ? 'Updating' : inUse ? 'Installed' : 'Not installed'}</Badge>
+        </Row>
+        {build.updating ? <Text muted size="xs">{build.detail ?? 'Downloading and checking the Orca build…'}</Text> : null}
+        {!build.updating && newer ? (
+          <Text muted size="xs">
+            Plannotator {newer.version} ({newer.build}) is available. It installs by itself, or from the Inbox's own Update button.
+          </Text>
+        ) : null}
+        {!build.updating && build.lastError ? <Callout tone="warning">{build.lastError}</Callout> : null}
+        {inUse && server === 'stock' ? (
+          <Callout tone="neutral">The Inbox that is running now is standard Plannotator. Restart it to use the Orca build; nothing saved is lost.</Callout>
+        ) : null}
+        <Row gap="xs" wrap>
+          {inUse && server === 'stock' ? (
+            <Button icon="refresh" disabled={read(busy)} onPress={() => act(() => plugin.request('inbox.restartOnBuild'))}>
+              Restart Inbox
+            </Button>
+          ) : null}
+          <Button variant="ghost" disabled={read(busy) || build.updating} onPress={() => act(() => plugin.request('build.check'))}>
+            Check for a new build
+          </Button>
+        </Row>
+      </Stack>
+    </Card>
+  )
+}
+
 export default function Panel() {
   const current = read(status)
   const message = read(notice)
@@ -166,6 +204,21 @@ export default function Panel() {
         </Card>
       ) : null}
 
+      {(current.rejected ?? []).length > 0 ? (
+        <Card title="Not delivered" description="These replies did not pass the checks that tie a reply to one chat, so no chat was woken. They are still in the Inbox.">
+          <Stack gap="sm">
+            {(current.rejected ?? []).map((row) => (
+              <Stack gap="xs">
+                <Text weight="medium" truncate>{row.subject ?? 'A reply'}</Text>
+                <Text muted size="xs">
+                  {row.error ?? 'Not delivered.'} <RelativeTime at={row.updated} muted />
+                </Text>
+              </Stack>
+            ))}
+          </Stack>
+        </Card>
+      ) : null}
+
       <Card title="Chats listening" description="Orca chats on this computer whose Inbox replies arrive by themselves.">
         {current.sessions.length === 0 ? (
           <EmptyState icon="bell" title="No chats yet" description="A chat starts listening with its first Inbox message." />
@@ -184,14 +237,18 @@ export default function Panel() {
 
       {current.agents.length > 0 ? <Agents agents={current.agents} /> : null}
 
+      {current.build ? <Build build={current.build} server={current.server} /> : null}
+
       <KeyValue
         label="Details"
         items={[
           { label: 'Plannotator', value: current.inbox.version ?? 'not running' },
           { label: 'Orca', value: current.orca.version ?? 'unknown' },
           { label: 'Inbox data', value: current.inbox.dataDir, code: true },
+          { label: 'Projects', value: (current.projects ?? []).length > 0 ? (current.projects ?? []).join(', ') : 'All' },
           { label: 'Replies delivered', value: current.counts.delivered },
-          { label: 'On the way', value: current.counts.inFlight }
+          { label: 'On the way', value: current.counts.inFlight },
+          { label: 'Not delivered', value: current.counts.rejected ?? 0 }
         ]}
       />
     </Stack>

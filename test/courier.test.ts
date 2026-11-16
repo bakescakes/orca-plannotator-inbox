@@ -85,44 +85,6 @@ test('a plugin installed in a second Orca profile asks that profile’s Orca', a
   assert.equal(orca.state.envs[0]?.ORCA_AGENT_SESSION_ID, undefined)
 })
 
-test('a reply the earlier adapter already put in the chat’s mailbox is not sent again', async () => {
-  const t = await setup()
-  const courier = new Courier(new OrcaCli({ command: ['orca'], exec: t.orca.exec, env: {} }), t.ledger, () => 1_000_000, () => 'plannotator-orca-adapter')
-  // The adapter queued msg_1 for this chat and stopped before it told the Inbox.
-  t.orca.state.mail.push({
-    id: 'mail_theirs',
-    from_handle: 'plannotator-orca-adapter',
-    to_handle: `orca_session_id:${SESSION}`,
-    subject: 'Plannotator: Ship it?',
-    body: 'Plannotator Inbox item',
-    payload: JSON.stringify({ adapter: 'plannotator-orca-adapter', version: 1, replyId: 'msg_1', nativeSessionId: SESSION }),
-    delivered_at: null
-  })
-  // The record starts as accepted in its first and only write: a stop right after it leaves nothing to send.
-  const writes: unknown[] = []
-  const set = t.store.set
-  t.store.set = async (name, value) => {
-    if (!String(name).startsWith('envelope.')) writes.push(structuredClone(value))
-    await set(name, value)
-  }
-  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')
-  t.store.set = set
-  assert.deepEqual(writes.map((saved) => (saved as Record<string, { state: string; message: string }>)[t.key('msg_1')]?.state), ['accepted'])
-  assert.equal(t.ledger.get(t.key('msg_1'))?.message, 'mail_theirs')
-  t.orca.deliverAll()
-  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'acknowledged')
-  assert.deepEqual(t.inboxFake.state.acknowledged, [{ session: SESSION, id: 'msg_1' }])
-  // A reply the adapter never queued is this plugin's to send.
-  assert.equal(await courier.deliver(t.inbox, ROUTE, reply('msg_2')), 'queued')
-  assert.deepEqual(t.orca.sends().map((args) => args[args.indexOf('--from') + 1]), ['plannotator-inbox'])
-
-  // While Orca cannot show the mailbox, nothing is recorded or sent.
-  t.orca.state.mailboxDown = true
-  await assert.rejects(courier.deliver(t.inbox, ROUTE, reply('msg_3')))
-  assert.equal(t.ledger.get(t.key('msg_3')), null)
-  assert.equal(t.orca.sends().length, 1)
-})
-
 test('while Orca cannot show the mailbox, a queued reply stays on the way and is never acknowledged on trust', async () => {
   const t = await setup()
   assert.equal(await t.courier.deliver(t.inbox, ROUTE, reply('msg_1')), 'queued')

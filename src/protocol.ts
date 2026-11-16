@@ -3,7 +3,6 @@
 /** Where the plugin stands, most blocking first. Only `ready` delivers replies. */
 export type Phase =
   | 'off' // switched off in Settings
-  | 'standby' // another adapter already delivers this Inbox's replies
   | 'no-plannotator' // the Plannotator Inbox has never run here
   | 'inbox-stopped' // installed, not running now (it starts with an agent's next message)
   | 'no-orca' // Orca's CLI cannot be run or does not answer
@@ -20,10 +19,19 @@ export type SessionStatus = {
 }
 
 export type BlockedDelivery = { key: string; subject: string | null; session: string; error: string | null; updated: number }
+/**
+ * A reply that was not delivered and never will be: its source failed the checks (not a person's
+ * reply, another chat's or another project's thread, or gone from the Inbox), or the Inbox handed
+ * over something that cannot be sent. It stays unacknowledged in the Inbox. `error` says why.
+ */
+export type RejectedDelivery = BlockedDelivery
+
+/** The agents "Connect agents" knows. */
+export type AgentId = 'claude' | 'codex' | 'opencode'
 
 /** How one agent reaches the Inbox from an Orca chat. */
 export type AgentLink = {
-  agent: 'claude' | 'codex'
+  agent: AgentId
   name: string
   state:
     | 'connected' // runs this plugin's launcher
@@ -35,6 +43,26 @@ export type AgentLink = {
   detail: string
 }
 
+/**
+ * The Orca build of Plannotator: the same Plannotator with Orca support added, downloaded and kept
+ * up to date by this plugin. `stock` means agents and the Inbox run the Plannotator on this computer.
+ */
+export type BuildInfo = {
+  mode: 'orca-build' | 'stock'
+  version: string | null
+  build: string | null
+  /** The newest Orca build published, when the last look found one. */
+  latestKnown: { version: string; build: string } | null
+  /** Why the last download or update did not work, in one sentence. */
+  lastError: string | null
+  updating: boolean
+  phase: string | null
+  detail: string | null
+}
+
+/** What the running Inbox is: the Orca build in Orca mode, standard Plannotator, or not running. */
+export type ServerMode = 'orca' | 'stock' | 'stopped'
+
 export type Status = {
   at: number
   phase: Phase
@@ -43,9 +71,17 @@ export type Status = {
   inbox: { dataDir: string; version: string | null; url: string | null }
   orca: { version: string | null }
   sessions: SessionStatus[]
-  counts: { inFlight: number; delivered: number; blocked: number }
+  /** `rejected`: replies not delivered because they failed their checks (absent from older workers). */
+  counts: { inFlight: number; delivered: number; blocked: number; rejected?: number }
   blocked: BlockedDelivery[]
+  /** The most recent rejected replies, newest first (absent from older workers). */
+  rejected?: RejectedDelivery[]
+  /** The project folders replies are limited to (real paths); empty or absent: every project. */
+  projects?: string[]
   agents: AgentLink[]
+  /** Absent from older workers and when the Orca build is switched off in Settings. */
+  build?: BuildInfo
+  server?: ServerMode
 }
 
 export type ActionResult = { ok: boolean; message: string }
@@ -57,9 +93,13 @@ declare module 'orca' {
     /** Opens the Inbox window in the browser, starting the Inbox when it is not running. */
     'inbox.open': { output: ActionResult }
     /** Points the agents found on this computer at the launcher. */
-    'agents.connect': { input: { agent?: 'claude' | 'codex' }; output: ActionResult }
+    'agents.connect': { input: { agent?: AgentId }; output: ActionResult }
     /** Puts back what `agents.connect` replaced. */
-    'agents.disconnect': { input: { agent?: 'claude' | 'codex' }; output: ActionResult }
+    'agents.disconnect': { input: { agent?: AgentId }; output: ActionResult }
+    /** Stops the running Inbox and starts it on the Orca build; nothing saved is lost. */
+    'inbox.restartOnBuild': { output: ActionResult }
+    /** Looks for a newer Orca build now and installs it. */
+    'build.check': { output: ActionResult }
     /** A person chose to send a blocked reply again. */
     'delivery.retry': { input: { key: string }; output: ActionResult }
   }

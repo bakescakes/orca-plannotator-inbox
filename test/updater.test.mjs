@@ -1,0 +1,404 @@
+// The Orca build's updater, against a stand-in GitHub release server on 127.0.0.1 and stand-in
+// Plannotator binaries, in throwaway folders. The end-to-end part at the bottom uses a real
+// Plannotator binary (PLANNOTATOR_E2E_BIN) as the "Orca build".
+import assert from 'node:assert/strict'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import {
+  LIMITS,
+  compareVersions,
+  lockHolder,
+  parseArgs,
+  pickBuild,
+  readIndex,
+  readManifest,
+  readRecord,
+  source,
+  takeLock,
+  update,
+  restartInbox,
+  validRecord,
+  writePrivateJson
+} from '../bin/plannotator-update.mjs'
+import { ASSET, KEY, fakeBinary, installFake, readJson, releaseServer, runProgram, sha256, tempRoot } from './release-fakes.mjs'
+
+const UPDATER = fileURLToPath(new URL('../bin/plannotator-update.mjs', import.meta.url))
+const POSIX = process.platform !== 'win32'
+const SUPPORTED = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64', 'win32-x64'].includes(KEY)
+const STAND_IN = !POSIX ? 'the stand-in Plannotator is a POSIX shell script' : !SUPPORTED ? `no Orca build for ${KEY}` : false
+const BINARY = (process.env.PLANNOTATOR_E2E_BIN ?? '').trim()
+const NAME = POSIX ? 'plannotator' : 'plannotator.exe'
+LIMITS.healthMs = 4000
+
+/** A shared folder with Orca's bridge config, a data folder, and an environment pointing at `server`. */
+function box(server, { config = true, stock = null } = {}) {
+  const root = tempRoot()
+  const shared = join(root, 'shared')
+  const data = join(root, 'data')
+  const home = join(root, 'home')
+  for (const folder of [shared, data, home]) mkdirSync(folder, { recursive: true, mode: 0o700 })
+  if (config) writePrivateJson(join(shared, 'bridge', 'config.json'), { canonicalDataDir: data, stateDir: shared })
+  writePrivateJson(join(shared, 'plannotator-update.json'), { v: 1, pluginVersion: '0.2.0' })
+  const env = {
+    PATH: join(root, 'nowhere'),
+    HOME: home,
+    PLANNOTATOR_DATA_DIR: data,
+    ORCA_PLANNOTATOR_RELEASES: server?.base ?? '',
+    ...(stock ? { PLANNOTATOR_BIN: stock } : {})
+  }
+  const run = (options = {}) => update({ shared, env, home, pluginVersion: '0.2.0', ...options })
+  const state = () => readJson(join(shared, 'bridge', 'upgrade-state.json'))
+  const current = () => (existsSync(join(shared, 'plannotator', 'current.json')) ? readJson(join(shared, 'plannotator', 'current.json')) : null)
+  const versions = () => readdirSync(join(shared, 'plannotator', 'versions')).sort()
+  const health = async () => {
+    const entry = readJson(join(data, 'inbox', 'inbox.json'))
+    return (await fetch(`http://127.0.0.1:${entry.port}/api/inbox/health`, { signal: AbortSignal.timeout(3000) })).json()
+  }
+  return { root, shared, data, home, env, run, state, current, versions, health }
+}
+
+const stopInbox = (binary, env) => runProgram(binary, ['inbox', 'stop'], { ...env, ELECTRON_RUN_AS_NODE: '' }, 30_000)
+
+test('versions, the index and the manifest are read strictly', () => {
+  assert.ok(compareVersions('0.28.10', '0.28.9') > 0)
+  assert.equal(compareVersions('0.28.66', '0.28.66'), 0)
+  const index = readIndex({
+    v: 1,
+    latest: { plannotator: '0.28.66', build: 'orca.2', tag: 'plannotator-0.28.66-orca.2' },
+    builds: [
+      { plannotator: '0.28.65', build: 'orca.9', tag: 'plannotator-0.28.65-orca.9' },
+      { plannotator: '0.28.66', build: 'orca.1', tag: 'plannotator-0.28.66-orca.1' },
+      { plannotator: '0.28.66', build: 'orca.10', tag: 'plannotator-0.28.66-orca.10' },
+      { plannotator: '0.28.67', build: 'orca.1', tag: 'wrong-tag' },
+      { plannotator: '../x', build: 'orca.1', tag: 'plannotator-../x-orca.1' }
+    ]
+  })
+  assert.deepEqual(pickBuild(index, '0.28.66'), { plannotator: '0.28.66', build: 'orca.10', tag: 'plannotator-0.28.66-orca.10' }, 'the newest build of that version')
+  assert.equal(pickBuild(index, '0.28.67'), null, 'an entry whose tag does not match is not a build')
+  assert.equal(pickBuild(index, null).build, 'orca.2', 'no version: the index’s own latest')
+  assert.throws(() => readIndex({ v: 2 }), /update the plugin/)
+
+  const ref = { plannotator: '0.28.66', build: 'orca.1', tag: 'plannotator-0.28.66-orca.1' }
+  const good = { v: 1, plannotator: '0.28.66', build: 'orca.1', pluginMin: '0.2.0', assets: { 'linux-x64': { name: 'plannotator-orca-linux-x64', sha256: 'a'.repeat(64), size: 10 } } }
+  assert.deepEqual(readManifest(good, ref, 'linux-x64').asset, { name: 'plannotator-orca-linux-x64', sha256: 'a'.repeat(64), size: 10 })
+  assert.equal(readManifest(good, ref, 'darwin-arm64').asset, null, 'a missing platform')
+  assert.throws(() => readManifest({ ...good, build: 'orca.2' }, ref, 'linux-x64'), /another build/)
+  assert.throws(() => readManifest({ ...good, assets: { 'linux-x64': { ...good.assets['linux-x64'], name: '../evil' } } }, ref, 'linux-x64'), /shape/)
+  assert.throws(() => readManifest({ ...good, assets: { 'linux-x64': { ...good.assets['linux-x64'], size: 500 * 1024 * 1024 } } }, ref, 'linux-x64'), /shape/)
+  assert.throws(() => readManifest({ ...good, pluginMin: undefined }, ref, 'linux-x64'), /which plugin/)
+})
+
+test('only GitHub, or a loopback test server, is a source; arguments are checked', () => {
+  assert.deepEqual(source({}).hosts, ['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'])
+  assert.equal(source({}).base, 'https://github.com/bakescakes/orca-plannotator-inbox/releases/download')
+  assert.equal(source({ ORCA_PLANNOTATOR_RELEASES: 'http://127.0.0.1:9/x/' }).base, 'http://127.0.0.1:9/x')
+  assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'https://example.com/' }), /127\.0\.0\.1/)
+  assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'http://localhost:9/' }), /127\.0\.0\.1/)
+  assert.deepEqual(parseArgs(['--version', '0.28.66']), { version: '0.28.66', restart: false, sharedDir: null })
+  assert.throws(() => parseArgs(['--version', '0.28']), /--version takes/)
+  assert.throws(() => parseArgs(['--version', '0.28.66', '--restart']), /does not go/)
+  assert.throws(() => parseArgs(['--nope']), /Unknown option/)
+})
+
+test('a record is trusted only for a private file at its own place in the store, with its size', { skip: STAND_IN }, () => {
+  const root = tempRoot()
+  const shared = join(root, 'shared')
+  const path = join(shared, 'plannotator', 'versions', '0.28.66-orca.1', NAME)
+  installFake(path)
+  const size = statSync(path).size
+  const record = { v: 1, version: '0.28.66', build: 'orca.1', path, sha256: 'b'.repeat(64), size, installedAt: 1 }
+  assert.ok(validRecord(record, shared))
+  assert.equal(validRecord({ ...record, size: size + 1 }, shared), null, 'size')
+  assert.equal(validRecord({ ...record, build: 'orca.2' }, shared), null, 'not where its build says')
+  assert.equal(validRecord({ ...record, path: join(root, 'elsewhere', NAME) }, shared), null, 'outside the store')
+  assert.equal(validRecord({ ...record, version: '../../x' }, shared), null)
+  writePrivateJson(join(shared, 'plannotator', 'current.json'), record)
+  assert.ok(readRecord(join(shared, 'plannotator', 'current.json'), shared))
+  chmodSync(join(shared, 'plannotator', 'current.json'), 0o644)
+  assert.equal(readRecord(join(shared, 'plannotator', 'current.json'), shared), null, 'a record others can read')
+})
+
+test('installs the newest build, checks it, records it, and keeps only the one before it', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') }])
+  const b = box(server)
+  try {
+    server.faults.redirect.set('plannotator-0.28.66-orca.1', '/cdn/plannotator-0.28.66-orca.1/' + ASSET)
+    const first = await b.run()
+    assert.equal(first.ok, true, first.detail)
+    assert.equal(first.installed, true)
+    assert.deepEqual(first.latest, { version: '0.28.66', build: 'orca.1' })
+    const record = b.current()
+    assert.equal(record.path, join(b.shared, 'plannotator', 'versions', '0.28.66-orca.1', NAME))
+    assert.equal(record.sha256, sha256(fakeBinary('good', '0.28.66')))
+    assert.equal(statSync(join(b.shared, 'plannotator', 'current.json')).mode & 0o777, 0o600)
+    assert.equal(statSync(record.path).mode & 0o777, 0o755)
+    assert.equal(b.state().phase, 'ready')
+    assert.equal(statSync(join(b.shared, 'bridge', 'upgrade-state.json')).mode & 0o777, 0o600)
+    assert.equal(typeof b.state().at, 'number')
+    assert.ok(Math.abs(b.state().at - Date.now() / 1000) < 60, 'seconds, not milliseconds')
+
+    // The same build again: nothing downloaded.
+    const again = await b.run({ version: '0.28.66' })
+    assert.equal(again.installed, false)
+    assert.match(again.detail, /already the newest/)
+    assert.equal(server.downloads(), 2, 'one redirect and one download, from the first run only')
+
+    server.publish({ version: '0.28.66', build: 'orca.2', bytes: fakeBinary('good', '0.28.66', 'orca.2') })
+    server.publish({ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67') })
+    assert.equal((await b.run({ version: '0.28.66' })).build, 'orca.2', 'the newest build of that version')
+    const newest = await b.run()
+    assert.equal(newest.version, '0.28.67', newest.detail)
+    assert.deepEqual(b.versions(), ['0.28.66-orca.2', '0.28.67-orca.1'], 'the build in use and the one before it')
+    assert.equal(readJson(join(b.shared, 'plannotator', 'previous.json')).build, 'orca.2')
+    const older = await b.run({ version: '0.28.66' })
+    assert.equal(older.ok, false)
+    assert.match(older.detail, /older than the 0\.28\.67 in use/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a version with no Orca build fails in one sentence, and what runs stays', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const b = box(server)
+  try {
+    const none = await b.run({ version: '0.28.67' })
+    assert.equal(none.ok, false)
+    assert.equal(none.detail, 'No Orca build of Plannotator 0.28.67 has been published yet, so stock Plannotator stays in use.')
+    assert.deepEqual({ phase: b.state().phase, version: b.state().version, detail: b.state().detail }, { phase: 'failed', version: '0.28.67', detail: none.detail })
+    assert.equal((await b.run()).ok, true)
+    const after = await b.run({ version: '0.28.67' })
+    assert.equal(after.detail, 'No Orca build of Plannotator 0.28.67 has been published yet, so the Orca build of Plannotator 0.28.66 stays in use.')
+    server.faults.noIndex = true
+    assert.match((await b.run()).detail, /No Orca build of Plannotator has been published yet/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a wrong checksum, a wrong size, a missing platform, a cut download or a foreign redirect installs nothing', { skip: STAND_IN }, async () => {
+  const bytes = fakeBinary()
+  const server = await releaseServer([
+    { version: '0.28.66', build: 'orca.1', bytes, manifest: (m) => ({ ...m, assets: { [KEY]: { ...m.assets[KEY], sha256: 'c'.repeat(64) } } }) },
+    { version: '0.28.67', build: 'orca.1', bytes, manifest: (m) => ({ ...m, assets: { [KEY]: { ...m.assets[KEY], size: bytes.length + 1 } } }) },
+    { version: '0.28.68', build: 'orca.1', bytes, asset: false },
+    { version: '0.28.69', build: 'orca.1', bytes },
+    { version: '0.28.70', build: 'orca.1', bytes },
+    { version: '0.28.71', build: 'orca.1', bytes, manifest: (m) => ({ ...m, pluginMin: '9.0.0' }) }
+  ])
+  const b = box(server)
+  try {
+    server.faults.truncate.add('plannotator-0.28.69-orca.1')
+    server.faults.redirect.set('plannotator-0.28.70-orca.1', `${server.base.replace('127.0.0.1', 'localhost')}/cdn/plannotator-0.28.70-orca.1/${ASSET}`)
+    const cases = [
+      ['0.28.66', /does not match the checksum/],
+      ['0.28.67', /has \d+ bytes, not the \d+ the release lists/],
+      ['0.28.68', new RegExp(`has no file for ${KEY}`)],
+      ['0.28.69', /download failed|bytes, not the/],
+      ['0.28.70', /not GitHub/],
+      ['0.28.71', /needs version 9\.0\.0 of the Plannotator Inbox plugin/]
+    ]
+    for (const [version, why] of cases) {
+      const result = await b.run({ version })
+      assert.equal(result.ok, false, version)
+      assert.match(result.detail, why, `${version}: ${result.detail}`)
+      assert.match(result.detail, /[Ss]tock Plannotator stays in use/, version)
+      assert.equal(b.state().phase, 'failed')
+      assert.equal(b.current(), null, `${version}: nothing recorded`)
+      assert.deepEqual(existsSync(join(b.shared, 'plannotator', 'versions')) ? b.versions() : [], [], `${version}: nothing left behind`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('a build that does not start is not used', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([
+    { version: '0.28.66', build: 'orca.1', bytes: fakeBinary('nosmoke') },
+    { version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.99') }
+  ])
+  const b = box(server)
+  try {
+    assert.match((await b.run({ version: '0.28.66' })).detail, /Plannotator 0\.28\.66 failed to start/)
+    assert.match((await b.run({ version: '0.28.67' })).detail, /reported another version/)
+    assert.equal(b.current(), null)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a running Inbox moves onto the new build in Orca mode; one that does not answer is rolled back', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const before = await b.health()
+    assert.equal(before.self, stock)
+
+    const moved = await b.run()
+    assert.equal(moved.ok, true, moved.detail)
+    assert.equal(moved.restarted, true)
+    assert.match(moved.detail, /the Inbox was restarted on it/)
+    const after = await b.health()
+    assert.equal(after.self, b.current().path, 'the Inbox runs the Orca build')
+    assert.notEqual(after.pid, before.pid)
+    assert.equal(after.orcaMode, '1')
+    assert.equal(after.orcaConfig, join(b.shared, 'bridge', 'config.json'))
+
+    // A build that stops the Inbox and never answers: the build before it comes back.
+    server.publish({ version: '0.28.66', build: 'orca.2', bytes: fakeBinary('dead') })
+    const result = await runProgram(process.execPath, [UPDATER, '--version', '0.28.66'], { ...b.env, ORCA_PLANNOTATOR_HOME: b.shared, ELECTRON_RUN_AS_NODE: '1' })
+    // The CLI waits the full 30 seconds; the run above used the shorter test wait, so this one is slow on purpose.
+    const outcome = JSON.parse(result.stdout.trim().split('\n').pop())
+    assert.equal(result.code, 2, result.stdout)
+    assert.equal(outcome.rolledBack, true)
+    assert.equal(b.state().phase, 'rolled-back')
+    assert.match(b.state().detail, /did not answer within 30 seconds after the restart, so the Orca build of Plannotator 0\.28\.66 was put back/)
+    assert.equal(b.current().build, 'orca.1')
+    const back = await b.health()
+    assert.equal(back.self, b.current().path)
+    assert.equal(back.orcaMode, '1')
+    assert.ok(existsSync(stock), 'stock Plannotator is never removed')
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('without a previous build a failed restart goes back to stock Plannotator', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('dead') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const result = await b.run()
+    assert.equal(result.rolledBack, true, result.detail)
+    assert.match(result.detail, /so stock Plannotator was put back/)
+    assert.equal(b.current(), null)
+    assert.equal((await b.health()).self, stock)
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('without Orca’s bridge config, or with no Inbox running, the running Inbox is left alone', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock, config: false })
+  try {
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const pid = (await b.health()).pid
+    const result = await b.run()
+    assert.equal(result.ok, true)
+    assert.equal(result.restarted, false)
+    assert.equal((await b.health()).pid, pid)
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('two runs never overlap, and a lock whose run is gone is taken over', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const b = box(server)
+  try {
+    server.faults.delayMs = 1500
+    const env = { ...b.env, ORCA_PLANNOTATOR_HOME: b.shared, ELECTRON_RUN_AS_NODE: '1' }
+    const [one, two] = await Promise.all([runProgram(process.execPath, [UPDATER], env), runProgram(process.execPath, [UPDATER], env)])
+    const outcomes = [one, two].map((run) => JSON.parse(run.stdout.trim().split('\n').pop()))
+    assert.deepEqual([one.code, two.code], [0, 0])
+    assert.equal(outcomes.filter((outcome) => outcome.busy).length, 1, JSON.stringify(outcomes))
+    assert.equal(outcomes.filter((outcome) => outcome.installed).length, 1)
+    assert.equal(server.downloads(), 1)
+    assert.equal(b.state().phase, 'ready')
+
+    // A lock left by a run that is gone.
+    writeFileSync(join(b.shared, 'plannotator', 'update.lock'), JSON.stringify({ pid: 2 ** 22 - 3, at: Date.now() }))
+    assert.equal(lockHolder(b.shared), null)
+    const release = takeLock(b.shared)
+    assert.ok(release)
+    assert.equal(takeLock(b.shared), null, 'held now')
+    release()
+    assert.equal(existsSync(join(b.shared, 'plannotator', 'update.lock')), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('--restart moves a stock Inbox onto the installed build in Orca mode', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    assert.match((await restartInbox({ shared: b.shared, env: b.env, home: b.home })).detail, /No Orca build of Plannotator is installed yet/)
+    await b.run()
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    assert.equal((await b.health()).self, stock)
+    const result = await restartInbox({ shared: b.shared, env: b.env, home: b.home })
+    assert.equal(result.ok, true, result.detail)
+    const health = await b.health()
+    assert.equal(health.self, b.current().path)
+    assert.equal(health.orcaMode, '1')
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+// --- With a real Plannotator ---------------------------------------------------------------------
+
+test(
+  'a real Plannotator Inbox moves onto a downloaded build with its data, and a broken build is rolled back',
+  { skip: !BINARY ? 'set PLANNOTATOR_E2E_BIN to run' : STAND_IN },
+  async () => {
+    LIMITS.healthMs = 30_000
+    const bytes = readFileSync(BINARY)
+    const server = await releaseServer()
+    const root = tempRoot('orca-plannotator-update-e2e-')
+    const stock = join(root, 'stock', 'plannotator')
+    mkdirSync(join(root, 'stock'))
+    copyFileSync(BINARY, stock)
+    const b = box(server, { stock })
+    const env = { ...b.env, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0', PLANNOTATOR_AUTO_UPDATE: '0', PLANNOTATOR_BROWSER: 'none' }
+    const version = (await runProgram(stock, ['--version'], env)).stdout.match(/\d+\.\d+\.\d+/)[0]
+    server.publish({ version, build: 'orca.1', bytes })
+    try {
+      assert.equal((await runProgram(stock, ['inbox', '--background'], env)).code, 0)
+      const kept = await runProgram(stock, ['inbox', 'call', '--session', 'e2e-session', 'send_message', JSON.stringify({ body: 'Kept across the update', project_path: root })], env)
+      assert.equal(kept.code, 0, kept.stderr)
+      const before = await b.health()
+
+      const moved = await update({ shared: b.shared, env, home: b.home, pluginVersion: '0.2.0', version })
+      assert.equal(moved.ok, true, moved.detail)
+      assert.equal(moved.restarted, true)
+      const after = await b.health()
+      assert.notEqual(after.pid, before.pid)
+      assert.equal(after.version, version)
+      const ps = await runProgram('/bin/ps', ['-o', 'comm=', '-p', String(after.pid)], env)
+      assert.equal(ps.stdout.trim(), b.current().path, 'the Inbox process is the downloaded build')
+      const entry = readJson(join(b.data, 'inbox', 'inbox.json'))
+      const threads = await (await fetch(`http://127.0.0.1:${entry.port}/api/inbox/threads`)).text()
+      assert.match(threads, /Kept across the update/)
+
+      // A build that passes its check but cannot restart the Inbox: the build before it comes back.
+      server.publish({ version, build: 'orca.2', bytes: Buffer.from(`#!/bin/sh\n[ "$1" = --version ] && { echo "plannotator ${version}"; exit 0; }\nexit 1\n`) })
+      const broken = await update({ shared: b.shared, env, home: b.home, pluginVersion: '0.2.0', version })
+      assert.equal(broken.rolledBack, true, broken.detail)
+      assert.equal(b.current().build, 'orca.1')
+      const back = await b.health()
+      const comm = await runProgram('/bin/ps', ['-o', 'comm=', '-p', String(back.pid)], env)
+      assert.equal(comm.stdout.trim(), b.current().path)
+      const entryBack = readJson(join(b.data, 'inbox', 'inbox.json'))
+      assert.match(await (await fetch(`http://127.0.0.1:${entryBack.port}/api/inbox/threads`)).text(), /Kept across the update/)
+      process.stderr.write(`updater e2e passed against Plannotator ${version}\n`)
+    } finally {
+      LIMITS.healthMs = 4000
+      await stopInbox(stock, env)
+      await server.close()
+    }
+  }
+)

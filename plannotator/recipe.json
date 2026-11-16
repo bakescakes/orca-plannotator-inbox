@@ -1,0 +1,216 @@
+{
+  "v": 1,
+  "plannotator": {
+    "repo": "https://github.com/backnotprop/plannotator.git",
+    "version": "0.28.66",
+    "tag": "v0.28.66",
+    "commit": "85e847e8369189ee4027598212623edfe0cd1602"
+  },
+  "bun": {
+    "version": "1.4.4",
+    "packages": {
+      "darwin-arm64": {
+        "name": "@oven/bun-darwin-aarch64",
+        "integrity": "sha512-zW/hxwc8sJAILGwB5eTC4i48ouGXf0V4lrxmEOk3JIE6JkYVW1TZh1E2pIempqsezgW1sckTIIDudFON8bJ2Mw=="
+      },
+      "darwin-x64": {
+        "name": "@oven/bun-darwin-x64",
+        "integrity": "sha512-oKGcxLsvh4oHjAo28nPm8c/xN0o/OmGyj1IHYc94vprkWsW2hNg2keEZt5f40cI5Hvu4jDlSRTR0UNpv1UIAxw=="
+      },
+      "linux-x64": {
+        "name": "@oven/bun-linux-x64",
+        "integrity": "sha512-CHbbkmHVM28T1GFq+6GL4Ao4ujwwYwj1CxFFwEFzLanPfNsId9AhbIP0Q4reWuWBkGimUkoQygrK7Rgjtj3vog=="
+      },
+      "linux-arm64": {
+        "name": "@oven/bun-linux-aarch64",
+        "integrity": "sha512-ZTVtpf9zmHSBVPX1sBwe5agGb/rN34yPGg/Hby8e2Ax2uCUA2URZKlZH7qLntK7qaFJCMXh9v0GWNYN2zINz1w=="
+      },
+      "win32-x64": {
+        "name": "@oven/bun-windows-x64",
+        "integrity": "sha512-a3LNctBVO8PjePsFZfwDleF2JXYf2BfQ1u/PLRnBDLnC2Riml+4+LgJpKj4xRGhB92KweGyQI5PXaTkP9qypMQ=="
+      }
+    }
+  },
+  "targets": {
+    "darwin-arm64": "bun-darwin-arm64",
+    "darwin-x64": "bun-darwin-x64",
+    "linux-x64": "bun-linux-x64",
+    "linux-arm64": "bun-linux-arm64",
+    "win32-x64": "bun-windows-x64"
+  },
+  "patches": [
+    {
+      "name": "orca-host",
+      "file": "patches/orca-host.patch",
+      "sha256": "755b5fc11aade72508c7d3f15125573912eae3b4a5850bf0eddca9a25787de1a"
+    },
+    {
+      "name": "interop-surface",
+      "file": "patches/interop-surface.patch",
+      "sha256": "e9eb4afa70c2b7f426f798325aef34cfa047dae3202c27c5d132e3e115933f24"
+    },
+    {
+      "name": "agent-marks",
+      "file": "patches/agent-marks.patch",
+      "sha256": "c2da0149df1d21b7e09e9ec27df9387769793b451801e30c2b74f388d0028e86"
+    }
+  ],
+  "modules": [
+    {
+      "file": "modules/packages/inbox/components/OrcaConnection.tsx",
+      "target": "packages/inbox/components/OrcaConnection.tsx",
+      "sha256": "0ad5192612a7636310d99cdca368f1dae0790a2092b1ed703eb4390c86823698"
+    },
+    {
+      "file": "modules/packages/server/inbox-orca-host.ts",
+      "target": "packages/server/inbox-orca-host.ts",
+      "sha256": "0bb7c162dfbf1f5efb5cfb0a7cc136df9421a7818a49ff33daf6b28c2c6d4e61"
+    },
+    {
+      "file": "modules/packages/server/inbox-orca-surface.ts",
+      "target": "packages/server/inbox-orca-surface.ts",
+      "sha256": "9a0da781b3d9a83f49e3dc9b4d7137a00013f129b0598833ad024c36dc6f2f14"
+    },
+    {
+      "file": "modules/packages/ui/components/inbox-thread/orca-marks.tsx",
+      "target": "packages/ui/components/inbox-thread/orca-marks.tsx",
+      "sha256": "afa59ae6b3f92875f5d429b803f1d61bc9394b1558d923302edcaeffe003d518"
+    }
+  ],
+  "gates": [
+    {
+      "file": "tests/orca-mcp-contract.ts",
+      "target": "tests/orca-mcp-contract.ts",
+      "sha256": "16380dbf17cc5c1b2a1016a535ebe78bc0d77f8d4d4c2e46a90822e94919f35b",
+      "run": [
+        "{bun}",
+        "tests/orca-mcp-contract.ts"
+      ]
+    },
+    {
+      "file": "tests/orca-contract-proof.ts",
+      "target": "tests/orca-contract-proof.ts",
+      "sha256": "972e6971b897b95ea1793e4e4b2e61aa5ea88a6eda7c430c2e69a73b19376ae3",
+      "run": [
+        "{bun}",
+        "tests/orca-contract-proof.ts"
+      ]
+    },
+    {
+      "file": "tests/orca-build-proof.ts",
+      "target": "tests/orca-build-proof.ts",
+      "sha256": "c0392def80be4772f3263aeb9718f259516f6408c576defa5ad59f9330570c98",
+      "run": [
+        "{bun}",
+        "tests/orca-build-proof.ts"
+      ]
+    }
+  ],
+  "steps": {
+    "prepare": [
+      [
+        "{bun}",
+        "install",
+        "--frozen-lockfile",
+        "--ignore-scripts"
+      ],
+      [
+        "{bun}",
+        "apps/guides-show/build/sync-manifest.ts",
+        "--if-missing"
+      ]
+    ],
+    "check": [
+      [
+        "{bun}",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "packages/core/tsconfig.json"
+      ],
+      [
+        "{bun}",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "packages/shared/tsconfig.json"
+      ],
+      [
+        "{bun}",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "packages/ui/tsconfig.json"
+      ],
+      [
+        "{bun}",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "packages/server/tsconfig.json"
+      ],
+      [
+        "{bun}",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "-p",
+        "packages/inbox/tsconfig.json"
+      ],
+      [
+        "{bun}",
+        "test",
+        "--timeout",
+        "30000",
+        "packages/server/inbox-agents.test.ts",
+        "packages/inbox/harnesses.test.ts",
+        "packages/inbox/connectSteps.test.ts",
+        "packages/server/inbox-launch-host.test.ts",
+        "packages/server/inbox-launch-codex.test.ts",
+        "packages/server/inbox-launch-opencode.test.ts",
+        "packages/server/inbox-updates.test.ts",
+        "packages/inbox/projectMenuModel.test.ts",
+        "packages/inbox/projectMenu.test.tsx",
+        "packages/inbox/runLineClone.test.tsx",
+        "packages/inbox/updates.test.tsx",
+        "packages/inbox/updateStuck.test.tsx",
+        "packages/inbox/machineUpdate.test.tsx",
+        "packages/inbox/aboutPrivacy.test.tsx",
+        "packages/inbox/agents/agentFacesEverywhere.test.tsx",
+        "packages/inbox/agents/faceFan.test.tsx",
+        "packages/inbox/agents/linkedAgentFaces.test.tsx",
+        "packages/inbox/agents/setAgentIcons.test.tsx",
+        "packages/inbox/letterMarks.test.ts"
+      ]
+    ],
+    "build": [
+      [
+        "bash",
+        "apps/pi-extension/vendor.sh"
+      ],
+      [
+        "{bun}",
+        "run",
+        "build:review"
+      ],
+      [
+        "{bun}",
+        "run",
+        "build:hook"
+      ]
+    ]
+  },
+  "compile": [
+    "{bun}",
+    "build",
+    "apps/hook/server/index.ts",
+    "--compile",
+    "--no-compile-autoload-bunfig",
+    "--target={bunTarget}",
+    "--define",
+    "__CLI_VERSION__=\"{version}\"",
+    "--define",
+    "__PLANNOTATOR_RELEASE__=true",
+    "--outfile",
+    "{out}"
+  ]
+}

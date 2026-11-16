@@ -1,0 +1,50 @@
+diff --git a/packages/core/inbox-types.ts b/packages/core/inbox-types.ts
+index 798a9070a..0d06fd697 100644
+--- a/packages/core/inbox-types.ts
++++ b/packages/core/inbox-types.ts
+@@ -451,2 +451,3 @@ export const INBOX_HOST_NAMES: Readonly<Record<string, string>> = {
+   hermes: "Hermes Agent",
++  orca: "Orca",
+   cloud: "Cloud agent",
+@@ -3874,4 +3875,9 @@ export function inboxSetFaceParts(face: InboxSetFace): { set: string; icon: stri
+ 
++/**
++ * Another host's own mark (`mark:<host>`): an agent that runs through a host of its own (an Orca chat, host `orca`)
++ * drawn as the agent it runs, with that agent's animated mark where one exists. A host with no mark draws the neutral one.
++ */
++export const INBOX_MARK_FACE = /^mark:([a-z0-9][a-z0-9-]{0,39})$/;
+ export const isInboxAgentFace = (value: unknown): value is InboxAgentFace =>
+-  typeof value === "string" && ((INBOX_AGENT_FACES as readonly string[]).includes(value) || INBOX_OWN_FACE.test(value) || INBOX_SET_FACE.test(value));
++  typeof value === "string" && ((INBOX_AGENT_FACES as readonly string[]).includes(value) || INBOX_OWN_FACE.test(value) || INBOX_SET_FACE.test(value) || INBOX_MARK_FACE.test(value));
+ 
+diff --git a/packages/inbox/agents/AgentMark.tsx b/packages/inbox/agents/AgentMark.tsx
+index f4b535108..14b6fc2ea 100644
+--- a/packages/inbox/agents/AgentMark.tsx
++++ b/packages/inbox/agents/AgentMark.tsx
+@@ -33,3 +33,6 @@ export function AgentMark({ id, host, name, agent, picks = 'all' }: { id: string
+   const [plain, setPlain] = useState<HTMLElement | null>(null);
+-  const face = useAgentFace(id);
++  const kept = useAgentFace(id), markHost = (kept as string).startsWith('mark:') ? (kept as string).slice(5) : null;
++  // A `mark:<host>` face is that host's own mark and rig, not a face over this one.
++  const face: AgentFace = markHost ? 'agent' : kept;
++  if (markHost) host = markHost;
+   const rig = agentRigOf(host);
+diff --git a/packages/inbox/icons.tsx b/packages/inbox/icons.tsx
+index 24fc6b09b..de61f05cd 100644
+--- a/packages/inbox/icons.tsx
++++ b/packages/inbox/icons.tsx
+@@ -29,2 +29,3 @@ export function HostMark({ host, big, agent }: { host: string | null | undefined
+ export function FaceOfMark({ host, big, face }: { host: string | null | undefined; big?: boolean; face: AgentFace }) {
++  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big} />;
+   if (face === 'agent') return <UiHostMark host={host} big={big} />;
+diff --git a/packages/ui/components/inbox-thread/icons.tsx b/packages/ui/components/inbox-thread/icons.tsx
+index b1ba3f2f5..737b0f986 100644
+--- a/packages/ui/components/inbox-thread/icons.tsx
++++ b/packages/ui/components/inbox-thread/icons.tsx
+@@ -274,2 +274,6 @@ export function TabGlyph({ harness }: { harness: string }) {
+ function ownMark(host: string | null | undefined): React.ReactNode | null {
++  return stockOwnMark(host) ?? orcaExtraMark(host);
++}
++import { orcaExtraMark } from './orca-marks';
++function stockOwnMark(host: string | null | undefined): React.ReactNode | null {
+   switch (host) {

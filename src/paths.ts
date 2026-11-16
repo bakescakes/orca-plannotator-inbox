@@ -18,13 +18,13 @@ function expandHome(value: string, home: string): string {
 export function resolveDataDir(setting: string | undefined, env: Env, home: string = homedir()): string {
   const explicit = (setting ?? '').trim() || (env.PLANNOTATOR_DATA_DIR ?? '').trim()
   if (explicit) return resolve(expandHome(explicit, home))
-  const legacy = join(home, '.plannotator')
+  const dotFolder = join(home, '.plannotator')
   const xdgHome = (env.XDG_DATA_HOME ?? '').trim()
-  if (!existsSync(legacy) && xdgHome && isAbsolute(xdgHome)) {
+  if (!existsSync(dotFolder) && xdgHome && isAbsolute(xdgHome)) {
     const xdg = join(xdgHome, 'plannotator')
     if (existsSync(xdg)) return xdg
   }
-  return legacy
+  return dotFolder
 }
 
 /**

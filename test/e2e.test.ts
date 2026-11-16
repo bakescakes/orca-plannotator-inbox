@@ -1,6 +1,7 @@
 // End to end against a real, unmodified Plannotator: the launcher, exactly as an agent's settings
 // run it, in front of the real `plannotator inbox mcp`, the real Inbox on loopback, and the plugin's engine. Only Orca is a
-// stand-in (its CLI contract is covered by courier.test.ts). This is the test that says whether
+// stand-in (its CLI contract is covered by courier.test.ts): the engine's, and the CLI the launcher
+// asks to prove the chat (`status`, `worktree ps`, `repo list`), as a small script. This is the test that says whether
 // a Plannotator update broke the plugin, so CI runs it against the newest release.
 //
 // Runs only when PLANNOTATOR_E2E_BIN names a `plannotator` binary. It uses a throwaway HOME, so
@@ -8,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, realpath } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +20,38 @@ import { fakeOrca, mcpClient, memoryStore, tempDir, until } from './fakes'
 const BINARY = (process.env.PLANNOTATOR_E2E_BIN ?? '').trim()
 const SESSION = 'claude_e2e0000_1111'
 const WRAPPER = fileURLToPath(new URL('../bin/inbox-mcp.mjs', import.meta.url))
+
+/** Orca's CLI as the launcher sees it: this chat is live and works in `project`. */
+async function orcaStandIn(root: string, project: string): Promise<string> {
+  const ok = (result: unknown) => JSON.stringify({ ok: true, result })
+  const answers = {
+    status: ok({ runtime: { reachable: true }, caller: { orcaSessionId: SESSION, live: true } }),
+    worktrees: ok({ worktrees: [{ path: project, repoId: 'repo-1', hostId: null, agents: [{ paneKey: `structured-agent-session-${SESSION}:00000000-0000-4000-8000-000000000001` }] }], truncated: false }),
+    repos: ok({ repos: [{ id: 'repo-1', path: project, connectionId: null }] })
+  }
+  const script = join(root, 'orca-cli.mjs')
+  await writeFile(
+    script,
+    [
+      `const answers = ${JSON.stringify(answers)}`,
+      'const [a, b] = process.argv.slice(2)',
+      "const answer = a === 'status' ? answers.status : a === 'worktree' && b === 'ps' ? answers.worktrees : a === 'repo' && b === 'list' ? answers.repos : null",
+      "process.stdout.write(answer ?? '{\"ok\":false}')",
+      'process.exitCode = answer ? 0 : 1',
+      ''
+    ].join('\n')
+  )
+  const windows = process.platform === 'win32'
+  const bin = join(root, windows ? 'orca.cmd' : 'orca')
+  await writeFile(
+    bin,
+    windows
+      ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${script}" %*\r\n`
+      : `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '${process.execPath}' '${script}' "$@"\n`
+  )
+  await chmod(bin, 0o755)
+  return bin
+}
 
 test('a real Plannotator Inbox: an Orca chat sends, the person replies, the reply reaches the chat', { skip: BINARY ? false : 'set PLANNOTATOR_E2E_BIN to run' }, async () => {
   const root = await realpath(await tempDir('orca-plannotator-e2e-'))
@@ -62,9 +95,9 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
     exec: orca.exec,
     locateCli: () => ['orca'],
     tickMs: 250,
-    legacyConfig: null
   })
   const launcher = await installShared(shared, WRAPPER)
+  const orcaCli = await orcaStandIn(root, project)
   engine.start()
 
   // A `.cmd` starts only through Windows' command interpreter, which is also how an agent's host runs it.
@@ -72,7 +105,7 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
   const child = spawn(viaShell ? (process.env.ComSpec ?? 'cmd.exe') : launcher, viaShell ? ['/d', '/s', '/c', `""${launcher}""`] : [], {
     cwd: project,
     windowsVerbatimArguments: viaShell,
-    env: { ...base, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1' }
+    env: { ...base, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1', ORCA_CLI_COMMAND: orcaCli }
   })
   let stderr = ''
   child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
@@ -106,6 +139,8 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
     const origin = `http://127.0.0.1:${registry.port}`
     const threads = JSON.stringify(await (await fetch(`${origin}/api/inbox/threads`)).json())
     assert.ok(threads.includes('"host":"orca"') && threads.includes(SESSION), 'the Inbox holds the message as written by the Orca chat')
+    // Windows may spell the folder differently (case, separators); the launcher's own tests cover the value there.
+    if (process.platform !== 'win32') assert.ok(threads.includes(JSON.stringify(project).slice(1, -1)), 'in the project Orca says the chat works in')
 
     // The person answers in the Inbox window.
     const health = (await (await fetch(`${origin}/api/inbox/health`)).json()) as { serverSession: string; version: string }

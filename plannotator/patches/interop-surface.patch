@@ -1,0 +1,112 @@
+diff --git a/packages/inbox/components/RunLine.tsx b/packages/inbox/components/RunLine.tsx
+index 4d0a6f603..1517a347f 100644
+--- a/packages/inbox/components/RunLine.tsx
++++ b/packages/inbox/components/RunLine.tsx
+@@ -90,3 +90,3 @@ export function RunLine({
+     } catch (cause) {
+-      setError(cause instanceof InboxApiError ? cause.message : what === 'open' ? 'Terminal did not open; copy the command instead.' : 'That did not work; try again.');
++      setError(cause instanceof InboxApiError ? cause.message : what === 'open' ? (run.open_in === 'orca' ? 'Orca did not open the chat; it is still there.' : 'Terminal did not open; copy the command instead.') : 'That did not work; try again.');
+       // The folder changed since this line was read: draw the new warning for the next click.
+@@ -123,3 +123,3 @@ export function RunLine({
+       <Icon name="terminal" size={14} />
+-      Open in Terminal
++      {run.open_in === 'orca' ? 'Open in Orca' : 'Open in Terminal'}
+     </button>
+diff --git a/packages/inbox/components/Updates.tsx b/packages/inbox/components/Updates.tsx
+index e60e81a28..0ac15d034 100644
+--- a/packages/inbox/components/Updates.tsx
++++ b/packages/inbox/components/Updates.tsx
+@@ -434,3 +434,7 @@ export function FailedDialog({
+   const prepare = couldNotDownload ? details?.failure?.prepare : undefined;
+-  const sub = prepare
++  const said = (details?.failure as { detail?: unknown } | null | undefined)?.detail;
++  const detail = typeof said === 'string' && said ? said : null;
++  const sub = detail
++    ? detail
++    : prepare
+     ? `Plannotator couldn't prepare the update: ${prepare}. Nothing was changed; Plannotator ${update.current} still works. ${updateStagingAdvice(prepare)}, then try again.`
+@@ -497,3 +501,3 @@ export function FailedDialog({
+           )}
+-          {!mismatch && !couldNotDownload && (
++          {!mismatch && !couldNotDownload && !detail && (
+             <>
+@@ -1254,2 +1258,6 @@ export function AboutBlock({
+ function AboutPrivacy() {
++  return (<><OrcaConnection /><StockAboutPrivacy /></>);
++}
++import { OrcaConnection } from './OrcaConnection';
++function StockAboutPrivacy() {
+   return (
+diff --git a/packages/inbox/projectMenu.ts b/packages/inbox/projectMenu.ts
+index 44ea05319..88b094ba6 100644
+--- a/packages/inbox/projectMenu.ts
++++ b/packages/inbox/projectMenu.ts
+@@ -25,3 +25,3 @@ export type ProjectAction = 'read' | 'archive';
+ export function shownProjects(projects: readonly ProjectFolder[], held: string | null): ProjectFolder[] {
+-  return projects.filter((project) => project.listed === undefined || project.listed > 0 || project.id === held);
++  return projects.filter((project) => project.orca_imported === true || project.listed === undefined || project.listed > 0 || project.id === held);
+ }
+diff --git a/packages/server/auto-update.ts b/packages/server/auto-update.ts
+index a6d64b3b6..bdbad0d1e 100644
+--- a/packages/server/auto-update.ts
++++ b/packages/server/auto-update.ts
+@@ -281,2 +281,3 @@ export function isManagedBinary(
+ ): boolean {
++  if (orcaMode()) return false; // The Orca build updater owns this binary.
+   const target = managedBinaryPath(platform, env, home);
+@@ -1049,3 +1050,5 @@ function installerEnv(launch: InstallerLaunch): { file: string; args: string[];
+ 
++import { orcaMode } from "./inbox-orca-surface";
+ export function launchInstaller(launch: InstallerLaunch): void {
++  if (orcaMode()) throw new Error("Use the Orca build updater; the current version stays in use.");
+   const logFd = openSync(launch.logPath, "a");
+diff --git a/packages/server/inbox-agents.ts b/packages/server/inbox-agents.ts
+index e716d6975..19fa16550 100644
+--- a/packages/server/inbox-agents.ts
++++ b/packages/server/inbox-agents.ts
+@@ -1620,5 +1620,6 @@ type AgentOutcome =
+ 
++import { orcaMcpCommand } from "./inbox-orca-surface";
+ /** The commands that count as this CLI's entry: what it writes now, and what a record says it wrote. */
+ function ourCommands(options: ConnectOptions, record?: InboxAgentRecord): string[][] {
+-  const commands = [[...options.selfCommand, "inbox", "mcp"]];
++  const commands = [orcaMcpCommand(options.dataDir, [...options.selfCommand, "inbox", "mcp"])];
+   if (record?.command) commands.push(record.command);
+@@ -1637,3 +1638,3 @@ async function connectOne(spec: AgentSpec, options: ConnectOptions, at: string):
+   const file = spec.file(e);
+-  const command = [...options.selfCommand, "inbox", "mcp"];
++  const command = orcaMcpCommand(options.dataDir, [...options.selfCommand, "inbox", "mcp"]);
+   if (way.kind === "none") return { kind: "none" };
+diff --git a/packages/server/inbox.ts b/packages/server/inbox.ts
+index 66c3070d5..fc4ef2f2a 100644
+--- a/packages/server/inbox.ts
++++ b/packages/server/inbox.ts
+@@ -405,3 +405,5 @@ import {
+  */
+-const BRIDGE_WAKING_HOSTS: ReadonlySet<string> = new Set(INBOX_WAKING_HOSTS.filter((host) => !INBOX_MCP_WAKING_HOSTS.includes(host)));
++const BRIDGE_WAKING_HOSTS: ReadonlySet<string> = new Set([...INBOX_WAKING_HOSTS.filter((host) => !INBOX_MCP_WAKING_HOSTS.includes(host)), ...(orcaMode() ? ["orca"] : [])]);
++import { createOrcaLaunchHosts, orcaMode } from "./inbox-orca-host";
++import { createOrcaSurface, orcaMcpCommand } from "./inbox-orca-surface";
+ 
+@@ -1690,3 +1692,5 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+    */
+-  const projectFolders = (rows?: readonly InboxListRow[]) => {
++  const orcaSurface = createOrcaSurface(dataDir, store, version, { updates, autoOn: () => resolveAutoUpdate(loadConfig()) && resolveUpdateCheck(loadConfig()), onChange: () => { for (const listener of deliveryListeners) listener(false, true, false, true); }, onUpdateChange: () => { for (const listener of statusListeners) listener(); } });
++  const projectFolders = (rows?: readonly InboxListRow[]) => orcaSurface.markImported(stockProjectFolders(rows));
++  const stockProjectFolders = (rows?: readonly InboxListRow[]) => {
+     const byThread = snoozesById();
+@@ -3669,3 +3673,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+     /** The stdio MCP entry as argv: `<this CLI> inbox mcp`. */
+-    mcp_command: [...selfCommand, "inbox", "mcp"],
++    mcp_command: orcaMcpCommand(dataDir, [...selfCommand, "inbox", "mcp"]),
+     home: homedir(),
+@@ -4743,3 +4747,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+     selfCommand,
+-    hosts: options.launchHosts,
++    hosts: options.launchHosts ?? createOrcaLaunchHosts,
+   });
+@@ -5458,2 +5462,4 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+       }
++      const orcaAnswer = await orcaSurface.route(req, path, { json, crossSite: crossSiteCardRead });
++      if (orcaAnswer) return orcaAnswer;
+       if (path === "/api/inbox/health" && req.method === "GET") return json(health());

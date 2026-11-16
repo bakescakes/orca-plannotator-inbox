@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "plannotator-inbox",
   "name": "Plannotator Inbox",
-  "version": "0.1.1",
-  "description": "Brings your Plannotator Inbox replies back into the Orca chat that asked. Works with the stock Plannotator Inbox; nothing is patched.",
+  "version": "0.2.0",
+  "description": "Brings your Plannotator Inbox replies back into the Orca chat that asked, and lets the Inbox start, stop, resume and open Orca chats. Keeps itself and its Plannotator up to date.",
   "author": {
     "name": "bakescakes",
     "url": "https://github.com/bakescakes"
@@ -36,6 +36,14 @@
         "title": "Plannotator Inbox: Show Status"
       },
       {
+        "id": "inbox.restartOnBuild",
+        "title": "Plannotator Inbox: Restart Inbox on the Orca Build"
+      },
+      {
+        "id": "build.check",
+        "title": "Plannotator Inbox: Check for a New Orca Build"
+      },
+      {
         "id": "agents.connect",
         "title": "Plannotator Inbox: Connect Agents"
       },
@@ -65,6 +73,43 @@
         "key": "notifyBlocked",
         "title": "Notify when a reply needs you",
         "description": "A desktop notification when Orca cannot confirm a reply was delivered.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "links",
+        "title": "Add an \"Open in Orca\" link to Inbox messages",
+        "description": "Each message an Orca chat sends ends with a link that brings that chat forward. The link only works on this computer.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "pictures",
+        "title": "Use Orca's repository icons as project pictures",
+        "description": "Gives an Inbox project the icon of its Orca repository. A picture you chose in the Inbox yourself is never replaced.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "agentIcons",
+        "title": "Show each Orca chat with its agent's icon",
+        "description": "In the Inbox, a Claude Code chat shows Claude's icon, a Codex chat Codex's, and so on. Needs the Orca build of Plannotator. An icon you chose in the Inbox yourself is never replaced.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "projects",
+        "title": "Only these projects",
+        "description": "One folder per line. When any is listed, only chats in those folders send as Orca chats and get replies delivered. Leave empty for every project.",
+        "type": "string",
+        "multiline": true,
+        "default": "",
+        "placeholder": "~/code/my-project"
+      },
+      {
+        "key": "orcaBuild",
+        "title": "Use the Orca build of Plannotator",
+        "description": "This plugin downloads Plannotator with Orca support added and keeps it up to date: the Inbox can start, stop and resume Orca chats and shows each agent's icon. When off, the Plannotator installed on this computer is used as it is.",
         "type": "boolean",
         "default": true
       },

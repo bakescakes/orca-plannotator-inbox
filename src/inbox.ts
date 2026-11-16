@@ -4,6 +4,9 @@
 //   POST /api/inbox/bridge/poll       the replies waiting for one session (long poll)
 //   POST /api/inbox/bridge/event      "delivered" acknowledgement
 //   GET  /api/inbox/threads           read once in a while to find Orca sessions that wrote before
+//   GET  /api/inbox/projects          projects and the run's serverSession (project pictures)
+//   POST /api/inbox/projects/:id/picture, GET the same: a project's picture (presentation.ts)
+//   GET  /api/inbox/threads/<id>      one thread, to check where a reply came from before it is sent
 // Every field Plannotator adds later is ignored; only the ones read here must keep their shape.
 import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -23,6 +26,19 @@ export type InboxCommand = Record<string, unknown> & {
   body: string
 }
 export type ThreadAuthor = { session: string; raw: string; projectRoot: string | null }
+/** One message of a thread, as `GET /api/inbox/threads/<id>` serves it; only what source checks read. */
+export type ThreadMessage = {
+  id: string
+  replyTo: string | null
+  author: { kind: string | null; host: string | null; session: string | null }
+  /** An explicit addressee (a person's New message, or a reply handed to another session); null when none. */
+  to: { host: string | null; session: string | null } | null
+  createdAt: string | null
+}
+/** One thread: its project's root (an absolute real path) and its messages by id. */
+export type ThreadSource = { threadId: string; root: string; messages: Map<string, ThreadMessage> }
+
+const MAX_THREAD_MESSAGES = 10_000
 
 /** The Inbox is not installed, not running, or not answering: replies simply wait in it. */
 export class InboxUnavailable extends Error {}
@@ -60,6 +76,26 @@ async function readPrivateFile(path: string): Promise<string | null> {
   }
   if (info.size > MAX_RESPONSE) throw new InboxContractError('The Inbox registry is too large.')
   return readFile(path, 'utf8')
+}
+
+/** An Inbox project id, as the window's picture route takes it. */
+export const PROJECT_ID = /^prj_[A-Za-z0-9_]{1,150}$/
+const MAX_PROJECTS = 5000
+/** Stock keeps a set picture at 512 KB; a read far past that is not one. */
+const MAX_PICTURE_READ = 1024 * 1024
+
+/**
+ * One project as the window lists it. `picture` is stock's marker for a set picture (when it was
+ * set, in ms) and is left for the caller to judge; `mergedInto` names a project it was combined into.
+ */
+export type InboxProjectRow = { id: string; root: string; picture: unknown; mergedInto: string | null }
+export type InboxProjects = { serverSession: string; projects: InboxProjectRow[] }
+
+export function parseProjectRow(value: unknown): InboxProjectRow | null {
+  if (!isRecord(value)) return null
+  const { id, root } = value
+  if (typeof id !== 'string' || !PROJECT_ID.test(id) || typeof root !== 'string' || root === '') return null
+  return { id, root, picture: value.picture, mergedInto: typeof value.merged_into === 'string' ? value.merged_into : null }
 }
 
 export function parseCommand(value: unknown): InboxCommand | null {
@@ -204,6 +240,172 @@ export class InboxClient {
       signal
     )
     if (answer.ok !== true) throw new InboxContractError('The Inbox did not confirm the delivery.')
+  }
+
+  /**
+   * The Inbox's projects and this run's `serverSession`, from the window's own read route
+   * (`GET /api/inbox/projects`). A write to a window route echoes that nonce; a restarted Inbox
+   * refuses an old one with 409 and saves nothing.
+   */
+  async projectList(timeoutMs = 8000, signal?: AbortSignal): Promise<InboxProjects> {
+    const answer = await this.request('/api/inbox/projects', null, timeoutMs, signal)
+    const nonce = answer.serverSession
+    if (typeof nonce !== 'string' || nonce === '' || nonce.length > 200) {
+      throw new InboxContractError('The Inbox listed its projects without a server session.')
+    }
+    if (!Array.isArray(answer.projects) || answer.projects.length > MAX_PROJECTS) {
+      throw new InboxContractError('The Inbox listed its projects in an unknown shape.')
+    }
+    const projects: InboxProjectRow[] = []
+    const seen = new Set<string>()
+    for (const item of answer.projects) {
+      const row = parseProjectRow(item)
+      if (!row) throw new InboxContractError('The Inbox listed a project in an unknown shape.')
+      // Two rows with one id cannot be told apart: nothing is changed for either.
+      if (seen.has(row.id)) throw new InboxContractError('The Inbox listed one project twice.')
+      seen.add(row.id)
+      projects.push(row)
+    }
+    return { serverSession: nonce, projects }
+  }
+
+  /**
+   * Sets one project's picture (the window's Set picture…): an inline `data:image/…;base64,` URL.
+   * Answers the project as the Inbox now lists it, or null. Stock refuses (4xx) before it saves
+   * anything; a lost answer may or may not have saved it.
+   */
+  async setProjectPicture(
+    projectId: string,
+    picture: string,
+    serverSession: string,
+    timeoutMs = 8000,
+    signal?: AbortSignal
+  ): Promise<InboxProjectRow | null> {
+    if (!PROJECT_ID.test(projectId)) throw new InboxContractError('Not an Inbox project id.')
+    const answer = await this.request(`/api/inbox/projects/${projectId}/picture`, { picture, serverSession }, timeoutMs, signal)
+    if (answer.project === null) return null
+    const row = parseProjectRow(answer.project)
+    if (!row) throw new InboxContractError('The Inbox answered a picture change in an unknown shape.')
+    return row
+  }
+
+  /**
+   * What the Orca build of Plannotator says it can do (`GET /api/inbox/orca`); [] for standard
+   * Plannotator, which has no such route.
+   */
+  async orcaFeatures(timeoutMs = 4000, signal?: AbortSignal): Promise<string[]> {
+    let answer: Record<string, unknown>
+    try {
+      answer = await this.request('/api/inbox/orca', null, timeoutMs, signal)
+    } catch (error) {
+      if (error instanceof InboxRefused || error instanceof InboxContractError) return []
+      throw error
+    }
+    if (answer.mode !== 'orca' || !Array.isArray(answer.features)) return []
+    return answer.features.filter((item): item is string => typeof item === 'string' && item.length <= 60).slice(0, 50)
+  }
+
+  /** The face each agent's icon shows, and this run's `serverSession` (which a face change echoes). */
+  async agentFaces(timeoutMs = 8000, signal?: AbortSignal): Promise<{ serverSession: string | null; faces: Record<string, { face: string; sessions: string[] }> }> {
+    const [health, answer] = await Promise.all([this.health(signal), this.request('/api/inbox/agent-faces', null, timeoutMs, signal)])
+    const faces: Record<string, { face: string; sessions: string[] }> = {}
+    if (isRecord(answer.faces)) {
+      for (const [agent, entry] of Object.entries(answer.faces).slice(0, 2000)) {
+        if (!isRecord(entry) || typeof entry.face !== 'string') continue
+        faces[agent] = { face: entry.face, sessions: Array.isArray(entry.sessions) ? entry.sessions.filter((item): item is string => typeof item === 'string') : [] }
+      }
+    }
+    return { serverSession: health.serverSession, faces }
+  }
+
+  /** Sets one agent's face, as the window's own picker does. The Inbox refuses (4xx) before it saves anything. */
+  async setAgentFace(agent: string, face: string, serverSession: string, timeoutMs = 8000, signal?: AbortSignal): Promise<void> {
+    await this.request('/api/inbox/agent-faces', { agent, face, serverSession }, timeoutMs, signal)
+  }
+
+  /**
+   * The bytes of the picture the Inbox shows for a project (a set picture first), or null when it
+   * has none. Read only to learn whether an earlier write landed.
+   */
+  async projectPicture(projectId: string, timeoutMs = 8000, signal?: AbortSignal): Promise<Uint8Array | null> {
+    if (!PROJECT_ID.test(projectId)) throw new InboxContractError('Not an Inbox project id.')
+    const registry = await this.registry()
+    if (registry === null) throw new InboxUnavailable('The Plannotator Inbox has not run on this computer yet.')
+    const timeout = AbortSignal.timeout(timeoutMs)
+    let response: Response
+    try {
+      response = await this.fetchImpl(`http://127.0.0.1:${registry.port}/api/inbox/projects/${projectId}/picture`, {
+        method: 'GET',
+        headers: { accept: 'image/*' },
+        redirect: 'error',
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+      })
+    } catch {
+      throw new InboxUnavailable('The Plannotator Inbox is not answering.')
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => undefined)
+      return null
+    }
+    if (response.status >= 500) throw new InboxUnavailable(`The Plannotator Inbox failed (${response.status}).`)
+    if (response.status !== 200) throw new InboxRefused(response.status, 'The Inbox refused the picture read.')
+    const declared = Number(response.headers.get('content-length') ?? '0')
+    if (declared > MAX_PICTURE_READ) throw new InboxContractError('The Inbox picture is too large.')
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer())
+    } catch {
+      throw new InboxUnavailable('The Plannotator Inbox closed the connection.')
+    }
+    if (bytes.byteLength > MAX_PICTURE_READ) throw new InboxContractError('The Inbox picture is too large.')
+    return bytes
+  }
+
+  /**
+   * One thread as the Inbox window reads it (`GET /api/inbox/threads/<id>`), for checking where a
+   * reply came from before it is delivered. Throws InboxUnavailable while the Inbox cannot answer
+   * (read again later), InboxRefused with status 404 when the thread is gone, and
+   * InboxContractError when the answer is not in the expected shape.
+   */
+  async thread(threadId: string, signal?: AbortSignal): Promise<ThreadSource> {
+    if (!ID.test(threadId)) throw new InboxContractError('The reply names a thread id this plugin cannot read.')
+    const path = `/api/inbox/threads/${encodeURIComponent(threadId)}`
+    let answer: Record<string, unknown>
+    try {
+      answer = await this.request(path, null, 8000, signal)
+    } catch (error) {
+      // Only the Inbox saying this thread is gone counts as gone; any other refusal (a route an
+      // older or newer Inbox does not have, say) is a shape this plugin does not understand.
+      if (error instanceof InboxRefused && !(error.status === 404 && error.message === `The Inbox refused ${path}: thread_not_found`)) {
+        throw new InboxContractError(`The Inbox would not show a reply's thread (${error.message}).`)
+      }
+      throw error
+    }
+    const thread = answer.thread
+    if (!isRecord(thread) || !Array.isArray(thread.messages)) throw new InboxContractError('The Inbox answered a thread read in an unknown shape.')
+    if (thread.thread_id !== undefined && thread.thread_id !== threadId) throw new InboxContractError('The Inbox answered with another thread.')
+    const project = thread.project
+    if (!isRecord(project) || typeof project.root !== 'string' || project.root === '') {
+      throw new InboxContractError('The Inbox answered a thread read without its project folder.')
+    }
+    if (thread.messages.length > MAX_THREAD_MESSAGES) throw new InboxContractError('The Inbox thread is too large to check.')
+    const text = (value: unknown): string | null => (typeof value === 'string' ? value : null)
+    const messages = new Map<string, ThreadMessage>()
+    for (const item of thread.messages) {
+      if (!isRecord(item) || typeof item.id !== 'string' || item.id === '') throw new InboxContractError('The Inbox thread holds a message without an id.')
+      // Two messages under one id cannot be told apart: refuse to judge rather than pick one.
+      if (messages.has(item.id)) throw new InboxContractError('The Inbox thread holds two messages with the same id.')
+      const author = isRecord(item.author) ? item.author : {}
+      const to = item.to === undefined || item.to === null ? null : isRecord(item.to) ? item.to : {}
+      messages.set(item.id, {
+        id: item.id,
+        replyTo: text(item.reply_to),
+        author: { kind: text(author.kind), host: text(author.host), session: text(author.session) },
+        to: to === null ? null : { host: text(to.host), session: text(to.session) },
+        createdAt: text(item.created_at)
+      })
+    }
+    return { threadId, root: project.root, messages }
   }
 
   /**
