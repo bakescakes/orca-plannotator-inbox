@@ -121,6 +121,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Orca's test runner takes any file on another drive than the plugin for one of the plugin's
+      # own, and its own files then fail to load. The runner checks out on D: and Orca installs
+      # on C:, so the plugin is tested from a copy beside Orca.
+      - name: Put the plugin on the drive Orca installs to
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plugin = Join-Path $env:LOCALAPPDATA 'plugin-under-test'
+          Copy-Item -Recurse -Force $env:GITHUB_WORKSPACE $plugin
+          "PLUGIN=$plugin" >> $env:GITHUB_ENV
+
       - name: Newest Orca
         run: |
           $ErrorActionPreference = 'Stop'
@@ -128,9 +138,12 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           gh release download --repo stablyai/orca --pattern 'orca-windows-setup.exe' --dir $dir
           Start-Process -FilePath (Join-Path $dir 'orca-windows-setup.exe') -ArgumentList '/S' -Wait
-          $cli = Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter 'orca.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cli) { throw 'the Orca CLI was not found after installing' }
-          "ORCA=$($cli.FullName)" >> $env:GITHUB_ENV
+          # `orca.cmd` only forwards to the `orca.exe` beside it, which is the one a program can start.
+          $shim = Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter 'orca.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $shim) { throw 'the Orca CLI was not found after installing' }
+          $cli = Join-Path $shim.DirectoryName 'orca.exe'
+          if (-not (Test-Path $cli)) { throw "no orca.exe beside $($shim.FullName)" }
+          "ORCA=$cli" >> $env:GITHUB_ENV
 
       - name: Newest Plannotator
         run: |
@@ -145,6 +158,7 @@ jobs:
 
       - name: Types, type-check, manifest
         run: |
+          Set-Location $env:PLUGIN
           npm ci
           & $env:ORCA plugin types .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -155,6 +169,6 @@ jobs:
 
       - name: Tests, including the end-to-end run with the real Plannotator
         run: |
+          Set-Location $env:PLUGIN
           & $env:ORCA plugin test .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-

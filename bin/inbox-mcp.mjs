@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const WAKES_META = 'ai.plannotator/inbox-wakes'
 const IDENTITY_FIELDS = ['agent_host', 'agent_session', 'agent_name']
@@ -252,6 +253,19 @@ function pump(source, destination, transform, endDestination = true) {
   if (endDestination) source.on('end', () => destination.end())
 }
 
+/**
+ * Starts Plannotator. Windows runs a `.cmd` or `.bat` only through its command interpreter, which
+ * reads the line again, so such a file gets plain arguments only.
+ */
+function start(binary, args, options) {
+  if (process.platform !== 'win32' || !/\.(cmd|bat)$/i.test(binary)) return spawn(binary, args, options)
+  const parts = [binary, ...args]
+  const odd = parts.find((part) => /["%\r\n]/.test(part))
+  if (odd !== undefined) throw new Error(`${JSON.stringify(odd)} cannot be passed to a batch file`)
+  const line = parts.map((part) => `"${part}"`).join(' ')
+  return spawn(options.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...options, windowsVerbatimArguments: true })
+}
+
 export function main(env = process.env) {
   const binary = findPlannotator(env)
   if (!binary) {
@@ -261,11 +275,17 @@ export function main(env = process.env) {
   const childEnv = { ...env }
   // The launcher runs this file with Orca's own binary in Node mode; nothing started from here may inherit that.
   delete childEnv.ELECTRON_RUN_AS_NODE
-  const child = spawn(binary, ['inbox', 'mcp', ...process.argv.slice(2)], { env: childEnv, stdio: ['pipe', 'pipe', 'inherit'] })
-  child.on('error', (error) => {
+  const failed = (error) => {
     process.stderr.write(`Could not start Plannotator: ${error.message}\n`)
     process.exit(1)
-  })
+  }
+  let child
+  try {
+    child = start(binary, ['inbox', 'mcp', ...process.argv.slice(2)], { env: childEnv, stdio: ['pipe', 'pipe', 'inherit'] })
+  } catch (error) {
+    return failed(error)
+  }
+  child.on('error', failed)
   // `close`, not `exit`: by then everything the server wrote has been read and passed on.
   child.on('close', (code, signal) => process.stdout.write('', () => process.exit(signal ? 1 : (code ?? 0))))
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => child.kill(signal))
@@ -346,5 +366,7 @@ export function main(env = process.env) {
 }
 
 // Run only when started as a program; tests import the functions above.
+// A URL's path is not a file path on Windows (`/C:/…`), and Windows paths compare without case.
 const invoked = process.argv[1] ? real(process.argv[1]) : ''
-if (invoked && invoked === real(new URL(import.meta.url).pathname)) main()
+const self = real(fileURLToPath(import.meta.url))
+if (invoked && (process.platform === 'win32' ? invoked.toLowerCase() === self.toLowerCase() : invoked === self)) main()

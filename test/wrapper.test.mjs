@@ -116,9 +116,15 @@ function sandbox() {
   mkdirSync(shared)
   mkdirSync(data)
   writeFileSync(join(root, 'server.mjs'), SERVER)
-  const bin = join(root, 'plannotator')
   // The wrapper removes ELECTRON_RUN_AS_NODE for its child; this stand-in needs it back to run as Node.
-  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '${process.execPath}' '${join(root, 'server.mjs')}' "$@"\n`)
+  const windows = process.platform === 'win32'
+  const bin = join(root, windows ? 'plannotator.cmd' : 'plannotator')
+  writeFileSync(
+    bin,
+    windows
+      ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${join(root, 'server.mjs')}" %*\r\n`
+      : `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '${process.execPath}' '${join(root, 'server.mjs')}' "$@"\n`
+  )
   chmodSync(bin, 0o755)
   return { root, shared, data, bin }
 }
@@ -126,7 +132,7 @@ function sandbox() {
 /** Starts the wrapper and sends the lines one at a time, as a client does: each request waits for its answer. */
 function converse(env, lines) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [WRAPPER], { env: { PATH: process.env.PATH, ELECTRON_RUN_AS_NODE: '1', ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [WRAPPER], { env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1', ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
     let out = ''
     let err = ''
     let expected = 0
@@ -213,5 +219,5 @@ test('in an Orca chat with the plugin not delivering, nothing is changed or regi
 
 test('without Plannotator installed it says so and exits', async () => {
   const box = sandbox()
-  await assert.rejects(converse({ PATH: '/nonexistent', HOME: box.root, PLANNOTATOR_BIN: '' }, []), /Plannotator is not installed/)
+  await assert.rejects(converse({ PATH: join(box.root, 'nowhere'), HOME: box.root, USERPROFILE: box.root, LOCALAPPDATA: box.root, PLANNOTATOR_BIN: '' }, []), /Plannotator is not installed/)
 })

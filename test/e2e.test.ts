@@ -1,5 +1,5 @@
-// End to end against a real, unmodified Plannotator: the launcher's wrapper in front of the real
-// `plannotator inbox mcp`, the real Inbox on loopback, and the plugin's engine. Only Orca is a
+// End to end against a real, unmodified Plannotator: the launcher, exactly as an agent's settings
+// run it, in front of the real `plannotator inbox mcp`, the real Inbox on loopback, and the plugin's engine. Only Orca is a
 // stand-in (its CLI contract is covered by courier.test.ts). This is the test that says whether
 // a Plannotator update broke the plugin, so CI runs it against the newest release.
 //
@@ -28,7 +28,18 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
   const dataDir = join(home, '.plannotator')
   await mkdir(home, { recursive: true })
   await mkdir(project, { recursive: true })
+  // Windows programs need a few of the system's own variables to start; the home stays the throwaway one.
+  const system =
+    process.platform === 'win32'
+      ? {
+          ...Object.fromEntries(['SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP'].map((key) => [key, process.env[key]])),
+          USERPROFILE: home,
+          APPDATA: join(home, 'AppData', 'Roaming'),
+          LOCALAPPDATA: join(home, 'AppData', 'Local')
+        }
+      : {}
   const base = {
+    ...system,
     HOME: home,
     PATH: process.env.PATH,
     TMPDIR: process.env.TMPDIR,
@@ -53,12 +64,15 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
     tickMs: 250,
     legacyConfig: null
   })
-  await installShared(shared, WRAPPER)
+  const launcher = await installShared(shared, WRAPPER)
   engine.start()
 
-  const child = spawn(process.execPath, [join(shared, 'inbox-mcp.mjs')], {
+  // A `.cmd` starts only through Windows' command interpreter, which is also how an agent's host runs it.
+  const viaShell = process.platform === 'win32'
+  const child = spawn(viaShell ? (process.env.ComSpec ?? 'cmd.exe') : launcher, viaShell ? ['/d', '/s', '/c', `""${launcher}""`] : [], {
     cwd: project,
-    env: { ...base, ELECTRON_RUN_AS_NODE: '1', PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1' }
+    windowsVerbatimArguments: viaShell,
+    env: { ...base, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1' }
   })
   let stderr = ''
   child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))

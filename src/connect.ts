@@ -41,10 +41,15 @@ export type ConnectDeps = {
 
 const defaultRun: RunCli = (file, args, env) =>
   new Promise((resolve) => {
-    execFile(file, args, { env: env as NodeJS.ProcessEnv, timeout: 20_000, cwd: '/', windowsHide: true }, (error, stdout, stderr) => {
-      const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1) : 0
-      resolve({ code, output: `${stdout ?? ''}${stderr ?? ''}`.trim() })
-    })
+    try {
+      execFile(file, args, { env: env as NodeJS.ProcessEnv, timeout: 20_000, cwd: '/', windowsHide: true }, (error, stdout, stderr) => {
+        const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1) : 0
+        resolve({ code, output: `${stdout ?? ''}${stderr ?? ''}`.trim() })
+      })
+    } catch (error) {
+      // Windows refuses to start a `.cmd` (an npm-installed CLI) this way; the caller then edits the settings file itself.
+      resolve({ code: 1, output: error instanceof Error ? error.message : String(error) })
+    }
   })
 
 export function findOnPath(name: string, env: Env, home: string): string | null {

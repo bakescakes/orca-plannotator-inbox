@@ -46,17 +46,22 @@ export class OrcaContractError extends Error {}
 
 export const defaultExec: Exec = (file, args, options) =>
   new Promise((resolvePromise, reject) => {
-    execFile(
-      file,
-      args,
-      { env: options.env as NodeJS.ProcessEnv, timeout: options.timeoutMs, maxBuffer: MAX_OUTPUT, cwd: '/', windowsHide: true },
-      (error, stdout) => {
-        if (error && (error as NodeJS.ErrnoException).code === 'ENOENT') return reject(new OrcaNotRun('The Orca CLI was not found.'))
-        if (error && (error as NodeJS.ErrnoException).code === 'EACCES') return reject(new OrcaNotRun('The Orca CLI cannot be run.'))
-        const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? ((error as { code: number }).code) : 1) : 0
-        resolvePromise({ code, stdout: String(stdout ?? '') })
-      }
-    )
+    try {
+      execFile(
+        file,
+        args,
+        { env: options.env as NodeJS.ProcessEnv, timeout: options.timeoutMs, maxBuffer: MAX_OUTPUT, cwd: '/', windowsHide: true },
+        (error, stdout) => {
+          if (error && (error as NodeJS.ErrnoException).code === 'ENOENT') return reject(new OrcaNotRun('The Orca CLI was not found.'))
+          if (error && (error as NodeJS.ErrnoException).code === 'EACCES') return reject(new OrcaNotRun('The Orca CLI cannot be run.'))
+          const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? ((error as { code: number }).code) : 1) : 0
+          resolvePromise({ code, stdout: String(stdout ?? '') })
+        }
+      )
+    } catch {
+      // Refused before anything started (Windows does this for a `.cmd`), so nothing was sent.
+      reject(new OrcaNotRun('The Orca CLI cannot be run.'))
+    }
   })
 
 /**
@@ -72,7 +77,8 @@ export function locateOrcaCli(setting: string | undefined, env: Record<string, s
     const cli = resolve(dirname(entry), '..', 'cli', 'index.js')
     if (existsSync(cli)) return [process.execPath, cli]
   }
-  const names = process.platform === 'win32' ? ['orca.cmd', 'orca.exe', 'orca'] : ['orca']
+  // Not `orca.cmd`: Windows cannot start it directly, and it refuses to carry message bodies.
+  const names = process.platform === 'win32' ? ['orca.exe', 'orca'] : ['orca']
   const resources = (process as { resourcesPath?: string }).resourcesPath
   const folders = [
     ...(resources ? [join(resources, 'bin')] : []),

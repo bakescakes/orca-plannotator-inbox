@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { mockHost, mountWorker } from 'orca/testing'
 import * as main from '../src/worker'
 import { deactivate, start, type Runtime } from '../src/worker'
+import { launcherPath } from '../src/shared'
 import { fakeInbox, fakeOrca, reply, tempDir, until } from './fakes'
 
 const SESSION = 'claude_1b491d4a_6f38'
@@ -43,9 +44,13 @@ async function machine(settings: Record<string, string | boolean> = {}) {
 test('on start it installs the launcher, and a registered chat gets its reply', async () => {
   const t = await machine()
   try {
-    const launcher = await readFile(join(t.shared, 'inbox-mcp'), 'utf8')
-    assert.match(launcher, /^#!\/bin\/sh\n/)
-    assert.ok(launcher.includes(`ELECTRON_RUN_AS_NODE=1 exec '${process.execPath}' '${join(t.shared, 'inbox-mcp.mjs')}' "$@"`))
+    const launcher = await readFile(launcherPath(t.shared), 'utf8')
+    if (process.platform === 'win32') {
+      assert.ok(launcher.includes(`set ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "${join(t.shared, 'inbox-mcp.mjs')}" %*`), launcher)
+    } else {
+      assert.match(launcher, /^#!\/bin\/sh\n/)
+      assert.ok(launcher.includes(`ELECTRON_RUN_AS_NODE=1 exec '${process.execPath}' '${join(t.shared, 'inbox-mcp.mjs')}' "$@"`))
+    }
     assert.match(await readFile(join(t.shared, 'inbox-mcp.mjs'), 'utf8'), /plannotator/)
 
     await writeFile(join(t.shared, 'sessions', `${SESSION}.json`), JSON.stringify({ v: 1, session: SESSION, raw: SESSION, dataDir: t.dataDir, at: Date.now() }))
@@ -71,7 +76,7 @@ test('connecting agents happens only when asked, and shows in the status', async
     await assert.rejects(readFile(join(t.home, '.codex', 'config.toml'), 'utf8'), 'nothing is written on start')
     const result = await t.worker.request('agents.connect', {})
     assert.equal(result.ok, true)
-    assert.ok((await readFile(join(t.home, '.codex', 'config.toml'), 'utf8')).includes(join(t.shared, 'inbox-mcp')))
+    assert.ok((await readFile(join(t.home, '.codex', 'config.toml'), 'utf8')).includes(JSON.stringify(launcherPath(t.shared))))
     const status = await t.worker.request('status.get', {})
     assert.equal(status.agents.find((agent) => agent.agent === 'codex')?.state, 'connected')
     assert.match(String(await t.worker.command('agents.disconnect')), /Codex is disconnected/)
