@@ -103,6 +103,20 @@ test('codex: an entry this plugin does not recognise is never touched', async ()
   assert.equal((await codexLink(t.deps)).state, 'other')
 })
 
+test('codex: the server written with dotted keys or as an inline table is left alone', async () => {
+  for (const custom of [
+    `${CODEX_BASE}\n[mcp_servers]\nplannotator-inbox.command = "custom-mcp"\nplannotator-inbox.args = []\n`,
+    `${CODEX_BASE}\n[mcp_servers]\n"plannotator-inbox" = { command = "custom-mcp" }\n`,
+    `mcp_servers.plannotator-inbox.command = "custom-mcp"\n${CODEX_BASE}\n`
+  ]) {
+    const t = await setup()
+    await writeFile(t.codex, custom)
+    assert.equal((await codexLink(t.deps)).state, 'other', custom)
+    assert.equal((await connectCodex(t.deps)).ok, false)
+    assert.equal(await readFile(t.codex, 'utf8'), custom, 'adding a table would declare the server twice')
+  }
+})
+
 test('codex: missing when it is not installed, and a first config is created when it is', async () => {
   const bare = await tempDir()
   const deps: ConnectDeps = { home: bare, env: {}, launcher: LAUNCHER, store: memoryStore(), find: () => null }

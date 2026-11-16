@@ -286,9 +286,10 @@ async function readCodex(deps: ConnectDeps): Promise<CodexView | null> {
   const lines = text.split('\n')
   const blocks = tomlBlocks(lines)
   const own = blocks.filter((block) => isOurs(block.key))
-  // The same server written another way (an inline table, a dotted key): not something to edit by hand here.
+  // The same server written another way (an inline table, a dotted key such as `plannotator-inbox.command`
+  // under `[mcp_servers]`): not something to edit by hand here, and adding a table would declare it twice.
   const outside = lines.filter((_, index) => !own.some((block) => index >= block.start && index < block.end))
-  const inline = outside.some((line) => /^\s*(?:mcp_servers\s*[.=]|["']?plannotator-inbox["']?\s*=)/.test(line) && line.includes(SERVER))
+  const inline = outside.some((line) => /^\s*(?:mcp_servers\s*[.=]|["']?plannotator-inbox["']?\s*[.=])/.test(line) && line.includes(SERVER))
   return { lines, blocks, own, text, inline }
 }
 
