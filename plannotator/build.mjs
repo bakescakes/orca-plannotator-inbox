@@ -87,7 +87,8 @@ async function pinnedBun(dir) {
   mkdirSync(into, { recursive: true });
   const tgz = join(into, "bun.tgz");
   writeFileSync(tgz, bytes);
-  run(["tar", "-xzf", tgz, "-C", into], { what: "unpacking Bun" });
+  // Relative names from inside the folder: GNU tar (Git Bash on Windows) reads "C:\…" as a remote host.
+  run(["tar", "-xzf", "bun.tgz"], { cwd: into, what: "unpacking Bun" });
   if (process.platform !== "win32") chmodSync(bin, 0o755);
   return bin;
 }
