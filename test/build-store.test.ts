@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { BuildStore, CHECK_EVERY_MS, installUpdater, readCurrentBuild, storePaths, type UpdaterResult } from '../src/build-store'
+import { BuildStore, CHECK_EVERY_MS, FEATURE_WORDS, WAITING_CHECK_MS, installUpdater, readCurrentBuild, reducedOf, storePaths, type UpdaterResult } from '../src/build-store'
 import { upgradeCommand } from '../src/shared'
 import { tempDir } from './fakes'
 
@@ -57,15 +57,22 @@ test('the updater and its launcher are installed beside the MCP launcher', async
 test('status: stock without a valid build, the build when one is recorded, and the newest failure', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
   const b = await box()
   const store = new BuildStore({ sharedDir: b.shared, env: {}, home: b.root })
-  assert.deepEqual(await store.status(), { mode: 'stock', version: null, build: null, latestKnown: null, lastError: null, updating: false, phase: null, detail: null })
+  assert.deepEqual(await store.status(), { mode: 'stock', version: null, build: null, latestKnown: null, lastError: null, updating: false, phase: null, detail: null, waiting: null, reduced: null })
   await b.install()
   assert.deepEqual(await readCurrentBuild(b.shared), { v: 1, version: '0.28.66', build: 'orca.1', path: b.binary, sha256: 'e'.repeat(64), size: (await stat(b.binary)).size, installedAt: 5 })
   const status = await store.status()
   assert.deepEqual([status.mode, status.version, status.build], ['orca-build', '0.28.66', 'orca.1'])
 
+  // An updater before 0.3.0 wrote a release with no Orca build yet as a failure: it is a wait.
+  const at = Date.now() / 1000
+  await privateJson(storePaths(b.shared).state, { phase: 'failed', version: '0.28.67', at, detail: 'No Orca build of Plannotator 0.28.67 has been published yet, so the Orca build of Plannotator 0.28.66 stays in use.' })
+  const older = await store.status()
+  assert.equal(older.lastError, null)
+  assert.deepEqual(older.waiting, { version: '0.28.67', since: at * 1000 })
   // The Inbox's own Update button ran the updater, and it failed.
-  await privateJson(storePaths(b.shared).state, { phase: 'failed', version: '0.28.67', at: Date.now() / 1000, detail: 'No Orca build of Plannotator 0.28.67 has been published yet, so the Orca build of Plannotator 0.28.66 stays in use.' })
-  assert.match((await store.status()).lastError ?? '', /0\.28\.67 has been published yet/)
+  await privateJson(storePaths(b.shared).state, { phase: 'failed', version: '0.28.67', at, detail: 'The download does not match the checksum the release lists, so it was not used. The Orca build of Plannotator 0.28.66 stays in use.' })
+  assert.match((await store.status()).lastError ?? '', /does not match the checksum/)
+  assert.equal((await store.status()).waiting, null)
   assert.equal((await store.status()).phase, 'failed')
   await chmod(b.binary, 0o777)
   assert.equal((await store.status()).mode, 'stock', 'a build others can change is not used')
@@ -116,6 +123,71 @@ test('ensure runs the updater at most every 6 hours, longer after failures, and 
   now += CHECK_EVERY_MS
   await Promise.all([store.ensure(), store.ensure()])
   assert.equal(runs.length, 6)
+})
+
+test('while a release has no Orca build yet, or the build in use is reduced, the updater looks every 15 minutes', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const b = await box()
+  await b.install()
+  let now = 1_000_000_000_000
+  const runs: string[][] = []
+  let answer: UpdaterResult = { ok: true, installed: false, detail: 'already the newest' }
+  const store = new BuildStore({ sharedDir: b.shared, env: {}, home: b.root, now: () => now, runUpdater: async (args) => (runs.push(args), answer) })
+  await store.ensure()
+  assert.deepEqual(runs, [[]])
+  const waiting = { v: 1, version: '0.28.67', since: now, checkedAt: now }
+  await privateJson(join(storePaths(b.shared).store, 'waiting.json'), waiting)
+  await privateJson(storePaths(b.shared).state, { phase: 'ready', version: '0.28.66', at: now / 1000, detail: 'Plannotator 0.28.67 is out. Its Orca build is not published yet; the Orca build of Plannotator 0.28.66 stays in use and updates by itself when it is.' })
+  const status = await store.status()
+  assert.deepEqual([status.waiting, status.lastError, status.mode], [{ version: '0.28.67', since: now }, null, 'orca-build'])
+  now += WAITING_CHECK_MS - 1
+  await store.ensure()
+  assert.equal(runs.length, 1, 'not yet')
+  now += 1
+  await store.ensure()
+  assert.deepEqual(runs[1], ['--version', '0.28.67'], 'it asks for the release waited for')
+  now += WAITING_CHECK_MS
+  await store.ensure()
+  assert.equal(runs.length, 3)
+
+  // A real failure while waiting: back to the 6-hour wait, doubled.
+  answer = { ok: false, version: '0.28.67', detail: 'The download does not match the checksum the release lists, so it was not used. The Orca build of Plannotator 0.28.66 stays in use.' }
+  now += WAITING_CHECK_MS
+  assert.match((await store.ensure()).lastError ?? '', /checksum/)
+  assert.equal(runs.length, 4)
+  now += WAITING_CHECK_MS
+  await store.ensure()
+  assert.equal(runs.length, 4, 'a failure is not retried every 15 minutes')
+  now += 2 * CHECK_EVERY_MS
+  answer = { ok: true, installed: false, waiting: { version: '0.28.67' }, detail: 'waiting' }
+  await store.ensure()
+  assert.equal(runs.length, 5)
+  now += WAITING_CHECK_MS
+  await store.ensure()
+  assert.equal(runs.length, 6, 'a good run brings the 15 minutes back')
+
+  // A waited-for release older than the build in use (left behind) is no wait.
+  await privateJson(join(storePaths(b.shared).store, 'waiting.json'), { ...waiting, version: '0.28.60' })
+  assert.equal((await store.status()).waiting, null)
+  now += WAITING_CHECK_MS
+  await store.ensure()
+  assert.equal(runs.length, 6, 'no wait and a full build: 6 hours')
+
+  // A reduced build in use: 15 minutes, for the newest build (a full one of the same version).
+  const record = JSON.parse(await readFile(storePaths(b.shared).current, 'utf8'))
+  await privateJson(storePaths(b.shared).current, { ...record, features: ['agents', 'update-state', 'update-detail'], omitted: ['mark-faces', 'launch-hosts'] })
+  const reduced = await store.status()
+  assert.deepEqual(reduced.reduced, { lacks: ['per-agent icons', 'starting and stopping chats from the Inbox'], omitted: ['mark-faces', 'launch-hosts'] })
+  await store.ensure()
+  assert.deepEqual(runs[6], [])
+})
+
+test('a reduced build is told by what its manifest leaves out', () => {
+  assert.equal(reducedOf(null), null)
+  assert.equal(reducedOf({}), null, 'a manifest without the lists is a full build')
+  assert.equal(reducedOf({ features: ['agents'], omitted: [] }), null)
+  assert.deepEqual(reducedOf({ features: ['mark-faces', 'launch-hosts', 'agents'], omitted: ['update-state', 'update-detail'] }), { lacks: ['update progress in the Inbox'], omitted: ['update-state', 'update-detail'] })
+  assert.deepEqual(reducedOf({ omitted: ['something-new'] }), { lacks: [], omitted: ['something-new'] }, 'no feature list: what is omitted, as named')
+  assert.deepEqual(Object.keys(FEATURE_WORDS).sort(), ['agents', 'launch-hosts', 'mark-faces', 'update-detail', 'update-state'])
 })
 
 test('a run in progress elsewhere counts as updating and is not started again', async () => {

@@ -197,7 +197,19 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
     asker: options.asker ?? DEFAULT_ASKER,
     root: options.root ?? '/work/project',
     threadStatus: 200,
-    threadReads: [] as string[]
+    threadReads: [] as string[],
+    /** `GET /api/inbox/orca`'s features; null: standard Plannotator (no such route). */
+    features: null as string[] | null,
+    /** The Orca build's agent rows (`/api/inbox/control/orca-agents`); null: no such route. */
+    orcaAgents: null as Record<string, unknown>[] | null,
+    /** What a POST to that route answers besides `agents`; `changed` defaults to the ids it moved. */
+    orcaAnswer: null as null | ((body: Record<string, unknown>) => Record<string, unknown>),
+    /** Standard Plannotator's agent rows (`GET /api/inbox/agents`); null: no such route. */
+    stockAgents: null as Record<string, unknown>[] | null,
+    /** Standard Plannotator's `connect` report (`POST /api/inbox/control/connect`). */
+    stockReport: { added: [], already: [], failed: [], foreign: [], manual: [], unfinished: [], claude_code: false, first: false, at: '' } as Record<string, unknown>,
+    /** Every request to the agent routes, with whether it carried the token and an Origin. */
+    agentCalls: [] as { method: string; path: string; body: Record<string, unknown>; token: boolean; origin: boolean }[]
   }
   const synthesized = (threadId: string): Record<string, unknown> | null => {
     const replies = [...REPLIES.values()].filter((command) => command.thread_id === threadId)
@@ -220,6 +232,14 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {}
     if (path === '/api/inbox/health') return json(200, { ok: true, app: 'plannotator-inbox', version: '0.28.66', serverSession: 'boot-1' })
     if (path === '/api/inbox/threads') return json(200, state.threads)
+    const method = init?.method ?? 'GET'
+    const agentRoute = ['/api/inbox/orca', '/api/inbox/agents', '/api/inbox/control/orca-agents', '/api/inbox/control/connect'].includes(path)
+    if (agentRoute) {
+      const lower = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]))
+      state.agentCalls.push({ method, path, body, token: lower.authorization === `Bearer ${state.token}`, origin: 'origin' in lower })
+    }
+    if (path === '/api/inbox/orca') return state.features ? json(200, { mode: 'orca', features: state.features }) : json(404, { code: 'not_found' })
+    if (path === '/api/inbox/agents' && method === 'GET') return state.stockAgents ? json(200, { agents: state.stockAgents, records: {}, last_report: null, connecting: false }) : json(404, { code: 'not_found' })
     const thread = /^\/api\/inbox\/threads\/([^/]+)$/.exec(path)
     if (thread && (init?.method ?? 'GET') === 'GET') {
       const threadId = decodeURIComponent(thread[1]!)
@@ -245,6 +265,23 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
       }
       return json(200, { commands: state.queue.get(String(body.session)) ?? [] })
     }
+    if (path === '/api/inbox/control/orca-agents' && state.orcaAgents) {
+      if (method === 'GET') return json(200, { v: 1, agents: state.orcaAgents })
+      const except = new Set(Array.isArray(body.except) ? (body.except as string[]) : [])
+      const changed: string[] = []
+      for (const row of state.orcaAgents) {
+        if (except.has(String(row.id)) || !row.detected) continue
+        if (body.action === 'connect' && (row.state === 'absent' || row.state === 'plannotator')) {
+          row.state = 'orca'
+          changed.push(String(row.id))
+        } else if (body.action === 'disconnect' && row.state === 'orca') {
+          row.state = 'absent'
+          changed.push(String(row.id))
+        }
+      }
+      return json(200, { v: 1, agents: state.orcaAgents, changed, problems: [], ...(state.orcaAnswer?.(body) ?? {}) })
+    }
+    if (path === '/api/inbox/control/connect' && method === 'POST') return json(200, { connect: state.stockReport })
     if (path === '/api/inbox/bridge/event') {
       if (state.ackStatus !== 200) return json(state.ackStatus, { code: 'message_not_found' })
       const session = String(body.session)

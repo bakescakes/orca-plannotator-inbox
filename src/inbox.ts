@@ -7,6 +7,9 @@
 //   GET  /api/inbox/projects          projects and the run's serverSession (project pictures)
 //   POST /api/inbox/projects/:id/picture, GET the same: a project's picture (presentation.ts)
 //   GET  /api/inbox/threads/<id>      one thread, to check where a reply came from before it is sent
+//   GET  /api/inbox/agents            the agents Plannotator knows and how each reaches the Inbox (window route)
+//   POST /api/inbox/control/connect   Plannotator connects the agents on this computer its own way
+//   GET/POST /api/inbox/control/orca-agents   the Orca build only: the same, writing the launcher
 // Every field Plannotator adds later is ignored; only the ones read here must keep their shape.
 import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -42,6 +45,17 @@ const MAX_THREAD_MESSAGES = 10_000
 
 /** The Inbox is not installed, not running, or not answering: replies simply wait in it. */
 export class InboxUnavailable extends Error {}
+/**
+ * The Inbox answered with a server error (5xx). Still "unavailable" for replies (they are tried
+ * again later); `message` carries the Inbox's own `error` text when it gave one.
+ */
+export class InboxFailed extends InboxUnavailable {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
 /** The Inbox answered in a shape this plugin does not understand. */
 export class InboxContractError extends Error {}
 /** The Inbox refused one request (4xx). `status` is the HTTP status. */
@@ -98,6 +112,127 @@ export function parseProjectRow(value: unknown): InboxProjectRow | null {
   return { id, root, picture: value.picture, mergedInto: typeof value.merged_into === 'string' ? value.merged_into : null }
 }
 
+/**
+ * How one agent reaches the Inbox, in the Orca build's words (`/api/inbox/control/orca-agents`):
+ * `orca` runs the launcher; `plannotator` runs Plannotator directly; `tool` goes through
+ * Plannotator's own plugin for that agent; `off` was turned off in Plannotator's Settings; `other`
+ * is a `plannotator-inbox` entry that runs something else; `manual` must be connected by hand;
+ * `absent` is found and not connected; `unreadable` has settings that cannot be read.
+ */
+export type InboxAgentState = 'orca' | 'plannotator' | 'tool' | 'off' | 'other' | 'manual' | 'absent' | 'unreadable'
+export type InboxAgentRow = { id: string; label: string; detected: boolean; state: InboxAgentState; reason: string | null; path: string | null }
+export type InboxAgentProblem = { agent: string; reason: string }
+/** What a connect or disconnect did. `skipped`: Plannotator did nothing at all (switched off, or a test sandbox). */
+export type InboxAgentsResult = { agents: InboxAgentRow[]; changed: string[]; problems: InboxAgentProblem[]; skipped: 'env' | 'sandbox' | null }
+
+const AGENT_STATES: readonly InboxAgentState[] = ['orca', 'plannotator', 'tool', 'off', 'other', 'manual', 'absent', 'unreadable']
+/** Plannotator knows 17 agents; anything far past that is not an agent list. */
+const MAX_AGENT_ROWS = 64
+const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$/
+/** The agents the plugin connects itself; the Orca build's route leaves them alone when asked. */
+export const OWN_AGENT_IDS = ['claude-code', 'codex', 'opencode'] as const
+
+/** A string the panel shows, cut to a sane length; null for anything else. */
+function shortText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null
+  const flat = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim()
+  if (flat === '') return null
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+function agentList(value: unknown, what: string): unknown[] {
+  if (!Array.isArray(value)) throw new InboxContractError(`The Inbox answered ${what} without its list of agents.`)
+  return value.slice(0, MAX_AGENT_ROWS)
+}
+
+/** One row of the Orca build's agent list; null when it cannot be read. An unknown state reads as `other`. */
+export function parseOrcaAgentRow(value: unknown): InboxAgentRow | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || !AGENT_ID.test(value.id)) return null
+  const state = AGENT_STATES.includes(value.state as InboxAgentState) ? (value.state as InboxAgentState) : 'other'
+  return {
+    id: value.id,
+    label: shortText(value.label, 80) ?? value.id,
+    detected: value.detected === true,
+    state,
+    reason: shortText(value.reason, 500),
+    path: shortText(value.path, 1024)
+  }
+}
+
+/**
+ * One row of standard Plannotator's `GET /api/inbox/agents` (`InboxAgentRow` there: `reach` says
+ * how it reaches the Inbox), in the Orca build's words. An entry Plannotator connected runs
+ * Plannotator directly, so it is `plannotator`.
+ */
+export function parseStockAgentRow(value: unknown): InboxAgentRow | null {
+  if (!isRecord(value) || typeof value.id !== 'string' || !AGENT_ID.test(value.id)) return null
+  const reach = isRecord(value.reach) ? value.reach : {}
+  let state: InboxAgentState
+  switch (reach.state) {
+    case 'connected':
+    case 'elsewhere':
+      state = reach.kind === 'mcp' ? 'plannotator' : 'tool'
+      break
+    case 'off':
+    case 'removed':
+      state = 'off'
+      break
+    case 'foreign':
+      state = 'other'
+      break
+    case 'manual':
+      state = 'manual'
+      break
+    case 'not_connected':
+      state = 'absent'
+      break
+    case 'unreadable':
+      state = 'unreadable'
+      break
+    default:
+      state = 'other'
+  }
+  return {
+    id: value.id,
+    label: shortText(value.label, 80) ?? value.id,
+    detected: value.detected === true,
+    state,
+    reason: shortText(reach.reason, 500),
+    path: shortText(reach.path, 1024)
+  }
+}
+
+function parseRows(value: unknown, what: string, parse: (row: unknown) => InboxAgentRow | null): InboxAgentRow[] {
+  const rows: InboxAgentRow[] = []
+  const seen = new Set<string>()
+  for (const item of agentList(value, what)) {
+    const row = parse(item)
+    if (!row || seen.has(row.id)) continue
+    seen.add(row.id)
+    rows.push(row)
+  }
+  return rows
+}
+
+function parseProblems(value: unknown): InboxAgentProblem[] {
+  if (!Array.isArray(value)) return []
+  const problems: InboxAgentProblem[] = []
+  for (const item of value.slice(0, MAX_AGENT_ROWS)) {
+    if (!isRecord(item) || typeof item.agent !== 'string' || !AGENT_ID.test(item.agent)) continue
+    problems.push({ agent: item.agent, reason: shortText(item.reason, 500) ?? 'It could not be changed.' })
+  }
+  return problems
+}
+
+function parseIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, MAX_AGENT_ROWS).filter((item): item is string => typeof item === 'string' && AGENT_ID.test(item))
+}
+
+function parseSkipped(value: unknown): 'env' | 'sandbox' | null {
+  return value === 'env' || value === 'sandbox' ? value : null
+}
+
 export function parseCommand(value: unknown): InboxCommand | null {
   if (!isRecord(value)) return null
   const { id, thread_id: threadId, type, body } = value
@@ -152,15 +287,17 @@ export class InboxClient {
     path: string,
     body: Record<string, unknown> | null,
     timeoutMs: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** Sends the Inbox token; every POST does. A GET only for routes behind it (the control routes). */
+    auth = body !== null
   ): Promise<Record<string, unknown>> {
     // Read again on every call: a restart rotates the token and may move the port.
     const registry = await this.registry()
     if (registry === null) throw new InboxUnavailable('The Plannotator Inbox has not run on this computer yet.')
     const headers: Record<string, string> = { accept: 'application/json' }
     const init: RequestInit = { method: 'GET', headers, redirect: 'error' }
+    if (auth) headers.authorization = `Bearer ${registry.token}`
     if (body !== null) {
-      headers.authorization = `Bearer ${registry.token}`
       headers['content-type'] = 'application/json'
       init.method = 'POST'
       init.body = JSON.stringify(body)
@@ -181,7 +318,16 @@ export class InboxClient {
     }
     if (text.length > MAX_RESPONSE) throw new InboxContractError('The Inbox answer is too large.')
     if (response.status === 401) throw new InboxUnavailable('The Plannotator Inbox restarted; reconnecting.')
-    if (response.status >= 500) throw new InboxUnavailable(`The Plannotator Inbox failed (${response.status}).`)
+    if (response.status >= 500) {
+      let said: string | null = null
+      try {
+        const body: unknown = JSON.parse(text)
+        said = isRecord(body) ? shortText(body.error, 300) : null
+      } catch {
+        // Not JSON: the status alone.
+      }
+      throw new InboxFailed(response.status, said ? `The Plannotator Inbox failed (${response.status}): ${said}` : `The Plannotator Inbox failed (${response.status}).`)
+    }
     let parsed: unknown
     try {
       parsed = JSON.parse(text)
@@ -303,6 +449,63 @@ export class InboxClient {
     }
     if (answer.mode !== 'orca' || !Array.isArray(answer.features)) return []
     return answer.features.filter((item): item is string => typeof item === 'string' && item.length <= 60).slice(0, 50)
+  }
+
+  /**
+   * The Orca build's list of agents (`GET /api/inbox/control/orca-agents`, when `orcaFeatures()`
+   * includes `agents`). Rows for `OWN_AGENT_IDS` are in it too; the caller drops them.
+   */
+  async orcaAgents(timeoutMs = 4000, signal?: AbortSignal): Promise<InboxAgentRow[]> {
+    const answer = await this.request('/api/inbox/control/orca-agents', null, timeoutMs, signal, true)
+    if (answer.v !== 1) throw new InboxContractError('The Inbox answered the agent list in an unknown version.')
+    return parseRows(answer.agents, 'the agent list', parseOrcaAgentRow)
+  }
+
+  /**
+   * The Orca build connects (writing the launcher) or disconnects every agent it supports but
+   * `except`. Each agent's own CLI may take a while: up to about 40 s in all.
+   */
+  async orcaAgentsAction(
+    action: 'connect' | 'disconnect',
+    except: readonly string[],
+    timeoutMs = 60_000,
+    signal?: AbortSignal
+  ): Promise<InboxAgentsResult> {
+    const answer = await this.request('/api/inbox/control/orca-agents', { action, except: [...except] }, timeoutMs, signal)
+    if (answer.v !== 1) throw new InboxContractError(`The Inbox answered the agent ${action} in an unknown version.`)
+    return {
+      agents: parseRows(answer.agents, `the agent ${action}`, parseOrcaAgentRow),
+      changed: parseIds(answer.changed),
+      problems: parseProblems(answer.problems),
+      skipped: parseSkipped(answer.skipped)
+    }
+  }
+
+  /** Standard Plannotator's list of agents (`GET /api/inbox/agents`, a window route), in the Orca build's words. */
+  async stockAgents(timeoutMs = 4000, signal?: AbortSignal): Promise<InboxAgentRow[]> {
+    const answer = await this.request('/api/inbox/agents', null, timeoutMs, signal)
+    return parseRows(answer.agents, 'the agent list', parseStockAgentRow)
+  }
+
+  /**
+   * Standard Plannotator connects the agents on this computer its own way, as a terminal
+   * `plannotator inbox` does (`POST /api/inbox/control/connect`, answering `{ connect: report }`).
+   * `changed` is what this run connected; `problems` what failed and why; `manual` what only a person can connect, and why.
+   */
+  async stockConnect(timeoutMs = 60_000, signal?: AbortSignal): Promise<Omit<InboxAgentsResult, 'agents'> & { manual: InboxAgentProblem[] }> {
+    const answer = await this.request('/api/inbox/control/connect', {}, timeoutMs, signal)
+    const report = answer.connect
+    if (!isRecord(report)) throw new InboxContractError('The Inbox answered the agent connect in an unknown shape.')
+    const problems = parseProblems(report.failed)
+    const manual: InboxAgentProblem[] = []
+    if (Array.isArray(report.manual_why)) {
+      for (const item of report.manual_why.slice(0, MAX_AGENT_ROWS)) {
+        if (!isRecord(item) || typeof item.agent !== 'string' || !AGENT_ID.test(item.agent)) continue
+        const why = shortText(item.why, 500)
+        if (why) manual.push({ agent: item.agent, reason: why })
+      }
+    }
+    return { changed: parseIds(report.added), problems, manual, skipped: parseSkipped(report.skipped) }
   }
 
   /** The face each agent's icon shows, and this run's `serverSession` (which a face change echoes). */

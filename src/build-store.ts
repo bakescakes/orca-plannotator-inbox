@@ -6,6 +6,7 @@
 //   <shared>/plannotator/current.json   the build in use (written only by the updater)
 //   <shared>/plannotator/check.json     when the worker last ran the updater, and what came of it
 //   <shared>/bridge/upgrade-state.json  the updater's progress, read by the Inbox in Orca mode
+//   <shared>/plannotator/waiting.json   a Plannotator release that is out with no Orca build yet
 //
 // Stock Plannotator is the fallback everywhere: with no valid build, or no Orca bridge config, or
 // the plugin not delivering, everything runs the `plannotator` the person installed, as before.
@@ -22,6 +23,13 @@ import { errorText, isRecord } from './util'
 
 /** The updater runs at most this often by itself; each failure in a row doubles it, up to 8×. */
 export const CHECK_EVERY_MS = 6 * 60 * 60 * 1000
+/**
+ * While a newer Plannotator has no Orca build yet, or the build in use is a reduced one, the
+ * updater looks this often instead (one small read of the release list), until the build is there.
+ */
+export const WAITING_CHECK_MS = 15 * 60 * 1000
+/** The updater's sentence for a release with no build yet, as versions before 0.3.0 wrote it as a failure. */
+const NOT_PUBLISHED = /^No Orca build of Plannotator (\d{1,6}\.\d{1,6}\.\d{1,6}) has been published yet\b/
 const MAX_BACKOFF_STEPS = 3
 /** One updater run, download included. */
 const UPDATER_TIMEOUT_MS = 30 * 60 * 1000
@@ -33,7 +41,22 @@ const BUILD = /^orca\.\d{1,6}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const MAX_BINARY = 400 * 1024 * 1024
 
-export type BuildRecord = { v: 1; version: string; build: string; path: string; sha256: string; size: number; installedAt: number }
+/** `features` and `omitted`: a reduced build's manifest says what it serves and which Orca changes it leaves out. */
+export type BuildRecord = {
+  v: 1
+  version: string
+  build: string
+  path: string
+  sha256: string
+  size: number
+  installedAt: number
+  features?: string[]
+  omitted?: string[]
+}
+/** A Plannotator release that is out and has no Orca build yet; `since` in ms. */
+export type Waiting = { version: string; since: number }
+/** A build in use that leaves out some of the Orca changes. `lacks`: plain words for what it lacks. */
+export type Reduced = { lacks: string[]; omitted: string[] }
 export type UpgradePhase = 'queued' | 'resolving' | 'building' | 'staged' | 'activating' | 'ready' | 'failed' | 'rolled-back'
 export type UpgradeState = { phase: UpgradePhase; version: string | null; at: number; detail: string | null }
 export type BuildRef = { version: string; build: string }
@@ -46,6 +69,8 @@ export type UpdaterResult = {
   version?: string | null
   build?: string
   latest?: BuildRef | null
+  /** A release that is out with no Orca build yet: the run waited, it did not fail. */
+  waiting?: { version: string } | null
   detail: string
 }
 
@@ -63,6 +88,28 @@ export type BuildStatus = {
   /** The updater's own progress (`upgrade-state.json`), when there is one. */
   phase: UpgradePhase | null
   detail: string | null
+  /** A newer Plannotator that is out with no Orca build yet. */
+  waiting: Waiting | null
+  /** The build in use leaves out some Orca changes. */
+  reduced: Reduced | null
+}
+
+/** What each feature an Orca build can serve gives a person, in words for the panel. */
+export const FEATURE_WORDS: Readonly<Record<string, string>> = {
+  'mark-faces': 'per-agent icons',
+  'launch-hosts': 'starting and stopping chats from the Inbox',
+  agents: 'connecting every agent',
+  'update-state': 'update progress in the Inbox',
+  'update-detail': 'update progress in the Inbox'
+}
+
+/** What a reduced build lacks: the known features its manifest does not list. Null for a full build. */
+export function reducedOf(record: Pick<BuildRecord, 'features' | 'omitted'> | null): Reduced | null {
+  const omitted = record?.omitted ?? []
+  if (omitted.length === 0) return null
+  const served = record?.features ? new Set(record.features) : null
+  const lacks = served ? [...new Set(Object.entries(FEATURE_WORDS).filter(([id]) => !served.has(id)).map(([, words]) => words))] : []
+  return { lacks, omitted: [...omitted] }
 }
 
 type Check = { v: 1; lastAttempt: number; failures: number; lastError: string | null; lastErrorAt: number; latestKnown: BuildRef | null }
@@ -157,7 +204,48 @@ export async function readCurrentBuild(sharedDir: string, platform: NodeJS.Platf
   } catch {
     return null
   }
-  return { v: 1, version, build, path, sha256, size, installedAt: typeof installedAt === 'number' ? installedAt : 0 }
+  const names = (value: unknown): string[] | null =>
+    Array.isArray(value) && value.length <= 24 && value.every((item) => typeof item === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(item)) ? [...new Set(value as string[])] : null
+  const features = names(record.features)
+  const omitted = names(record.omitted)
+  return {
+    v: 1,
+    version,
+    build,
+    path,
+    sha256,
+    size,
+    installedAt: typeof installedAt === 'number' ? installedAt : 0,
+    ...(features ? { features } : {}),
+    ...(omitted ? { omitted } : {})
+  }
+}
+
+/**
+ * The release waited for, when it is newer than the build in use (or none is in use): the updater's
+ * `waiting.json`, or a "not published yet" failure an older updater wrote in the state file.
+ */
+export async function readWaiting(sharedDir: string, inUse: string | null, state: UpgradeState | null): Promise<Waiting | null> {
+  let waiting: Waiting | null = null
+  try {
+    const raw = await readPrivate(join(storePaths(sharedDir).store, 'waiting.json'), 4096)
+    const value: unknown = raw === null ? null : JSON.parse(raw)
+    if (isRecord(value) && value.v === 1 && typeof value.version === 'string' && VERSION.test(value.version)) {
+      waiting = { version: value.version, since: typeof value.since === 'number' && Number.isFinite(value.since) ? value.since : 0 }
+    }
+  } catch {
+    // Unreadable: not waiting.
+  }
+  const older = state && state.phase === 'failed' ? NOT_PUBLISHED.exec(state.detail ?? '') : null
+  if (!waiting && older && state && state.version === older[1]) waiting = { version: older[1]!, since: state.at * 1000 }
+  return waiting && (inUse === null || newerVersion(waiting.version, inUse)) ? waiting : null
+}
+
+function newerVersion(a: string, b: string): boolean {
+  const x = a.split('.').map(Number)
+  const y = b.split('.').map(Number)
+  for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i]! > y[i]!
+  return false
 }
 
 export async function readUpgradeState(sharedDir: string): Promise<UpgradeState | null> {
@@ -320,8 +408,11 @@ export class BuildStore {
       readUpgradeState(this.deps.sharedDir),
       lockHeld(this.deps.sharedDir, this.now())
     ])
-    // The most recent failure, whoever ran the updater (the worker, or the Inbox's Update button).
-    const stateFailedAt = state && (state.phase === 'failed' || state.phase === 'rolled-back') ? state.at * 1000 : 0
+    const waiting = await readWaiting(this.deps.sharedDir, record?.version ?? null, state)
+    // The most recent failure, whoever ran the updater (the worker, or the Inbox's Update button). A release
+    // with no Orca build yet is a wait, not a failure, even as an older updater wrote it.
+    const notPublished = !!state && NOT_PUBLISHED.test(state.detail ?? '')
+    const stateFailedAt = state && (state.phase === 'failed' || state.phase === 'rolled-back') && !notPublished ? state.at * 1000 : 0
     const stateOkAt = state && state.phase === 'ready' ? state.at * 1000 : 0
     let lastError: string | null = null
     if (stateFailedAt > 0 && stateFailedAt >= check.lastErrorAt) lastError = state!.detail
@@ -335,14 +426,18 @@ export class BuildStore {
       // An updater at work, here or elsewhere: a look that starts none is not an update.
       updating: this.updaterRuns > 0 || held,
       phase: state?.phase ?? null,
-      detail: state?.detail ?? null
+      detail: state?.detail ?? null,
+      waiting,
+      reduced: reducedOf(record)
     }
   }
 
   /**
    * Runs the updater when it is due: at most every 6 hours, longer after failures in a row. It
    * installs the newest Orca build when none is installed or a newer one is published, and does
-   * nothing else otherwise. `force` (a person pressed "Check now") skips the wait.
+   * nothing else otherwise. While a newer Plannotator has no Orca build yet, or the build in use is a
+   * reduced one, it is due every 15 minutes instead (unless the last run failed), and asks for that
+   * release by name. `force` (a person pressed "Check now") skips the wait.
    */
   ensure(options: { force?: boolean } = {}): Promise<BuildStatus> {
     if (this.running) {
@@ -354,11 +449,14 @@ export class BuildStore {
     const work = (async (): Promise<BuildStatus> => {
       const check = await this.readCheck()
       const now = this.now()
-      const wait = CHECK_EVERY_MS * 2 ** Math.min(check.failures, MAX_BACKOFF_STEPS)
+      const [record, state] = await Promise.all([readCurrentBuild(this.deps.sharedDir, this.deps.platform), readUpgradeState(this.deps.sharedDir)])
+      const waiting = await readWaiting(this.deps.sharedDir, record?.version ?? null, state)
+      const soon = (waiting !== null || reducedOf(record) !== null) && check.failures === 0
+      const wait = soon ? WAITING_CHECK_MS : CHECK_EVERY_MS * 2 ** Math.min(check.failures, MAX_BACKOFF_STEPS)
       if ((!options.force && now - check.lastAttempt < wait) || (await lockHeld(this.deps.sharedDir, now))) return this.status()
       // Saved first, so a crash part way is not retried at once.
       await this.writeCheck({ ...check, lastAttempt: now }).catch(() => undefined)
-      const result = await this.runUpdater([])
+      const result = await this.runUpdater(waiting ? ['--version', waiting.version] : [])
       const latestKnown = readRef(result.latest) ?? check.latestKnown
       if (result.busy) {
         await this.writeCheck({ ...check, lastAttempt: now, latestKnown }).catch(() => undefined)

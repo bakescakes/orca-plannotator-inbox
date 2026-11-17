@@ -1,29 +1,48 @@
-# The Orca build of Plannotator: once a day (and by hand), build the newest stable Plannotator release that has no
-# Orca build yet, for five targets, run the gates and a --version smoke on each native runner, then publish a release
-# `plannotator-<version>-orca.<n>` with the binaries and manifest.json, and point the `plannotator-orca-index`
-# release's index.json at it. A patch that no longer applies or a failed gate publishes nothing; the index keeps
-# pointing at the last good build.
+# The Orca build of Plannotator: build the newest stable Plannotator release for five targets, run the gates and a
+# --version smoke on each native runner, then publish a release `plannotator-<version>-orca.<n>` with the binaries and
+# manifest.json, and point the `plannotator-orca-index` release's index.json at it.
+#
+# When it builds: the newest stable release (or, by hand, a given version), unless one of that version's builds was
+# already made from this recipe (recipe.json and build.mjs: `node plannotator/build.mjs --recipe-hash`, recorded in
+# each manifest.json). A build with no recipe recorded counts as another recipe. So one version and recipe is never
+# published twice, a new release gets its first build, and a recipe change (a fixed patch) gets orca.<n+1>.
+# - every 15 minutes: a run with nothing to do stops in the first job, quietly. A version whose build failed is tried
+#   again once a day (its open issue says when it last failed). The schedule also catches a push whose own run was
+#   dropped while another run held the concurrency group.
+# - on a push to main that changes plannotator/**, and by hand: at once.
+#
+# Reduced builds: an optional patch (recipe.json `"required": false`) that no longer applies is left out, and the
+# build goes on without its features. It is published only when every target built and passed with the same patches
+# left out; manifest.json then lists `features` and `omitted`, and the release notes say what is lacking. A required
+# patch that no longer applies, a failed gate, or targets that disagree publish nothing; the index keeps pointing at
+# the last good build.
+#
+# Issues: a reduced or failed build opens one issue naming the version, the patch or gate, and the first error line.
+# Only issues this workflow opened itself count (author github-actions): an issue anyone else writes, whatever its
+# text, never delays a build and is never commented on or closed.
+# The same version and cause never opens a second one, and gets at most one comment a day. A later full build of that
+# version or a newer one closes it.
 #
 # Windows: the binary is cross-compiled on Linux (Bun's --compile --target=bun-windows-x64), because upstream's UI
 # build scripts (vendor.sh, the Vite builds) are written for POSIX shells. A Windows runner then runs the gates on the
-# patched source and the --version smoke on that binary before anything is published.
+# patched source (leaving out what the build left out) and the --version smoke on that binary before anything is
+# published.
 #
-# BUILD_DIR is the folder with the patches, added files, recipe and build script.
+# BUILD_DIR is the folder with the patches, added files, recipe, build script and release script.
 name: Orca build of Plannotator
 
 on:
   schedule:
-    - cron: "23 6 * * *"
+    - cron: "*/15 * * * *"
+  push:
+    branches: [main]
+    paths: ["plannotator/**"]
   workflow_dispatch:
     inputs:
       version:
         description: "Plannotator version x.y.z (blank: the newest stable release)"
         required: false
         default: ""
-      rebuild:
-        description: "Publish a new orca.<n> even when this version already has one"
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -40,18 +59,24 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      issues: read
     outputs:
       version: ${{ steps.pick.outputs.version }}
       commit: ${{ steps.pick.outputs.commit }}
       build: ${{ steps.pick.outputs.build }}
       tag: ${{ steps.pick.outputs.tag }}
+      recipe: ${{ steps.pick.outputs.recipe }}
       skip: ${{ steps.pick.outputs.skip }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: plannotator
       - id: pick
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_REBUILD: ${{ inputs.rebuild }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_VERSION:-}" ]; then
@@ -63,20 +88,47 @@ jobs:
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Not a stable Plannotator version: $version"; exit 1
           fi
-          # The tag's commit (peeled for an annotated tag); build.mjs refuses a checkout at any other commit.
-          commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version^{}" | cut -f1)"
-          if [ -z "$commit" ]; then commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version" | cut -f1)"; fi
-          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::Plannotator v$version has no tag commit"; exit 1; fi
-          existing="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
-            --jq "[.[].tagName | select(startswith(\"plannotator-$version-orca.\"))] | length")"
-          skip=false
-          if [ "$existing" -gt 0 ] && [ "${INPUT_REBUILD:-false}" != "true" ]; then skip=true; fi
-          build="orca.$((existing + 1))"
+          recipe="$(node "$BUILD_DIR/build.mjs" --recipe-hash)"
+          tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
+            --jq ".[].tagName | select(startswith(\"plannotator-$version-orca.\"))")"
+          newest=0
+          for tag in $tags; do
+            n="${tag##*-orca.}"
+            if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$newest" ]; then newest="$n"; fi
+          done
+          # One build per version and recipe: a build of this version made from this recipe means nothing to do. The
+          # newest build is read first, so a run with nothing to do reads one small file.
+          skip=false; why=""
+          for tag in $(echo "$tags" | sort -t . -k 4 -n -r); do
+            made="$(gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --output - 2> /dev/null \
+              | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).recipe??""))}catch{}})' || true)"
+            if [ "$made" = "$recipe" ]; then skip=true; why="$tag was built from this recipe"; break; fi
+          done
+          # On the schedule, a failed build of this version is tried again once a day: its open issue was updated less
+          # than a day ago. A push or a run by hand tries at once.
+          if [ "$skip" != true ] && [ "$EVENT" = schedule ]; then
+            recent="$(gh issue list --repo "$GITHUB_REPOSITORY" --author app/github-actions --state open --limit 200 --json author,body,updatedAt \
+              --jq "[.[] | select(.author.is_bot == true) | select(.body | contains(\"<!-- orca-build version=$version \") and contains(\" kind=failed \"))
+                     | select((now - (.updatedAt | fromdateiso8601)) < 86400)] | length" 2> /dev/null || echo 0)"
+            if [ "$recent" -gt 0 ]; then skip=true; why="failed less than a day ago; tried again daily, on a push or by hand"; fi
+          fi
+          commit=""
+          if [ "$skip" != true ]; then
+            # The tag's commit (peeled for an annotated tag); build.mjs refuses a checkout at any other commit.
+            commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version^{}" | cut -f1)"
+            if [ -z "$commit" ]; then commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version" | cut -f1)"; fi
+            if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::Plannotator v$version has no tag commit"; exit 1; fi
+          fi
+          build="orca.$((newest + 1))"
           {
-            echo "version=$version"; echo "commit=$commit"; echo "build=$build"
+            echo "version=$version"; echo "commit=$commit"; echo "build=$build"; echo "recipe=$recipe"
             echo "tag=plannotator-$version-$build"; echo "skip=$skip"
           } >> "$GITHUB_OUTPUT"
-          echo "Plannotator $version ($commit): $([ "$skip" = true ] && echo "already has an Orca build" || echo "building $build")" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$skip" = true ]; then
+            echo "Plannotator $version: nothing to build ($why)."
+          else
+            echo "Plannotator $version ($commit), recipe $recipe: building $build" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     needs: resolve
@@ -107,22 +159,30 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p out
-          # stdout is the build's one-line JSON report; everything else (stderr) is the log, kept for the reason line.
-          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target "$TARGET" --out "out/$ASSET" \
-               2>&1 > "out/$ASSET.json" | tee build.err; then
+          # build.mjs writes its report (what it applied, left out and serves) to out/$ASSET.build.json, also on failure.
+          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target "$TARGET" --out "out/$ASSET" 2>&1 | tee build.err; then
             reason="$(grep '^orca-build: ' build.err | tail -1)"
             echo "::error::${reason:-orca-build: failed}"
             echo "${reason:-orca-build: failed}" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          cat "out/$ASSET.json"
+          left="$(grep '^orca-build: patches applied: ' build.err | tail -1)"
+          echo "${left#orca-build: }" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: |
             out/${{ matrix.asset }}
-            out/${{ matrix.asset }}.json
+            out/${{ matrix.asset }}.build.json
           if-no-files-found: error
+          retention-days: 7
+      # The report alone, also for a failed build: the report job reads why.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: report-${{ matrix.target }}
+          path: out/${{ matrix.asset }}.build.json
+          if-no-files-found: ignore
           retention-days: 7
 
   windows-check:
@@ -146,7 +206,12 @@ jobs:
           COMMIT: ${{ needs.resolve.outputs.commit }}
         run: |
           set -o pipefail
-          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target win32-x64 --gates-only 2>&1 | tee build.err \
+          # The same patches left out as the Windows binary's build, so the gates check what that binary carries.
+          without=()
+          for name in $(node -e 'const r=JSON.parse(require("fs").readFileSync("out/plannotator-orca-win32-x64.exe.build.json","utf8"));for(const o of r.omitted)console.log(o.name)'); do
+            without+=(--without "$name")
+          done
+          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target win32-x64 --gates-only "${without[@]}" 2>&1 | tee build.err \
              || ! node "$BUILD_DIR/build.mjs" --check-binary out/plannotator-orca-win32-x64.exe --version "$VERSION" 2>&1 | tee -a build.err; then
             reason="$(grep '^orca-build: ' build.err | tail -1)"
             echo "::error::${reason:-orca-build: failed on Windows}"
@@ -160,45 +225,40 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      reduced: ${{ steps.manifest.outputs.reduced }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: plannotator
+          path: src
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: plannotator-orca-*
           path: out
           merge-multiple: true
-      - name: Compose manifest.json
+      - name: Compose manifest.json and the release notes
+        id: manifest
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
           BUILD: ${{ needs.resolve.outputs.build }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          RECIPE: ${{ needs.resolve.outputs.recipe }}
         run: |
           set -euo pipefail
-          node --input-type=module -e '
-            import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-            import { createHash } from "node:crypto";
-            const targets = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"];
-            const assets = {};
-            for (const target of targets) {
-              const name = "plannotator-orca-" + target + (target.startsWith("win32") ? ".exe" : "");
-              const bytes = readFileSync("out/" + name);
-              const built = JSON.parse(readFileSync("out/" + name + ".json", "utf8"));
-              const sha256 = createHash("sha256").update(bytes).digest("hex");
-              if (built.sha256 !== sha256) throw Error(name + " changed between its build and publishing");
-              assets[target] = { name, sha256, size: bytes.length };
-            }
-            const manifest = { v: 1, plannotator: process.env.VERSION, build: process.env.BUILD, pluginMin: "0.2.0", assets };
-            writeFileSync("out/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
-            console.log(JSON.stringify(manifest));
-          '
+          # Every target built, from this recipe, with the same patches left out; each binary still matches its report.
+          node "src/$BUILD_DIR/release.mjs" manifest --dir out --version "$VERSION" --build "$BUILD" --commit "$COMMIT" --recipe "$RECIPE" >> "$GITHUB_OUTPUT"
+          cat out/manifest.json
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.resolve.outputs.version }}
-          COMMIT: ${{ needs.resolve.outputs.commit }}
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
-            --title "Plannotator $VERSION, Orca build ${TAG##*-}" \
-            --notes "The Orca build of Plannotator $VERSION (upstream commit $COMMIT), for the Orca plugin. See manifest.json for each binary's sha256." \
+            --title "Plannotator $VERSION, Orca build ${TAG##*-}" --notes-file out/notes.md \
             out/plannotator-orca-darwin-arm64 out/plannotator-orca-darwin-x64 out/plannotator-orca-linux-x64 \
             out/plannotator-orca-linux-arm64 out/plannotator-orca-win32-x64.exe out/manifest.json
       - name: Point the index at this build
@@ -230,3 +290,84 @@ jobs:
             console.log(JSON.stringify(index.latest));
           '
           gh release upload "$index_tag" index/index.json --repo "$GITHUB_REPOSITORY" --clobber
+
+  # One issue per version and cause for a reduced or failed build; a full build closes those of its version and older.
+  report:
+    needs: [resolve, build, windows-check, publish]
+    if: always() && needs.resolve.result == 'success' && needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: plannotator
+          path: src
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: report-*
+          path: reports
+          merge-multiple: true
+      - name: Open, update or close the build's issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          RECIPE: ${{ needs.resolve.outputs.recipe }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          WINDOWS_RESULT: ${{ needs.windows-check.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          verdict="$(node "src/$BUILD_DIR/release.mjs" verdict --dir reports --version "$VERSION" --tag "$TAG" \
+            --build-result "$BUILD_RESULT" --windows-result "$WINDOWS_RESULT" --publish-result "$PUBLISH_RESULT")"
+          echo "$verdict"
+          kind="$(node -p 'JSON.parse(process.argv[1]).kind' "$verdict")"
+          cause="$(node -p 'JSON.parse(process.argv[1]).cause ?? ""' "$verdict")"
+          line="$(node -p 'JSON.parse(process.argv[1]).line' "$verdict")"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --author app/github-actions --state open --limit 200 --json author,number,body,updatedAt \
+            --jq '[.[] | select(.author.is_bot == true) | select(.body | contains("<!-- orca-build version="))]')"
+          case "$kind" in
+            full)
+              # Close every open build issue of this version or an older one.
+              for number in $(echo "$open" | node -e '
+                let s=""; process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{
+                  const v=(x)=>x.split(".").map(Number), cur=v(process.env.VERSION);
+                  const older=(x)=>{const a=v(x);for(let i=0;i<3;i++)if(a[i]!==cur[i])return a[i]<cur[i];return true;};
+                  for(const i of JSON.parse(s)){const m=/<!-- orca-build version=([0-9.]+) /.exec(i.body);if(m&&older(m[1]))console.log(i.number);}
+                });'); do
+                gh issue close "$number" --repo "$GITHUB_REPOSITORY" --comment "Fixed: $TAG is a full build ($RUN_URL)."
+              done
+              ;;
+            reduced|failed)
+              marker="<!-- orca-build version=$VERSION cause=$cause kind=$kind -->"
+              # shellcheck disable=SC2016 # JavaScript, not shell
+              found="$(echo "$open" | node -e '
+                let s=""; process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{
+                  const want=`<!-- orca-build version=${process.env.VERSION} cause=${process.argv[1]} `;
+                  const i=JSON.parse(s).find((x)=>x.body.includes(want));
+                  if(i)console.log(i.number+" "+(Date.now()-Date.parse(i.updatedAt)>86400000?"stale":"fresh"));
+                });' "$cause")"
+              if [ -z "$found" ]; then
+                if [ "$kind" = reduced ]; then
+                  title="Orca build of Plannotator $VERSION is reduced: ${cause#left-out:} left out"
+                  what="$TAG was published without these optional patches, so it lacks their features."
+                else
+                  title="Orca build of Plannotator $VERSION failed: $cause"
+                  what="Nothing was published; the index still points at the last good build."
+                fi
+                # shellcheck disable=SC2016 # Markdown, not shell
+                printf '%s\n\n%s\n\n- Version: %s\n- Cause: %s\n- First error line: `%s`\n- Recipe: %s\n- Run: %s\n\nA later full build of this version or a newer one closes this issue.\n\n%s\n' \
+                  "$what" "Why: $line" "$VERSION" "$cause" "$line" "$RECIPE" "$RUN_URL" "$marker" > issue.md
+                gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
+              elif [ "${found#* }" = stale ]; then
+                gh issue comment "${found%% *}" --repo "$GITHUB_REPOSITORY" --body "Still $kind ($RUN_URL): \`$line\`"
+              else
+                echo "Issue #${found%% *} already says this; commented on at most once a day."
+              fi
+              ;;
+            *) echo "Nothing to report: $line" ;;
+          esac

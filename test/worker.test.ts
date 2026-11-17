@@ -1,6 +1,6 @@
 // The worker as Orca runs it: `activate(orca)` over the test kit's host, with the machine replaced.
 import assert from 'node:assert/strict'
-import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -88,7 +88,36 @@ test('connecting agents happens only when asked, and shows in the status', async
     assert.ok((await readFile(join(t.home, '.codex', 'config.toml'), 'utf8')).includes(JSON.stringify(launcherPath(t.shared))))
     const status = await t.worker.request('status.get', {})
     assert.equal(status.agents.find((agent) => agent.agent === 'codex')?.state, 'connected')
-    assert.match(String(await t.worker.command('agents.disconnect')), /Codex is disconnected/)
+    assert.equal(String(await t.worker.command('agents.disconnect')), 'Disconnected Codex.')
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('with the Orca build’s agent route, every agent found is listed and connected through it', async () => {
+  const t = await machine()
+  try {
+    t.inbox.state.features = ['agents']
+    t.inbox.state.orcaAgents = [
+      { id: 'codex', label: 'Codex', detected: true, state: 'absent', reason: null, path: null },
+      { id: 'gemini', label: 'Gemini CLI', detected: true, state: 'absent', reason: null, path: null },
+      { id: 'amp', label: 'Amp', detected: false, state: 'absent', reason: null, path: null }
+    ]
+    const before = await t.worker.request('status.get', { fresh: true })
+    assert.deepEqual(before.agents.map((agent) => [agent.agent, agent.state]), [['claude', 'missing'], ['codex', 'absent'], ['opencode', 'missing'], ['gemini', 'absent']])
+
+    const result = await t.worker.request('agents.connect', {})
+    assert.deepEqual(result, { ok: true, message: 'Connected Codex and Gemini CLI. It applies to chats started from now on.' })
+    const after = await t.worker.request('status.get', {})
+    assert.equal(after.agents.find((agent) => agent.agent === 'gemini')?.state, 'connected')
+    assert.match(String(await t.worker.command('inbox.status')), /Gemini CLI: Connected through this plugin’s launcher\./)
+
+    // The Inbox stops: the list stays as it was last read.
+    t.inbox.state.up = false
+    const stale = await t.worker.request('status.get', { fresh: true })
+    assert.equal(stale.agents.find((agent) => agent.agent === 'gemini')?.state, 'connected')
+    assert.equal(String(await t.worker.command('agents.disconnect')), 'Disconnected Codex. Other agents are left as they are while the Inbox is not running.')
+    assert.ok(t.inbox.state.agentCalls.filter((call) => call.method === 'POST').length === 1)
   } finally {
     await t.worker.deactivate()
   }
@@ -202,6 +231,19 @@ test('the Orca build: the updater is installed, runs once at start, and its stat
     assert.deepEqual(checked, { ok: false, message: 'The list of Orca builds could not be read.' })
     assert.equal(t.updaterRuns.length, 2)
     assert.equal((await t.worker.request('status.get', { fresh: true })).build?.lastError, 'The list of Orca builds could not be read.')
+
+    // A newer Plannotator with no Orca build yet: "Check" answers with the wait, not a failure.
+    const waitingFile = join(t.shared, 'plannotator', 'waiting.json')
+    await mkdir(join(waitingFile, '..'), { recursive: true, mode: 0o700 })
+    await writeFile(waitingFile, JSON.stringify({ v: 1, version: '0.28.67', since: Date.now(), checkedAt: Date.now() }), { mode: 0o600 })
+    await chmod(waitingFile, 0o600)
+    t.updater.next = { ok: true, installed: false, waiting: { version: '0.28.67' }, detail: 'Plannotator 0.28.67 is out.' }
+    const waited = 'Plannotator 0.28.67 is out. Its Orca build is not published yet; it installs by itself when it is.'
+    assert.deepEqual(await t.worker.request('build.check'), { ok: true, message: waited })
+    assert.deepEqual(t.updaterRuns.at(-1), ['--version', '0.28.67'], 'it asks for the release waited for')
+    const waiting = (await t.worker.request('status.get', { fresh: true })).build
+    assert.deepEqual([waiting?.waiting?.version, waiting?.lastError], ['0.28.67', null])
+    assert.ok(String(await t.worker.command('inbox.status')).includes(waited))
 
     t.updater.next = { ok: true, detail: 'The Inbox now runs the Orca build.' }
     assert.deepEqual(await t.worker.request('inbox.restartOnBuild'), { ok: true, message: 'The Inbox now runs the Orca build.' })

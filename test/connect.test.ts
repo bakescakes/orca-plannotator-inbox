@@ -249,7 +249,7 @@ test('codex: an entry an earlier version wrote is recognised and its list update
   assert.match(link.detail, /earlier version of this plugin/)
 
   const result = await connectCodex(t.deps)
-  assert.deepEqual(result, { ok: true, message: 'Codex’s connection is updated. It applies to chats started from now on.' })
+  assert.deepEqual(result, { ok: true, changed: true, message: 'Codex’s connection is updated. It applies to chats started from now on.' })
   const after = await readFile(t.codex, 'utf8')
   assert.equal(after, before.replace(/^env_vars = .*$/m, `env_vars = ${JSON.stringify(CODEX_ENV_VARS)}`), 'only the env_vars line changed')
   for (const value of Object.values(SECRETS)) assert.ok(!after.includes(value))
@@ -306,7 +306,7 @@ test('opencode: connect adds one entry to opencode.json and disconnect gives the
   const before = `{\n  "$schema": "https://opencode.ai/config.json",\n  "model": "anthropic/claude",\n  "mcp": {\n    "paper": { "type": "remote", "url": "http://127.0.0.1:1/mcp" }\n  }\n}\n`
   await writeFile(t.json, before)
   assert.equal((await openCodeLink(t.deps)).state, 'absent')
-  assert.deepEqual(await connectOpenCode(t.deps), { ok: true, message: 'OpenCode is connected. It applies to chats started from now on.' })
+  assert.deepEqual(await connectOpenCode(t.deps), { ok: true, changed: true, message: 'OpenCode is connected. It applies to chats started from now on.' })
   const after = await readFile(t.json, 'utf8')
   const parsed = JSON.parse(after)
   assert.deepEqual(parsed.mcp['plannotator-inbox'], OURS)

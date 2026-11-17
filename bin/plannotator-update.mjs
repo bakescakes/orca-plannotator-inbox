@@ -17,6 +17,9 @@
 //   plannotator/versions/<version>-<build>/plannotator[.exe]   one folder per installed build
 //   plannotator/current.json    the build in use; previous.json the one before it (kept for rollback)
 //   plannotator/update.lock     held while a run works, so two runs never overlap
+//   plannotator/waiting.json    {v, version, since, checkedAt}: a Plannotator release that is out but has
+//                               no Orca build yet. Not a failure: the state file then says the build in use
+//                               is ready, and the worker looks again every 15 minutes until the build exists.
 // The last line on stdout is one JSON object saying what happened (the worker reads it).
 //
 // Downloads come only from https://github.com/ and the hosts GitHub redirects release assets to,
@@ -147,7 +150,8 @@ export function paths(shared) {
     config: join(shared, 'bridge', 'config.json'),
     state: join(shared, 'bridge', 'upgrade-state.json'),
     heartbeat: join(shared, 'state.json'),
-    installed: join(shared, 'plannotator-update.json')
+    installed: join(shared, 'plannotator-update.json'),
+    waiting: join(store, 'waiting.json')
   }
 }
 
@@ -242,7 +246,9 @@ export function validRecord(record, shared, platform = process.platform) {
   } catch {
     return null
   }
-  return { v: 1, version, build, path, sha256, size, installedAt: Number.isFinite(installedAt) ? installedAt : 0 }
+  const features = nameList(record.features)
+  const omitted = nameList(record.omitted)
+  return { v: 1, version, build, path, sha256, size, installedAt: Number.isFinite(installedAt) ? installedAt : 0, ...(features ? { features } : {}), ...(omitted ? { omitted } : {}) }
 }
 
 /** `current.json` (or `previous.json`), when it names a usable build; otherwise null. */
@@ -599,13 +605,23 @@ export function pickBuild(index, version) {
   return index.builds.find((entry) => entry.plannotator === version) ?? null
 }
 
+const FEATURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/
+/** A manifest's optional list of names (`features`, `omitted`): null when absent or not a list of plain names. */
+function nameList(value) {
+  if (!Array.isArray(value) || value.length > 24 || !value.every((item) => typeof item === 'string' && FEATURE.test(item))) return null
+  return [...new Set(value)]
+}
+
 export function readManifest(manifest, ref, key) {
   if (!isRecord(manifest) || manifest.v !== 1) throw new UpdateError('The Orca build’s manifest has a shape this plugin does not know; update the plugin.')
   if (manifest.plannotator !== ref.plannotator || manifest.build !== ref.build) throw new UpdateError('The Orca build’s manifest names another build, so it was not used.')
   const pluginMin = typeof manifest.pluginMin === 'string' && VERSION.test(manifest.pluginMin) ? manifest.pluginMin : null
   if (!pluginMin) throw new UpdateError('The Orca build’s manifest does not say which plugin it needs, so it was not used.')
+  // A reduced build (some Orca changes left out) says what it serves and what it leaves out; older manifests say neither.
+  const features = nameList(manifest.features)
+  const omitted = nameList(manifest.omitted)
   const asset = isRecord(manifest.assets) ? manifest.assets[key] : undefined
-  if (asset === undefined) return { pluginMin, asset: null }
+  if (asset === undefined) return { pluginMin, asset: null, features, omitted }
   if (
     !isRecord(asset) ||
     asset.name !== assetName(key) ||
@@ -617,7 +633,7 @@ export function readManifest(manifest, ref, key) {
   ) {
     throw new UpdateError('The Orca build’s manifest lists this computer’s file in a shape this plugin does not know, so it was not used.')
   }
-  return { pluginMin, asset: { name: asset.name, sha256: asset.sha256, size: asset.size } }
+  return { pluginMin, asset: { name: asset.name, sha256: asset.sha256, size: asset.size }, features, omitted }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -829,6 +845,18 @@ export function prune(shared, keep) {
 // ---------------------------------------------------------------------------------------------
 // The run
 
+/** The release waited for, or null. */
+export function readWaiting(shared) {
+  const value = readJsonFile(paths(shared).waiting, 4096)
+  return isRecord(value) && value.v === 1 && typeof value.version === 'string' && VERSION.test(value.version)
+    ? { version: value.version, since: Number.isFinite(value.since) ? value.since : 0, checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : 0 }
+    : null
+}
+
+function clearWaiting(shared) {
+  rmSync(paths(shared).waiting, { force: true })
+}
+
 function describe(record) {
   return record ? `the Orca build of Plannotator ${record.version}` : 'stock Plannotator'
 }
@@ -853,10 +881,27 @@ export async function update(options) {
     if (version !== null && !VERSION.test(version)) throw new UpdateError(`${version} is not a Plannotator version, so ${staying} stays in use.`)
     const from = source(env)
     const rawIndex = await fetchJson(from, INDEX_TAG, 'index.json', fetchImpl)
-    if (rawIndex === null) throw new UpdateError(`No Orca build of Plannotator has been published yet, so ${staying} stays in use.`)
-    const index = readIndex(rawIndex)
+    if (rawIndex === null && !version) throw new UpdateError(`No Orca build of Plannotator has been published yet, so ${staying} stays in use.`)
+    const index = rawIndex === null ? { latest: null, builds: [] } : readIndex(rawIndex)
     const latest = index.latest ? { version: index.latest.plannotator, build: index.latest.build } : null
-    const ref = pickBuild(index, version)
+    // A wait that is over: the release has a build now, or a build of it (or a later one) is in use.
+    const waited = readWaiting(shared)
+    if (waited && (index.builds.some((entry) => entry.plannotator === waited.version) || (before && compareVersions(before.version, waited.version) >= 0))) clearWaiting(shared)
+    let ref = pickBuild(index, version)
+    // The release waited for never got a build and a later release has one: that build ends the wait.
+    // Only for the release being waited for; any other version that is missing stays a failure.
+    if (!ref && version && waited?.version === version && index.latest && compareVersions(index.latest.plannotator, version) > 0) ref = pickBuild(index, null)
+    if (!ref && version && (!index.latest || compareVersions(version, index.latest.plannotator) > 0)) {
+      // Plannotator released it and its Orca build is not made yet: not a failure. The state says the build in
+      // use is ready (the Inbox then shows the release as available), and the worker looks again soon.
+      const now = clock()
+      writePrivateJson(p.waiting, { v: 1, version, since: waited?.version === version ? waited.since : now, checkedAt: now })
+      const detail = before
+        ? `Plannotator ${version} is out. Its Orca build is not published yet; the Orca build of Plannotator ${before.version} stays in use and updates by itself when it is.`
+        : `Plannotator ${version} is out. Its Orca build is not published yet; stock Plannotator stays in use until it is.`
+      writeState(shared, 'ready', before?.version ?? null, detail, clock)
+      return { ok: true, installed: false, waiting: { version }, version: before?.version ?? null, build: before?.build, latest, detail }
+    }
     if (!ref) {
       throw new UpdateError(
         version ? `No Orca build of Plannotator ${version} has been published yet, so ${staying} stays in use.` : `No Orca build of Plannotator has been published yet, so ${staying} stays in use.`
@@ -873,7 +918,7 @@ export async function update(options) {
     }
     const manifest = await fetchJson(from, ref.tag, 'manifest.json', fetchImpl)
     if (manifest === null) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} is listed but its release is missing, so ${staying} stays in use.`)
-    const { pluginMin, asset } = readManifest(manifest, ref, key)
+    const { pluginMin, asset, features, omitted } = readManifest(manifest, ref, key)
     if (!asset) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} has no file for ${key}, so ${staying} stays in use.`)
     if (!pluginVersion || !VERSION.test(pluginVersion) || compareVersions(pluginVersion, pluginMin) < 0) {
       throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} needs version ${pluginMin} of the Plannotator Inbox plugin; update the plugin first. ${capitalize(staying)} stays in use.`)
@@ -893,7 +938,17 @@ export async function update(options) {
     rmSync(folder, { recursive: true, force: true })
     renameSync(work, folder)
     chmodSync(folder, 0o700)
-    const record = { v: 1, version: ref.plannotator, build: ref.build, path: join(folder, binaryName()), sha256: asset.sha256, size: asset.size, installedAt: clock() }
+    const record = {
+      v: 1,
+      version: ref.plannotator,
+      build: ref.build,
+      path: join(folder, binaryName()),
+      sha256: asset.sha256,
+      size: asset.size,
+      installedAt: clock(),
+      ...(features ? { features } : {}),
+      ...(omitted ? { omitted } : {})
+    }
     if (!validRecord(record, shared)) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} could not be put in place, so ${staying} stays in use.`)
 
     state('activating', `Switching to the Orca build of Plannotator ${ref.plannotator}.`)
@@ -903,6 +958,8 @@ export async function update(options) {
       return { ok: false, rolledBack: outcome.rolledBack, version: ref.plannotator, build: ref.build, latest, detail: outcome.detail }
     }
     prune(shared, [record, before])
+    const still = readWaiting(shared)
+    if (still && compareVersions(ref.plannotator, still.version) >= 0) clearWaiting(shared)
     const detail = `The Orca build of Plannotator ${ref.plannotator} (${ref.build}) is in use${outcome.restarted ? ', and the Inbox was restarted on it' : ''}.`
     state('ready', detail)
     return { ok: true, installed: true, restarted: outcome.restarted, version: ref.plannotator, build: ref.build, latest, detail }

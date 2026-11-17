@@ -27,12 +27,12 @@ Then, in Orca:
 1. Approve the plugin when Orca asks. It runs a worker with your user account's access, stores
    its delivery record in its own plugin storage, and may show a notification.
 2. Open the **Plannotator Inbox** panel in the right sidebar and press **Connect agents**. This
-   adds one `plannotator-inbox` MCP server to Claude Code, Codex and OpenCode at user level
-   (whichever are installed). It is the only
-   time the plugin writes outside its own folders, it happens only when you press it, and
-   **Disconnect** puts back what was there. An entry that ran Plannotator directly keeps its
-   environment settings (such as `PLANNOTATOR_DATA_DIR`) and its binary, so the same Plannotator
-   and the same Inbox are used.
+   adds one `plannotator-inbox` MCP server, which runs the launcher, to every agent Plannotator
+   supports that is on your computer, at user level. It is the only time the plugin writes outside
+   its own folders, it happens only when you press it, and **Disconnect** puts back what was
+   there. An entry that ran Plannotator directly keeps its environment settings (such as
+   `PLANNOTATOR_DATA_DIR`) and its binary, so the same Plannotator and the same Inbox are used.
+   See [Which agents are connected](#which-agents-are-connected).
 3. Start a new chat. Connections apply to chats started afterwards.
 
 The status bar shows an **Inbox** item; pressing it opens the Inbox window.
@@ -45,6 +45,7 @@ The status bar shows an **Inbox** item; pressing it opens the Inbox window.
 | Courier | `src/courier.ts`, `src/ledger.ts` | Delivers one reply to one chat through `orca orchestration send`, exactly once as far as both sides can prove. |
 | Launcher | `~/.orca-plannotator-inbox/inbox-mcp` | What agents run as their `plannotator-inbox` MCP server: Plannotator's own `plannotator inbox mcp`, with the Orca chat filled in as the author. |
 | Panel | `src/panel.tsx` | Status, the chats that are listening, agent connections, and replies that need you. |
+| Connect | `src/connect.ts` | **Connect agents**: its own writer for Claude Code, Codex and OpenCode, and Plannotator's connector for every other agent. |
 | Links | `src/navigation.ts`, `bin/reveal.cjs` | Ends each message an Orca chat sends with an **Open in Orca** link that brings that chat forward. |
 | Pictures | `src/presentation.ts` | Gives an Inbox project the icon of its Orca repository. |
 | Agent icons | `src/faces.ts` | Gives each Orca chat the icon of the agent it runs. |
@@ -123,7 +124,21 @@ a checksum for each file.
   installs it by itself; the Inbox's own **Update** button does the same at once. The new build
   must start and answer within 30 seconds, or the one before it is put back. Progress and the
   reason for a failure show in the Inbox's update card and in the plugin's panel, so a failed
-  update is never silent. Until the Orca build of a new Plannotator exists, the current one stays.
+  update is never silent.
+- **Waiting for a build.** When Plannotator has released a version whose Orca build is not
+  published yet, that is a wait, not a failure. The current build stays in use, the panel says
+  "Plannotator 0.28.67 is out. Its Orca build is not published yet; the Orca build of 0.28.66
+  stays in use and updates by itself when it is.", and the worker looks for it every 15 minutes
+  until it arrives, then installs it and restarts the Inbox on it. The Inbox shows the new version
+  as available; pressing its **Update** button looks once, briefly shows the update as under way,
+  and goes back to available without an error. A real failure (a bad download, a build that does
+  not start) is still shown as one, and is retried after six hours, then longer.
+- **Reduced builds.** When a Plannotator release breaks some of the Orca changes, CI may publish a
+  build that leaves those out. Its `manifest.json` lists what it serves (`features`) and what it
+  leaves out (`omitted`); manifests without these lists are full builds. The panel says in one line
+  what a reduced build lacks, such as per-agent icons, or starting and stopping chats from the
+  Inbox. While one is in use, the worker looks every 15 minutes, and installs the full build of the
+  same version (`orca.2` after `orca.1`) as soon as it is published.
 - **Start, Stop, Resume, Open.** The Orca build calls a listener the worker runs on `127.0.0.1`,
   with a key kept in `~/.orca-plannotator-inbox/bridge/`. A launch is recorded before Orca is
   asked, so a retry never starts a second chat. A chat you stopped takes no reply until you write
@@ -131,6 +146,39 @@ a checksum for each file.
 
 Only native Orca chats on this computer are served. Terminal agents keep Plannotator's own
 integrations, and chats on SSH, WSL or paired hosts are left alone.
+
+## Which agents are connected
+
+One method serves every agent: Plannotator's own connector, the one `plannotator inbox` runs
+when you start it in a terminal. The Orca build runs it when you press **Connect agents** and
+has it write the launcher instead of `plannotator inbox mcp`. That covers Gemini CLI, Qwen Code,
+Cursor, Windsurf / Devin, Amp, Cline, Kiro, Pi, DeepSeek Harness, Muse Code, OpenClaw, Hermes
+Agent, Antigravity, the Claude app and any agent Plannotator adds later. What Plannotator cannot
+do for an agent (an agent you connect by hand, one turned off in Plannotator's Settings) shows in
+the panel with Plannotator's reason.
+
+Three agents get the plugin's own writer instead, because the launcher needs something
+Plannotator's connector does not do for them:
+
+- **Claude Code.** Plannotator writes no entry for it and relies on its own Claude Code plugin.
+- **Codex.** It passes an MCP server no environment unless each variable is listed, and the
+  launcher needs the chat's variables. The plugin lists them by name, never by value.
+- **OpenCode.** Its settings are JSON with comments, which Plannotator does not edit; it connects
+  OpenCode only through its OpenCode plugin. The plugin edits the one entry and keeps every
+  comment.
+
+The panel lists these three, then every other agent Plannotator found on this computer. It reads
+that list from the running Inbox when you press **Refresh** and after a connect, never on a
+timer. While the Inbox is not running, Connect does the three and says the others are connected
+once the Inbox runs.
+
+**With standard Plannotator** (the Orca build switched off), Connect still does the three, then
+asks Plannotator to connect the others its own way. Those entries run Plannotator directly:
+messages arrive, but replies do not come back into Orca chats. With the Orca build running the
+Inbox, press **Connect agents** again to move them to the launcher. **Disconnect** then takes
+back only the three; turn the others off in Plannotator's Settings. An Orca build from before
+this route connects the others through the launcher, but cannot move or disconnect them until it
+has updated itself.
 
 ## How agents are told
 
@@ -165,7 +213,10 @@ checks all of it at run time:
 
 - **Plannotator**: the registry file (`<data>/inbox/inbox.json`, read again on every call because
   the token and port change on restart), `GET /api/inbox/health`, `POST /api/inbox/bridge/poll`
-  and `bridge/event`, and the stdio MCP server. Which identity fields a tool takes is read from
+  and `bridge/event`, and the stdio MCP server. **Connect agents** also uses
+  `/api/inbox/control/orca-agents` (the Orca build), or `GET /api/inbox/agents` and
+  `POST /api/inbox/control/connect` (standard Plannotator); an answer it cannot read is reported,
+  and Claude Code, Codex and OpenCode are connected all the same. Which identity fields a tool takes is read from
   the server's own `tools/list`, so new or renamed tools need no change here. Unknown fields are
   ignored or passed along.
 - **Orca**: plugin Host API 1 (frozen and additive), and these CLI calls with `--json`:
@@ -234,6 +285,10 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   to 0.1.x after running 0.2.0 without clearing the plugin's storage.
 - Whether OpenCode passes Orca's chat variables to the launcher has not been checked with a real
   OpenCode chat. If it does not, OpenCode chats use plain Plannotator.
+- A reply arrives by itself inside an Orca chat only for an agent Orca runs as a chat and that
+  passes the chat's variables to its MCP servers. Every other connected agent sends through the
+  launcher as plain Plannotator, and gets replies Plannotator's own way.
+- Connecting agents other than Claude Code, Codex and OpenCode needs the Inbox to be running.
 - On Windows a reply longer than about 12,000 bytes is not included in the mail; the chat is told
   to read it from the thread. Elsewhere that happens from about 62,000 bytes.
 - Two Orca profiles under one user account share the launcher folder. A profile whose plugin is
@@ -243,6 +298,13 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   in question. Where Orca cannot do one of them, the Inbox says so and nothing is sent.
 - The Orca build is downloaded from this repository's GitHub releases only. Without a connection
   the build already installed (or your own Plannotator) stays in use.
+- While a new Plannotator has no Orca build yet, the Inbox offers its **Update** button as usual;
+  it cannot say that the build is not published yet, and only the plugin's panel does. An Inbox
+  that an older plugin left showing "No Orca build ... has been published yet" as a failure shows
+  it until the worker's next look, within 15 minutes.
+- A reduced build lacks what its panel line says until the full build is published. If none is
+  ever published, the worker keeps looking every 15 minutes; that is one small download of the
+  list of builds each time.
 - Uninstalling the plugin leaves the launcher folder and the agent entries. Press **Disconnect**
   first, then delete `~/.orca-plannotator-inbox`.
 - On Windows, Plannotator keeps starting agents from the Inbox switched off, and the Orca build

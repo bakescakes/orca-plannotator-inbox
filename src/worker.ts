@@ -7,15 +7,17 @@ import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { bridgeConfigPath, startBridge, type Bridge, type BridgeConfig, type BridgeDeps } from './bridge'
 import { BuildStore, installUpdater, pluginVersion, type BuildStoreDeps } from './build-store'
-import { agentLinks, connectAgents, disconnectAgents, type ConnectDeps } from './connect'
+import { agentLinks, allAgentLinks, connectAllAgents, disconnectAllAgents, type ConnectDeps } from './connect'
 import { Engine, type EngineDeps, type EngineSettings, type EngineStatus } from './engine'
+import { InboxClient } from './inbox'
 import type { KeyValue } from './ledger'
 import type { OwnedSession } from './lifecycle'
 import { resolveDataDir, sharedDir, type Env } from './paths'
 import { startNavigation, type Navigation, type NavigationDeps } from './navigation'
 import { OrcaCli, findProfile, locateOrcaCli } from './orca-cli'
-import type { ActionResult, AgentId, AgentLink, BuildInfo, ServerMode, Status } from './protocol'
+import type { ActionResult, AgentLink, BuildInfo, OwnAgentId, ServerMode, Status } from './protocol'
 import { installShared, launcherPath } from './shared'
+import { reducedLine, waitingLine } from './build-words'
 import { errorText, isRecord, type Json } from './util'
 
 const STATUS_ITEM = 'inbox'
@@ -123,6 +125,8 @@ function summary(status: Status): string {
         ? `Orca build of Plannotator ${build.version} (${build.build})${status.server === 'stock' ? '; the running Inbox is still standard Plannotator' : ''}`
         : 'Standard Plannotator (no Orca build installed)'
     )
+    if (build.waiting) lines.push(waitingLine(build))
+    if (build.mode === 'orca-build' && build.reduced) lines.push(reducedLine(build.reduced))
     if (build.lastError) lines.push(`Orca build: ${build.lastError}`)
   }
   if (status.projects && status.projects.length > 0) lines.push(`Only these projects: ${status.projects.join(', ')}`)
@@ -237,10 +241,20 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   let bridge: Bridge | null = null
   const owned = new Map<string, OwnedSession>()
 
+  /** The running Inbox, read again on every call (a restart moves the port and the token). */
+  const inboxNow = async (): Promise<InboxClient> =>
+    new InboxClient(resolveDataDir((await settings()).dataDir, runtime.env, runtime.home), { fetch: runtime.engine.fetch })
+  /**
+   * The plugin's own three, and every other agent Plannotator found. Read when the panel asks for a
+   * fresh look and after a connect, never on a timer; the Inbox is only read (GET, short timeouts),
+   * and when it cannot be, the other agents of the last good read stand.
+   */
   const refreshAgents = async (): Promise<void> => {
-    agents = await agentLinks(connectDeps).catch(() => agents)
+    agents = await allAgentLinks(connectDeps, await inboxNow(), agents).catch(() => agents)
   }
-  await refreshAgents()
+  // Start does not wait on the Inbox: the three now, every other agent right after.
+  agents = await agentLinks(connectDeps).catch(() => agents)
+  void refreshAgents().then(() => publish(whole(engine.status()))).catch(() => undefined)
 
   const engine = new Engine({
     settings,
@@ -320,14 +334,16 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     void work.then(() => lookAtBuild(true)).catch(() => undefined)
     if (done === null) return { ok: true, message: 'Looking for a new Orca build. This panel shows the result.' }
     if (done.lastError) return { ok: false, message: done.lastError }
+    // A newer Plannotator with no Orca build yet is an answer, not a failure.
+    if (done.waiting) return { ok: true, message: waitingLine(done) }
     return done.mode === 'orca-build'
       ? { ok: true, message: `Using the Orca build of Plannotator ${done.version} (${done.build}).` }
       : { ok: true, message: 'No Orca build is installed.' }
   }
-  const connect = async (action: typeof connectAgents, agent?: AgentId): Promise<ActionResult> => {
+  const connect = async (action: typeof connectAllAgents, agent?: OwnAgentId): Promise<ActionResult> => {
     let result: ActionResult
     try {
-      result = await action(connectDeps, agent)
+      result = await action(connectDeps, await inboxNow(), { agent, known: agents })
     } catch (error) {
       result = { ok: false, message: errorText(error) }
     }
@@ -338,8 +354,8 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
 
   orca.panels.handle('status.get', (input) => current(input?.fresh === true))
   orca.panels.handle('inbox.open', open)
-  orca.panels.handle('agents.connect', (input) => connect(connectAgents, input?.agent))
-  orca.panels.handle('agents.disconnect', (input) => connect(disconnectAgents, input?.agent))
+  orca.panels.handle('agents.connect', (input) => connect(connectAllAgents, input?.agent))
+  orca.panels.handle('agents.disconnect', (input) => connect(disconnectAllAgents, input?.agent))
   orca.panels.handle('inbox.restartOnBuild', restartOnBuild)
   orca.panels.handle('build.check', checkBuild)
   orca.panels.handle('delivery.retry', async (input) => {
@@ -351,8 +367,8 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
 
   orca.commands.register('inbox.open', async () => (await open()).message)
   orca.commands.register('inbox.status', async () => summary(await current(true)))
-  orca.commands.register('agents.connect', async () => (await connect(connectAgents)).message)
-  orca.commands.register('agents.disconnect', async () => (await connect(disconnectAgents)).message)
+  orca.commands.register('agents.connect', async () => (await connect(connectAllAgents)).message)
+  orca.commands.register('agents.disconnect', async () => (await connect(disconnectAllAgents)).message)
   orca.commands.register('inbox.restartOnBuild', async () => (await restartOnBuild()).message)
   orca.commands.register('build.check', async () => (await checkBuild()).message)
 

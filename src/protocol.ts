@@ -26,8 +26,10 @@ export type BlockedDelivery = { key: string; subject: string | null; session: st
  */
 export type RejectedDelivery = BlockedDelivery
 
-/** The agents "Connect agents" knows. */
-export type AgentId = 'claude' | 'codex' | 'opencode'
+/** The agents this plugin connects with its own writer (the rest go through Plannotator's connector). */
+export type OwnAgentId = 'claude' | 'codex' | 'opencode'
+/** One agent in the list: an `OwnAgentId`, or the id Plannotator gives any other agent (`gemini`, `cursor`, …). */
+export type AgentId = string
 
 /** How one agent reaches the Inbox from an Orca chat. */
 export type AgentLink = {
@@ -37,9 +39,11 @@ export type AgentLink = {
     | 'connected' // runs this plugin's launcher
     | 'builtin' // Plannotator's own plugin for that agent already handles Orca chats
     | 'plannotator' // runs Plannotator directly: works, but replies do not come back to Orca chats
-    | 'other' // a `plannotator-inbox` entry this plugin did not write; left alone
+    | 'other' // a `plannotator-inbox` entry this plugin did not write, or settings that cannot be read; left alone
+    | 'off' // turned off in Plannotator's Settings
+    | 'manual' // only a person can connect it (`detail` says how)
     | 'absent' // the agent is installed, the Inbox is not connected
-    | 'missing' // the agent is not installed
+    | 'missing' // the agent is not installed (Claude Code, Codex and OpenCode only)
   detail: string
 }
 
@@ -58,6 +62,10 @@ export type BuildInfo = {
   updating: boolean
   phase: string | null
   detail: string | null
+  /** A newer Plannotator that is out with no Orca build yet (`since` in ms); absent from older workers. */
+  waiting?: { version: string; since: number } | null
+  /** The build in use leaves out some Orca changes: `lacks` in plain words, `omitted` the changes' names. */
+  reduced?: { lacks: string[]; omitted: string[] } | null
 }
 
 /** What the running Inbox is: the Orca build in Orca mode, standard Plannotator, or not running. */
@@ -92,10 +100,10 @@ declare module 'orca' {
     'status.get': { input: { fresh?: boolean }; output: Status }
     /** Opens the Inbox window in the browser, starting the Inbox when it is not running. */
     'inbox.open': { output: ActionResult }
-    /** Points the agents found on this computer at the launcher. */
-    'agents.connect': { input: { agent?: AgentId }; output: ActionResult }
+    /** Points the agents found on this computer at the launcher. `agent`: only that one of the plugin's own three. */
+    'agents.connect': { input: { agent?: OwnAgentId }; output: ActionResult }
     /** Puts back what `agents.connect` replaced. */
-    'agents.disconnect': { input: { agent?: AgentId }; output: ActionResult }
+    'agents.disconnect': { input: { agent?: OwnAgentId }; output: ActionResult }
     /** Stops the running Inbox and starts it on the Orca build; nothing saved is lost. */
     'inbox.restartOnBuild': { output: ActionResult }
     /** Looks for a newer Orca build now and installs it. */
