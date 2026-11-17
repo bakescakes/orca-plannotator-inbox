@@ -93,6 +93,9 @@ export async function releaseServer(builds = []) {
  *   good      behaves
  *   nosmoke   `--version` fails
  *   dead      `inbox restart` stops the running Inbox and starts one that never answers
+ * `update` is Plannotator's own updater: it rewrites this very file to the release FAKE_UPDATE_TO names,
+ * as the install script replaces the binary; FAKE_UPDATE_FAIL makes it fail as a download does;
+ * FAKE_UPDATE_SEEN names a file that gets the environment it ran with.
  */
 const PROGRAM = `
 import { spawn } from 'node:child_process'
@@ -125,6 +128,17 @@ async function start() {
 if (args[0] === '--version') {
   if (flavor === 'nosmoke') { process.stderr.write('broken\\n'); process.exit(1) }
   process.stdout.write('plannotator ' + version + '\\n')
+} else if (args[0] === 'update') {
+  if (process.env.FAKE_UPDATE_SEEN) writeFileSync(process.env.FAKE_UPDATE_SEEN, JSON.stringify({ dataDir: data ?? null, orcaMode: process.env.PLANNOTATOR_ORCA_MODE ?? null }))
+  const to = process.env.FAKE_UPDATE_TO
+  if (process.env.FAKE_UPDATE_FAIL) {
+    process.stdout.write('Plannotator ' + to + ' is available (you have ' + version + ').\\nInstalling v' + to + '.\\n')
+    process.stderr.write("Couldn't download the update. " + version + ' is still installed and works. Try again later: plannotator update\\nIf this keeps happening, install it yourself:\\n  curl -fsSL https://example.invalid/install.sh | bash\\nDetails: /tmp/update.log\\n')
+    process.exit(1)
+  }
+  if (!to || to === version) { process.stdout.write('Plannotator ' + version + ' is installed. Up to date (checked just now).\\n'); process.exit(0) }
+  writeFileSync(self, readFileSync(self, 'utf8').replace("FAKE_VERSION='" + version + "'", "FAKE_VERSION='" + to + "'"))
+  process.stdout.write('Updated to ' + to + '.\\n')
 } else if (args[0] === '__serve') {
   const server = createServer((request, response) => {
     if (flavor === 'dead') return

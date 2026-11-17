@@ -470,6 +470,12 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     serve.kill('SIGINT')
     await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 20_000))])
     if (serve.exitCode === null && serve.signalCode === null) serve.kill('SIGKILL')
+    // Something Orca started (a catalog fetch, its crash reporter) can outlive it and hold these
+    // pipes open, which would keep this test file running after it passed.
+    serve.stdout?.destroy()
+    serve.stderr?.destroy()
+    agent?.stdout?.destroy()
+    agent?.stderr?.destroy()
     await releases.close()
   }
 })

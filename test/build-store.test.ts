@@ -114,6 +114,7 @@ test('ensure runs the updater at most every 6 hours, longer after failures, and 
   assert.equal(runs.length, 3)
   await store.ensure({ force: true })
   assert.equal(runs.length, 4, 'a person asked')
+  assert.deepEqual(runs[3], ['--again'], 'and a build left alone after a failure is tried again')
   answer = { ok: true, installed: false, latest: { version: '0.28.67', build: 'orca.1' }, detail: 'already the newest' }
   now += 100 * CHECK_EVERY_MS
   const ok = await store.ensure()
@@ -144,7 +145,7 @@ test('while a release has no Orca build yet, or the build in use is reduced, the
   assert.equal(runs.length, 1, 'not yet')
   now += 1
   await store.ensure()
-  assert.deepEqual(runs[1], ['--version', '0.28.67'], 'it asks for the release waited for')
+  assert.deepEqual(runs[1], [], 'it follows the Plannotator installed here and names no release')
   now += WAITING_CHECK_MS
   await store.ensure()
   assert.equal(runs.length, 3)
@@ -231,11 +232,70 @@ test('"updating" is an updater at work, not a look that starts none', async () =
   assert.equal((await restarter.status()).updating, false)
 })
 
+test('a Plannotator that changed is followed at once; the first look only notes it', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const b = await box()
+  await b.install()
+  let now = 1_000_000_000_000
+  const runs: string[][] = []
+  const stock = join(b.root, 'bin', 'plannotator')
+  await mkdir(join(stock, '..'), { recursive: true })
+  await writeFile(stock, '#!/bin/sh\necho plannotator 0.28.66\n', { mode: 0o755 })
+  /** Run once, while the updater works. */
+  let during: (() => Promise<void>) | null = null
+  const store = new BuildStore({
+    sharedDir: b.shared,
+    env: { PATH: join(b.root, 'bin') },
+    home: b.root,
+    now: () => now,
+    runUpdater: async (args) => {
+      runs.push(args)
+      await during?.()
+      during = null
+      return { ok: true, installed: false, detail: 'already the newest' }
+    }
+  })
+  await store.ensure()
+  assert.equal(runs.length, 1)
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 1, 'nothing changed: the 6 hours hold')
+
+  // Plannotator updated itself (or a person did): the next look follows it, once.
+  await writeFile(stock, '#!/bin/sh\necho plannotator 0.28.67\n# a longer file\n', { mode: 0o755 })
+  now += 60_000
+  await store.ensure()
+  assert.deepEqual(runs, [[], []], 'followed at once, naming no release')
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 2)
+
+  // Plannotator changes again while a run works: that run followed the older one, so the next look runs again.
+  during = () => writeFile(stock, '#!/bin/sh\necho plannotator 0.28.68\n# a longer file still\n', { mode: 0o755 })
+  await store.ensure({ force: true })
+  assert.equal(runs.length, 3)
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 4, 'the change made during the run is followed')
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 4)
+
+  // A check file from before this was noted: the first look writes it down and starts nothing.
+  const check = JSON.parse(await readFile(storePaths(b.shared).check, 'utf8'))
+  assert.match(check.stock, /bin\/plannotator:\d+:\d+$/)
+  await privateJson(storePaths(b.shared).check, { ...check, stock: undefined })
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 4)
+  assert.equal(JSON.parse(await readFile(storePaths(b.shared).check, 'utf8')).stock, check.stock)
+})
+
 test('the real updater runs from the shared folder and its outcome is kept', async () => {
   const b = await box()
   await installUpdater(b.shared, { pluginVersion: '0.2.0' })
   // A release server that is not there: the updater fails in one sentence and nothing changes.
-  const store = new BuildStore({ sharedDir: b.shared, env: { ...process.env, ORCA_PLANNOTATOR_RELEASES: 'http://127.0.0.1:9/none', ELECTRON_RUN_AS_NODE: undefined }, home: b.root })
+  // No Plannotator on this PATH or in this home (the updater reads HOME itself): it must never find the one installed on the computer running the test.
+  const store = new BuildStore({ sharedDir: b.shared, env: { ...process.env, PATH: join(b.root, 'nowhere'), HOME: b.root, USERPROFILE: b.root, LOCALAPPDATA: undefined, PLANNOTATOR_BIN: undefined, ORCA_PLANNOTATOR_RELEASES: 'http://127.0.0.1:9/none', ELECTRON_RUN_AS_NODE: undefined }, home: b.root })
   const status = await store.ensure()
   assert.equal(status.mode, 'stock')
   assert.match(status.lastError ?? '', /could not be downloaded.*[Ss]tock Plannotator stays in use/)

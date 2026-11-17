@@ -241,6 +241,12 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       serve.kill('SIGINT')
       await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 20_000))])
       if (serve.exitCode === null && serve.signalCode === null) serve.kill('SIGKILL')
+      // Something Orca started (a catalog fetch, its crash reporter) can outlive it and hold these
+      // pipes open, which would keep this test file running after it passed.
+      serve.stdout?.destroy()
+      serve.stderr?.destroy()
+      agent?.stdout?.destroy()
+      agent?.stderr?.destroy()
       // Stopping says so, so an agent is not told replies arrive while nothing delivers.
       const last = existsSync(join(shared, 'state.json')) ? JSON.parse(await readFile(join(shared, 'state.json'), 'utf8')) : null
       if (last && serve.signalCode !== 'SIGKILL') assert.equal(last.delivering, false, 'the worker says it stopped delivering')

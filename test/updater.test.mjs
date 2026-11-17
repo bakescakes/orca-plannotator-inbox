@@ -101,7 +101,8 @@ test('only GitHub, or a loopback test server, is a source; arguments are checked
   assert.equal(source({ ORCA_PLANNOTATOR_RELEASES: 'http://127.0.0.1:9/x/' }).base, 'http://127.0.0.1:9/x')
   assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'https://example.com/' }), /127\.0\.0\.1/)
   assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'http://localhost:9/' }), /127\.0\.0\.1/)
-  assert.deepEqual(parseArgs(['--version', '0.28.66']), { version: '0.28.66', restart: false, sharedDir: null })
+  assert.deepEqual(parseArgs(['--version', '0.28.66']), { version: '0.28.66', restart: false, again: false, sharedDir: null })
+  assert.equal(parseArgs(['--again']).again, true)
   assert.throws(() => parseArgs(['--version', '0.28']), /--version takes/)
   assert.throws(() => parseArgs(['--version', '0.28.66', '--restart']), /does not go/)
   assert.throws(() => parseArgs(['--nope']), /Unknown option/)
@@ -237,6 +238,232 @@ test('a release waited for that never gets a build: the build of a later release
     assert.equal(b.current().version, '0.28.68')
     assert.equal(existsSync(waitingFile), false, 'the wait is over')
     assert.deepEqual([b.state().phase, b.state().version], ['ready', '0.28.68'])
+  } finally {
+    await server.close()
+  }
+})
+
+const ORCA_MODE = (b) => ({ ...b.env, PLANNOTATOR_ORCA_MODE: '1', PLANNOTATOR_ORCA_CONFIG: join(b.shared, 'bridge', 'config.json') })
+const versionOf = async (binary, env) => /\d+\.\d+\.\d+/.exec((await runProgram(binary, ['--version'], env)).stdout)?.[0]
+
+test('the Inbox asks for a newer release: Plannotator updates itself, and the Inbox moves onto that release’s Orca build', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([
+    { version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') },
+    { version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67') }
+  ])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  const seen = join(b.root, 'update-seen.json')
+  Object.assign(b.env, { FAKE_UPDATE_TO: '0.28.67', FAKE_UPDATE_SEEN: seen })
+  try {
+    // Nothing asked: the build of the Plannotator installed here, not the newest one published.
+    const first = await b.run()
+    assert.equal(first.installed, true, first.detail)
+    assert.equal(b.current().version, '0.28.66')
+    assert.equal(existsSync(seen), false, 'Plannotator is never asked to update by a routine look')
+    await runProgram(b.current().path, ['inbox', '--background'], ORCA_MODE(b))
+    const before = await b.health()
+    assert.equal(before.orcaMode, '1')
+
+    const moved = await b.run({ version: '0.28.67' })
+    assert.equal(moved.ok, true, moved.detail)
+    assert.equal(moved.installed, true)
+    assert.equal(moved.version, '0.28.67')
+    assert.deepEqual(readJson(seen), { dataDir: b.data, orcaMode: null }, 'Plannotator’s own updater ran for the Inbox’s data folder, outside Orca mode')
+    assert.equal(await versionOf(stock, b.env), '0.28.67')
+    const after = await b.health()
+    assert.equal(after.self, b.current().path, 'the Inbox runs the Orca build of the new release')
+    assert.equal(after.version, '0.28.67')
+    assert.equal(after.orcaMode, '1')
+    assert.notEqual(after.pid, before.pid)
+    assert.deepEqual([b.state().phase, b.state().version], ['ready', '0.28.67'])
+
+    // Asked again for a release that is installed: Plannotator is not asked to update.
+    rmSync(seen)
+    assert.match((await b.run({ version: '0.28.67' })).detail, /already the newest/)
+    assert.equal(existsSync(seen), false)
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('a release with no Orca build yet: the Inbox runs the Plannotator installed here, and moves to the build when it is published', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  Object.assign(b.env, { FAKE_UPDATE_TO: '0.28.67' })
+  const waitingFile = join(b.shared, 'plannotator', 'waiting.json')
+  try {
+    assert.equal((await b.run()).installed, true)
+    const old = b.current()
+    await runProgram(old.path, ['inbox', '--background'], ORCA_MODE(b))
+    const before = await b.health()
+
+    const plain = await b.run({ version: '0.28.67' })
+    assert.equal(plain.ok, true, plain.detail)
+    assert.equal(plain.plain, true)
+    assert.equal(plain.restarted, true)
+    assert.deepEqual(plain.waiting, { version: '0.28.67' })
+    assert.equal(
+      plain.detail,
+      'Plannotator 0.28.67 is in use. Its Orca build is not published yet, so the Orca additions (Start, Stop and Open in Orca from the Inbox, and per-agent icons) are missing until it is; the Inbox moves to it by itself.'
+    )
+    assert.equal(b.current(), null, 'the launcher starts the Plannotator installed here')
+    assert.equal(readJson(join(b.shared, 'plannotator', 'previous.json')).version, '0.28.66')
+    assert.ok(existsSync(old.path), 'the older build stays on disk')
+    const now = await b.health()
+    assert.equal(now.self, stock)
+    assert.equal(now.version, '0.28.67')
+    assert.equal(now.orcaMode, null)
+    assert.notEqual(now.pid, before.pid)
+    assert.deepEqual([b.state().phase, b.state().version, b.state().detail], ['ready', '0.28.67', plain.detail])
+    assert.equal(readJson(waitingFile).version, '0.28.67')
+
+    // Looked again, still no build: nothing is restarted.
+    const still = await b.run()
+    assert.equal(still.plain, true, still.detail)
+    assert.equal(still.restarted, false)
+    assert.equal((await b.health()).pid, now.pid)
+
+    // Plannotator is updated again under the plain Inbox (in a terminal), still with no build: the
+    // Inbox moves to that release, so what is said to be in use is what runs.
+    installFake(stock, 'good', '0.28.68')
+    const next = await b.run()
+    assert.deepEqual([next.plain, next.restarted, next.waiting], [true, true, { version: '0.28.68' }], next.detail)
+    const moved = await b.health()
+    assert.deepEqual([moved.version, moved.orcaMode], ['0.28.68', null])
+    assert.notEqual(moved.pid, now.pid)
+    assert.equal((await b.run()).restarted, false, 'and is then left alone')
+    assert.equal((await b.health()).pid, moved.pid)
+
+    // Its build is published: it installs, the Inbox moves onto it in Orca mode, and the wait is over.
+    server.publish({ version: '0.28.68', build: 'orca.1', bytes: fakeBinary('good', '0.28.68') })
+    const done = await b.run()
+    assert.equal(done.installed, true, done.detail)
+    assert.equal(done.restarted, true)
+    const last = await b.health()
+    assert.equal(last.self, b.current().path)
+    assert.equal(last.orcaMode, '1')
+    assert.equal(existsSync(waitingFile), false)
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('Plannotator’s own update fails: nothing changes, and its own words say why', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([
+    { version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') },
+    { version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67') }
+  ])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  Object.assign(b.env, { FAKE_UPDATE_TO: '0.28.67', FAKE_UPDATE_FAIL: '1' })
+  try {
+    // With no build in use yet, and with one.
+    for (const staying of ['stock Plannotator', 'the Orca build of Plannotator 0.28.66']) {
+      const failed = await b.run({ version: '0.28.67' })
+      assert.equal(failed.ok, false)
+      assert.equal(
+        failed.detail,
+        `Plannotator’s own update to 0.28.67 did not finish (Couldn't download the update. 0.28.66 is still installed and works. Try again later: plannotator update), so ${staying} stays in use.`
+      )
+      assert.equal(b.state().phase, 'failed')
+      assert.equal(await versionOf(stock, b.env), '0.28.66')
+      assert.equal(existsSync(join(b.shared, 'plannotator', 'waiting.json')), false)
+      if (staying === 'stock Plannotator') {
+        assert.equal(b.current(), null)
+        assert.equal((await b.run()).installed, true)
+      } else assert.equal(b.current().version, '0.28.66')
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('an update made outside the Inbox is followed; an older Plannotator never takes the Inbox back; a build that cannot be used leaves Plannotator plain', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  const waitingFile = join(b.shared, 'plannotator', 'waiting.json')
+  try {
+    assert.equal((await b.run()).installed, true)
+
+    // An older Plannotator than the build in use: the build stays.
+    installFake(stock, 'good', '0.28.65')
+    const kept = await b.run()
+    assert.equal(kept.ok, true)
+    assert.equal(kept.detail, 'The Orca build of Plannotator 0.28.66 stays in use; the Plannotator installed here is 0.28.65, an older release.')
+    assert.equal(b.current().version, '0.28.66')
+
+    // A person updated Plannotator in a terminal; its release has no Orca build yet. No Inbox runs: nothing restarts.
+    installFake(stock, 'good', '0.28.67')
+    const plain = await b.run()
+    assert.equal(plain.plain, true, plain.detail)
+    assert.equal(plain.restarted, false)
+    assert.equal(b.current(), null)
+    assert.equal(readJson(waitingFile).version, '0.28.67')
+
+    // Its build is published but does not start: Plannotator stays plain, the reason is said, and it is tried again.
+    server.publish({ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('nosmoke', '0.28.67') })
+    const broken = await b.run()
+    assert.equal(broken.ok, true, broken.detail)
+    assert.equal(broken.plain, true)
+    const said =
+      'Plannotator 0.28.67 is in use without its Orca additions. The downloaded Plannotator 0.28.67 failed to start (exit 1), so it was not used. The plugin tries that build again later, and takes a newer one as soon as it is published.'
+    assert.equal(broken.detail, said)
+    assert.equal(b.current(), null)
+    assert.equal(readJson(waitingFile).version, '0.28.67')
+    assert.deepEqual([readJson(waitingFile).tried.tag, readJson(waitingFile).tried.failures], ['plannotator-0.28.67-orca.1', 1])
+
+    // The worker's next looks leave that build alone: no second download of what cannot work.
+    const fetched = server.downloads()
+    const again = await b.run()
+    assert.deepEqual([again.ok, again.plain, again.detail], [true, true, said])
+    assert.equal(server.downloads(), fetched, 'not downloaded again')
+    // A person who asks has it tried at once, and so does the end of its wait (six hours, then twelve).
+    assert.equal((await b.run({ again: true })).plain, true)
+    assert.equal(server.downloads(), fetched + 1)
+    assert.equal(readJson(waitingFile).tried.failures, 2)
+    await b.run({ clock: () => Date.now() + 7 * 60 * 60 * 1000 })
+    assert.equal(server.downloads(), fetched + 1, 'the second wait is twelve hours')
+    await b.run({ clock: () => Date.now() + 13 * 60 * 60 * 1000 })
+    assert.equal(server.downloads(), fetched + 2)
+
+    // A build that starts replaces it, at once: it is another build than the one left alone.
+    server.publish({ version: '0.28.67', build: 'orca.2', bytes: fakeBinary('good', '0.28.67') })
+    const done = await b.run()
+    assert.equal(done.installed, true, done.detail)
+    assert.equal(b.current().build, 'orca.2')
+    assert.equal(existsSync(waitingFile), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('Plannotator’s own update offers nothing newer: said so; a build that needs a newer plugin: Plannotator runs plain and nothing promises a retry', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('good', '0.28.66') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    assert.equal((await b.run()).installed, true)
+    // The Inbox names a release Plannotator's own updater does not offer (it ends well and installs nothing).
+    const none = await b.run({ version: '0.28.67' })
+    assert.equal(none.ok, false)
+    assert.equal(none.detail, 'Plannotator’s own update found nothing newer than 0.28.66 to install, so the Orca build of Plannotator 0.28.66 stays in use.')
+    assert.equal(b.current().version, '0.28.66')
+
+    installFake(stock, 'good', '0.28.67')
+    server.publish({ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67'), manifest: (m) => ({ ...m, pluginMin: '9.0.0' }) })
+    const old = await b.run()
+    assert.equal(old.plain, true, old.detail)
+    assert.equal(
+      old.detail,
+      'Plannotator 0.28.67 is in use without its Orca additions. The Orca build of Plannotator 0.28.67 needs version 9.0.0 of the Plannotator Inbox plugin; update the plugin first.'
+    )
+    assert.equal(readJson(join(b.shared, 'plannotator', 'waiting.json')).tried, undefined)
+    assert.equal(server.downloads(), 1, 'nothing was downloaded for it')
   } finally {
     await server.close()
   }

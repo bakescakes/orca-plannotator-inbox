@@ -238,9 +238,9 @@ test('the Orca build: the updater is installed, runs once at start, and its stat
     await writeFile(waitingFile, JSON.stringify({ v: 1, version: '0.28.67', since: Date.now(), checkedAt: Date.now() }), { mode: 0o600 })
     await chmod(waitingFile, 0o600)
     t.updater.next = { ok: true, installed: false, waiting: { version: '0.28.67' }, detail: 'Plannotator 0.28.67 is out.' }
-    const waited = 'Plannotator 0.28.67 is out. Its Orca build is not published yet; it installs by itself when it is.'
+    const waited = 'Plannotator 0.28.67 is in use. Its Orca build is not published yet, so the Orca additions (Start, Stop and Open in Orca from the Inbox, and per-agent icons) are missing until it is; the Inbox moves to it by itself.'
     assert.deepEqual(await t.worker.request('build.check'), { ok: true, message: waited })
-    assert.deepEqual(t.updaterRuns.at(-1), ['--version', '0.28.67'], 'it asks for the release waited for')
+    assert.deepEqual(t.updaterRuns.at(-1), ['--again'], 'it follows the Plannotator installed here and names no release; a person asked, so nothing is left for later')
     const waiting = (await t.worker.request('status.get', { fresh: true })).build
     assert.deepEqual([waiting?.waiting?.version, waiting?.lastError], ['0.28.67', null])
     assert.ok(String(await t.worker.command('inbox.status')).includes(waited))

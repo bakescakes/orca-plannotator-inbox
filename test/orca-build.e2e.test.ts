@@ -5,8 +5,10 @@
 // What it proves, in order: the worker downloads, checks and installs the build; an agent's launcher
 // then starts Plannotator in Orca mode; a person's reply reaches the chat; the chat shows its agent's
 // icon; the panel's Connect and Disconnect move Cursor and Antigravity onto the launcher and back,
-// through the build's agent route; and an update that cannot work is shown with its reason, in the
-// Inbox and in the panel, while the build in use keeps running.
+// through the build's agent route; an update that cannot work is shown with its reason, in the
+// Inbox and in the panel, while the build in use keeps running; and when the Plannotator installed
+// here moves on (PLANNOTATOR_E2E_BIN, the same release or a later one), the Inbox runs it, plain, on
+// the data the Orca build wrote, and a reply still reaches the chat.
 //
 // Runs only when ORCA_BUILD_E2E_BIN names an Orca build for this computer (`plannotator/build.mjs`
 // makes one). It uses a throwaway HOME and data folder, and a PATH with no agent on it, so the
@@ -16,7 +18,7 @@ import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -26,8 +28,12 @@ import { launcherPath } from '../src/shared'
 import { fakeOrca, mcpClient, tempDir, until } from './fakes'
 // @ts-expect-error a plain module without types, shared with the updater's own tests
 import { releaseServer } from './release-fakes.mjs'
+// @ts-expect-error the updater is plain JavaScript, copied out of the plugin as it is
+import { compareVersions, orcaModeConfig, plannotatorVersion, restartOn } from '../bin/plannotator-update.mjs'
 
 const BINARY = (process.env.ORCA_BUILD_E2E_BIN ?? '').trim()
+/** Plannotator as its own release ships it, for the last step. */
+const STOCK = (process.env.PLANNOTATOR_E2E_BIN ?? '').trim()
 const SESSION = 'claude_b0b0b0b0_2222'
 const WRAPPER = fileURLToPath(new URL('../bin/inbox-mcp.mjs', import.meta.url))
 
@@ -298,6 +304,73 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
     const still = (await (await fetch(`${origin}/api/inbox/health`)).json()) as { version: string; serverSession: string }
     assert.equal(still.version, version)
     assert.equal(still.serverSession, health.serverSession, 'the Inbox was not restarted for a build that cannot work')
+
+    // 7. The Plannotator installed here moves on. With a later release than the build's (no Orca build of
+    //    it is published here), the worker's check moves the Inbox onto it; with the same release, the
+    //    updater's own restart does. Either way it runs plain, on the data the Orca build wrote.
+    const stockVersion: string | null = STOCK ? await plannotatorVersion(STOCK, base) : null
+    if (STOCK && stockVersion && compareVersions(stockVersion, version) >= 0) {
+      const stock = join(home, '.local', 'bin', 'plannotator')
+      await mkdir(join(stock, '..'), { recursive: true })
+      await copyFile(STOCK, stock)
+      await chmod(stock, 0o755)
+      const mailBefore = orca.state.mail.length
+      const later = compareVersions(stockVersion, version) > 0
+      if (later) {
+        await worker.request('build.check')
+        await until(async () => (await status()).server === 'stock', 'the Inbox to move onto the Plannotator installed here', 240_000)
+        const plain = await found(async () => {
+          const now = (await status()).build
+          return now && !now.updating && now.waiting ? now : null
+        }, 'the panel to say what runs', 60_000)
+        assert.deepEqual([plain.mode, plain.waiting?.version, plain.lastError], ['stock', stockVersion, null])
+        assert.ok(String(await worker.command('inbox.status')).includes(`Plannotator ${stockVersion} is in use. Its Orca build is not published yet`))
+      } else {
+        assert.ok(await restartOn(stock, dataDir, base, null, { oldPid: registry.pid }), 'the Plannotator installed here answers on that data')
+      }
+      const moved = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number }
+      const at = `http://127.0.0.1:${moved.port}`
+      const plainHeaders = { 'content-type': 'application/json', origin: at }
+      const plainHealth = (await (await fetch(`${at}/api/inbox/health`)).json()) as { version: string; serverSession: string }
+      assert.equal(plainHealth.version, stockVersion)
+      assert.notEqual(plainHealth.serverSession, health.serverSession)
+      assert.equal((await fetch(`${at}/api/inbox/orca`, { headers: plainHeaders })).status, 404, 'plain Plannotator: no Orca mode')
+      // What the Orca build wrote is all there: the thread with the reply, and the saved agent icon does not break the list of faces.
+      const thread = await fetch(`${at}/api/inbox/threads/${messageId}`, { headers: plainHeaders })
+      assert.equal(thread.status, 200)
+      assert.match(await thread.text(), /Yes, ship it today\./)
+      const facesNow = await fetch(`${at}/api/inbox/agent-faces`, { headers: plainHeaders })
+      assert.equal(facesNow.status, 200, await facesNow.clone().text())
+      process.stderr.write(`orca-build e2e: faces as plain Plannotator ${stockVersion} reads them: ${(await facesNow.text()).slice(0, 300)}\n`)
+      // A person's next reply still reaches the chat: the plugin delivers for plain Plannotator too.
+      const second = await fetch(`${at}/api/inbox/messages/${messageId}/reply`, {
+        method: 'POST',
+        headers: plainHeaders,
+        body: JSON.stringify({ serverSession: plainHealth.serverSession, idempotency_key: 'build-e2e-plain', words: 'And the exporter tomorrow.' })
+      })
+      assert.equal(second.status, 200, await second.clone().text())
+      await until(() => orca.state.mail.length === mailBefore + 1, 'the reply sent through plain Plannotator', 90_000)
+      assert.match(orca.state.mail.at(-1)!.body, /And the exporter tomorrow\./)
+      process.stderr.write(`orca-build e2e: plain Plannotator ${stockVersion} ran on the Orca build’s data (${later ? 'moved by the worker' : 'restarted directly'})\n`)
+      // Back on the Orca build of the same release (what the worker does when that build is published):
+      // the chat is drawn as its agent again, although plain Plannotator showed no face for it.
+      if (!later) {
+        const plainPid = (JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { pid: number }).pid
+        assert.ok(await restartOn(BINARY, dataDir, base, orcaModeConfig(shared), { oldPid: plainPid }), 'the Orca build answers again on that data')
+        const back = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number }
+        const backAt = `http://127.0.0.1:${back.port}`
+        const again = await found(
+          async () => {
+            const answer = (await (await fetch(`${backAt}/api/inbox/agent-faces`, { headers: { 'content-type': 'application/json', origin: backAt } })).json()) as { faces?: Record<string, { face: string }> }
+            return answer.faces?.[SESSION]?.face === 'mark:claude-code' ? answer : null
+          },
+          'the chat’s agent icon, back on the Orca build',
+          90_000
+        )
+        assert.ok(again)
+        process.stderr.write('orca-build e2e: the agent icon is there again on the Orca build\n')
+      }
+    }
     process.stderr.write(`orca-build e2e passed against the Orca build of Plannotator ${version}\n`)
   } catch (error) {
     if (stderr) process.stderr.write(`launcher stderr:\n${stderr}\n`)
