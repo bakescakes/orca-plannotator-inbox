@@ -219,6 +219,25 @@ test('connect with standard Plannotator: the three, then Plannotator connects th
   assert.deepEqual(await disconnectAllAgents(deps, client(inbox), { known }), { ok: true, message: 'Nothing was connected by this plugin.' })
 })
 
+test('connect with an Orca build from before the agents route: its own connect writes the launcher, and says what waits', async () => {
+  const { deps, codex } = await home()
+  await writeFile(codex, '')
+  const inbox = fakeInbox()
+  inbox.state.features = ['mark-faces', 'launch-hosts']
+  inbox.state.stockReport = { added: ['cursor'], failed: [], manual_why: [] }
+  const known: AgentLink[] = [{ agent: 'cursor', name: 'Cursor', state: 'absent', detail: '' }, { agent: 'antigravity', name: 'Antigravity', state: 'plannotator', detail: '' }]
+  const result = await connectAllAgents(deps, client(inbox), { known })
+  assert.deepEqual(result, {
+    ok: true,
+    message:
+      'Connected Codex and Cursor. It applies to chats started from now on. ' +
+      'The Orca build in use is older than this plugin: an agent that already ran Plannotator directly is moved to the launcher when you connect again after it has updated itself.'
+  })
+  assert.ok(!inbox.state.agentCalls.some((call) => call.path === '/api/inbox/control/orca-agents'), 'the route this build lacks was not asked for')
+  const off = await disconnectAllAgents(deps, client(inbox), { known })
+  assert.match(off.message, /older than this plugin\. Disconnect again once it has updated itself\./)
+})
+
 test('connect while the Inbox is down: the three, and a word about the rest', async () => {
   const { deps, codex } = await home()
   await writeFile(codex, '')

@@ -227,6 +227,14 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
     const connected = await worker.request('agents.connect', {})
     assert.equal(connected.ok, true, connected.message)
     assert.match(connected.message, /Cursor/)
+    if (!card.features?.includes('agents')) {
+      // An Orca build from before the agents route: its own connect writes the launcher for an agent
+      // with no entry, and leaves an entry that runs Plannotator directly until the build has updated.
+      assert.equal((await entryOf(cursorFile))?.command, launcher)
+      assert.deepEqual(JSON.parse(await readFile(antigravityFile, 'utf8')), original, 'an older build leaves the entry alone')
+      assert.match(connected.message, /older than this plugin/)
+      process.stderr.write(`connect (Orca build without the agents route): ${connected.message}\n`)
+    } else {
     assert.match(connected.message, /Antigravity/)
     const cursorEntry = await entryOf(cursorFile)
     assert.equal(cursorEntry?.command, launcher, JSON.stringify(cursorEntry))
@@ -251,6 +259,7 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
     const onAgain = await stateOf()
     assert.deepEqual([onAgain.cursor, onAgain.antigravity], ['connected', 'connected'], JSON.stringify(onAgain))
     process.stderr.write(`connect: ${connected.message}\ndisconnect: ${disconnected.message}\nconnect again: ${again.message}\n`)
+    }
 
     // 6. A newer build that cannot work (it reports another version). The check fails with a reason,
     //    the Inbox shows that reason, and the build in use keeps running.

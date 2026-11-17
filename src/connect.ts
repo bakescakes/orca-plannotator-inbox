@@ -838,10 +838,16 @@ const OWN_IDS = new Set<string>([...OWN_AGENT_IDS, ...AGENTS.map((entry) => entr
 const LOOK_MS = 3000
 const LOOK_FEATURES_MS = 3000
 
-type Mode = 'orca' | 'stock'
+/**
+ * `orca`: the Orca build with its agents route. `orca-old`: an Orca build from before that route,
+ * whose own connect already writes the launcher but cannot list, move or take back entries.
+ * `stock`: standard Plannotator.
+ */
+type Mode = 'orca' | 'orca-old' | 'stock'
 
 async function inboxMode(inbox: AgentInbox): Promise<Mode> {
-  return (await inbox.orcaFeatures(LOOK_FEATURES_MS)).includes('agents') ? 'orca' : 'stock'
+  const features = await inbox.orcaFeatures(LOOK_FEATURES_MS)
+  return features.includes('agents') ? 'orca' : features.length > 0 ? 'orca-old' : 'stock'
 }
 
 /** One row of Plannotator's list as a link the panel shows. */
@@ -851,9 +857,13 @@ export function linkFromRow(row: InboxAgentRow, mode: Mode): AgentLink {
     case 'orca':
       return link('connected', row.reason ?? 'Connected through this plugin’s launcher.')
     case 'plannotator':
-      return mode === 'stock'
-        ? link('plannotator', 'Connected by Plannotator. Replies come back into Orca chats once the Orca build runs the Inbox and you connect again.')
-        : link('plannotator', row.reason ?? 'Runs Plannotator directly: messages arrive, but replies do not come back into Orca chats.')
+      if (mode === 'stock') {
+        return link('plannotator', 'Connected by Plannotator. Replies come back into Orca chats once the Orca build runs the Inbox and you connect again.')
+      }
+      if (mode === 'orca-old') {
+        return link('plannotator', 'Connected. The Orca build in use is older than this plugin: connect again once it has updated itself, so an entry that runs Plannotator directly is moved to the launcher.')
+      }
+      return link('plannotator', row.reason ?? 'Runs Plannotator directly: messages arrive, but replies do not come back into Orca chats.')
     case 'tool':
       return link('builtin', row.reason ?? `Plannotator’s own plugin for ${row.label} reaches the Inbox.`)
     case 'off':
@@ -958,14 +968,22 @@ async function everyAgent(
     } else if (which === 'connect') {
       const report = await inbox.stockConnect()
       const added = report.changed.filter((id) => !OWN_IDS.has(id)).map(nameOf)
-      if (added.length > 0) {
+      if (added.length > 0 && mode === 'orca-old') {
+        // An Orca build's own connect writes the launcher.
+        summary.changed.push(...added)
+        summary.notes.push('The Orca build in use is older than this plugin: an agent that already ran Plannotator directly is moved to the launcher when you connect again after it has updated itself.')
+      } else if (added.length > 0) {
         summary.notes.push(`Plannotator connected ${names(added)} its own way: replies to ${added.length === 1 ? 'it' : 'them'} come back into Orca chats once the Orca build runs the Inbox and you connect again.`)
       }
       others(report.problems, summary.problems)
       others(report.manual, summary.manual)
       skipped(report.skipped)
     } else if ((options.known ?? []).some((link) => !OWN_IDS.has(link.agent) && link.state === 'plannotator')) {
-      summary.notes.push('Other agents keep the entries standard Plannotator wrote for them; turn those off in Plannotator’s Settings.')
+      summary.notes.push(
+        mode === 'orca-old'
+          ? 'Other agents stay connected: the Orca build in use is older than this plugin. Disconnect again once it has updated itself.'
+          : 'Other agents keep the entries standard Plannotator wrote for them; turn those off in Plannotator’s Settings.'
+      )
     }
   } catch (error) {
     // A server error (the Orca config cannot be used, say) is a problem to show, not a stopped Inbox.
