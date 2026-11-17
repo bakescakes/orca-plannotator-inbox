@@ -240,12 +240,19 @@ test('a Plannotator that changed is followed at once; the first look only notes 
   const stock = join(b.root, 'bin', 'plannotator')
   await mkdir(join(stock, '..'), { recursive: true })
   await writeFile(stock, '#!/bin/sh\necho plannotator 0.28.66\n', { mode: 0o755 })
+  /** Run once, while the updater works. */
+  let during: (() => Promise<void>) | null = null
   const store = new BuildStore({
     sharedDir: b.shared,
     env: { PATH: join(b.root, 'bin') },
     home: b.root,
     now: () => now,
-    runUpdater: async (args) => (runs.push(args), { ok: true, installed: false, detail: 'already the newest' })
+    runUpdater: async (args) => {
+      runs.push(args)
+      await during?.()
+      during = null
+      return { ok: true, installed: false, detail: 'already the newest' }
+    }
   })
   await store.ensure()
   assert.equal(runs.length, 1)
@@ -262,13 +269,24 @@ test('a Plannotator that changed is followed at once; the first look only notes 
   await store.ensure()
   assert.equal(runs.length, 2)
 
+  // Plannotator changes again while a run works: that run followed the older one, so the next look runs again.
+  during = () => writeFile(stock, '#!/bin/sh\necho plannotator 0.28.68\n# a longer file still\n', { mode: 0o755 })
+  await store.ensure({ force: true })
+  assert.equal(runs.length, 3)
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 4, 'the change made during the run is followed')
+  now += 60_000
+  await store.ensure()
+  assert.equal(runs.length, 4)
+
   // A check file from before this was noted: the first look writes it down and starts nothing.
   const check = JSON.parse(await readFile(storePaths(b.shared).check, 'utf8'))
   assert.match(check.stock, /bin\/plannotator:\d+:\d+$/)
   await privateJson(storePaths(b.shared).check, { ...check, stock: undefined })
   now += 60_000
   await store.ensure()
-  assert.equal(runs.length, 2)
+  assert.equal(runs.length, 4)
   assert.equal(JSON.parse(await readFile(storePaths(b.shared).check, 'utf8')).stock, check.stock)
 })
 

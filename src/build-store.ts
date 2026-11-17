@@ -492,8 +492,9 @@ export class BuildStore {
       // A person asked: a build that could not be used is fetched again now, not after its wait.
       const result = await this.runUpdater(options.force ? ['--again'] : [])
       const latestKnown = readRef(result.latest) ?? check.latestKnown
-      // As it is after the run: the Inbox may have asked Plannotator to update meanwhile.
-      const stock = await signature()
+      // The signature saved is the one from before the run: a Plannotator that changed while the run
+      // worked was not what the run followed, so the next look sees the change and follows it at once.
+      const stock = seen
       if (result.busy) {
         await this.writeCheck({ ...check, lastAttempt: now, latestKnown, stock: seen }).catch(() => undefined)
       } else if (result.ok) {
