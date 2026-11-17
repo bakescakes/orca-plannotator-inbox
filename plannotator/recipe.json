@@ -2,9 +2,9 @@
   "v": 1,
   "plannotator": {
     "repo": "https://github.com/backnotprop/plannotator.git",
-    "version": "0.28.66",
-    "tag": "v0.28.66",
-    "commit": "85e847e8369189ee4027598212623edfe0cd1602"
+    "version": "0.28.67",
+    "tag": "v0.28.67",
+    "commit": "969084882013ac7634283ebca06f3118e766d30d"
   },
   "bun": {
     "version": "1.4.4",
@@ -42,17 +42,31 @@
     {
       "name": "orca-host",
       "file": "patches/orca-host.patch",
-      "sha256": "755b5fc11aade72508c7d3f15125573912eae3b4a5850bf0eddca9a25787de1a"
+      "sha256": "8f69612d2a562b8081f409ce01b5ce9c10358ffa90eaed51a78effaee037826d",
+      "required": true,
+      "features": [
+        "launch-hosts"
+      ]
     },
     {
       "name": "interop-surface",
       "file": "patches/interop-surface.patch",
-      "sha256": "e9eb4afa70c2b7f426f798325aef34cfa047dae3202c27c5d132e3e115933f24"
+      "sha256": "1c5ea4ded4cad262433957a6344958e53a7edf7513064485c8a67a5e164f2a13",
+      "required": true,
+      "features": [
+        "update-state",
+        "update-detail",
+        "agents"
+      ]
     },
     {
       "name": "agent-marks",
       "file": "patches/agent-marks.patch",
-      "sha256": "c2da0149df1d21b7e09e9ec27df9387769793b451801e30c2b74f388d0028e86"
+      "sha256": "0e0a1b9d6404c9f8b200a7b1a5798b2e5a61021512830194732a0df22647c986",
+      "required": false,
+      "features": [
+        "mark-faces"
+      ]
     }
   ],
   "modules": [
@@ -62,6 +76,17 @@
       "sha256": "0ad5192612a7636310d99cdca368f1dae0790a2092b1ed703eb4390c86823698"
     },
     {
+      "file": "modules/packages/server/inbox-orca-agents.ts",
+      "target": "packages/server/inbox-orca-agents.ts",
+      "sha256": "7c20cfd0c498b529f8f59b57f343d95d232b989704056336faf90600af4dbc60"
+    },
+    {
+      "file": "modules/packages/server/inbox-orca-build.ts",
+      "target": "packages/server/inbox-orca-build.ts",
+      "sha256": "ce3be1510773af8d0cd37bd7be1d665e986e24db7a6a4d2557189277910cc4c3",
+      "generated": "build-info"
+    },
+    {
       "file": "modules/packages/server/inbox-orca-host.ts",
       "target": "packages/server/inbox-orca-host.ts",
       "sha256": "0bb7c162dfbf1f5efb5cfb0a7cc136df9421a7818a49ff33daf6b28c2c6d4e61"
@@ -69,12 +94,13 @@
     {
       "file": "modules/packages/server/inbox-orca-surface.ts",
       "target": "packages/server/inbox-orca-surface.ts",
-      "sha256": "9a0da781b3d9a83f49e3dc9b4d7137a00013f129b0598833ad024c36dc6f2f14"
+      "sha256": "302a05e46ef22861247f6cc6f5080e6d8eb4ae27b0d28575a8cc294f347e6ecb"
     },
     {
       "file": "modules/packages/ui/components/inbox-thread/orca-marks.tsx",
       "target": "packages/ui/components/inbox-thread/orca-marks.tsx",
-      "sha256": "afa59ae6b3f92875f5d429b803f1d61bc9394b1558d923302edcaeffe003d518"
+      "sha256": "afa59ae6b3f92875f5d429b803f1d61bc9394b1558d923302edcaeffe003d518",
+      "patch": "agent-marks"
     }
   ],
   "gates": [
@@ -99,10 +125,29 @@
     {
       "file": "tests/orca-build-proof.ts",
       "target": "tests/orca-build-proof.ts",
-      "sha256": "f944706a331ffe82bc6f34b5d85a801cbe3e17471cece16ba4c09083162bfefb",
+      "sha256": "c7172d6685a3d5a16bc1cb28c21ef3149c27efa23c077d8afb1d6ec23420a8a1",
       "run": [
         "{bun}",
         "tests/orca-build-proof.ts"
+      ]
+    },
+    {
+      "file": "tests/orca-agents-proof.ts",
+      "target": "tests/orca-agents-proof.ts",
+      "sha256": "478e5df92f31f793a332e023fd024ad893b945df6eef37f2e9877d6d3af080b3",
+      "run": [
+        "{bun}",
+        "tests/orca-agents-proof.ts"
+      ]
+    },
+    {
+      "file": "tests/orca-marks-proof.ts",
+      "target": "tests/orca-marks-proof.ts",
+      "sha256": "b4362a67454e24180fa82f78bd5ce9944c8fcc7e660e2c366d512ba24445117b",
+      "patch": "agent-marks",
+      "run": [
+        "{bun}",
+        "tests/orca-marks-proof.ts"
       ]
     }
   ],
@@ -179,7 +224,10 @@
         "packages/inbox/agents/faceFan.test.tsx",
         "packages/inbox/agents/linkedAgentFaces.test.tsx",
         "packages/inbox/agents/setAgentIcons.test.tsx",
-        "packages/inbox/letterMarks.test.ts"
+        "packages/inbox/letterMarks.test.ts",
+        "packages/inbox/agents/projectFace.test.ts",
+        "packages/inbox/agents/projectFaceMarks.test.tsx",
+        "packages/server/inbox-agent-faces.test.ts"
       ]
     ],
     "build": [

@@ -41,6 +41,8 @@ const LINK_LABEL: Record<AgentLink['state'], string> = {
   builtin: 'Built in',
   plannotator: 'No replies to Orca',
   other: 'Own setup',
+  off: 'Off',
+  manual: 'By hand',
   absent: 'Not connected',
   missing: 'Not installed'
 }
@@ -49,6 +51,8 @@ const LINK_TONE: Record<AgentLink['state'], Tone> = {
   builtin: 'success',
   plannotator: 'warning',
   other: 'neutral',
+  off: 'neutral',
+  manual: 'neutral',
   absent: 'warning',
   missing: 'neutral'
 }
@@ -107,12 +111,29 @@ function Agents({ agents }: { agents: readonly AgentLink[] }) {
         </Row>
         {canConnect ? (
           <Text muted size="xs">
-            Connecting adds one `plannotator-inbox` server to each agent's own settings. It applies to chats started afterwards.
+            Connecting adds one `plannotator-inbox` server to each agent's own settings: Claude Code, Codex and OpenCode by this plugin, every other agent by Plannotator. It applies to chats started afterwards.
           </Text>
         ) : null}
       </Stack>
     </Card>
   )
+}
+
+// The same two sentences as src/build-words.ts (the worker's status text): the panel imports only types.
+
+/** A newer Plannotator with no Orca build yet: a wait, said plainly, never a failure. */
+function waitingLine(build: BuildInfo): string {
+  const waiting = build.waiting!
+  return build.mode === 'orca-build'
+    ? `Plannotator ${waiting.version} is out. Its Orca build is not published yet; the Orca build of ${build.version} stays in use and updates by itself when it is.`
+    : `Plannotator ${waiting.version} is out. Its Orca build is not published yet; it installs by itself when it is.`
+}
+
+/** A reduced build: what it lacks, in one line. */
+function reducedLine(reduced: NonNullable<BuildInfo['reduced']>): string {
+  const words = reduced.lacks
+  const what = words.length === 0 ? `some Orca changes (${reduced.omitted.join(', ')})` : words.length === 1 ? words[0]! : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+  return `This build lacks ${what}. The full build installs by itself when it is published.`
 }
 
 /** The Orca build of Plannotator: which one is in use, and anything about it that needs a person. */
@@ -135,6 +156,8 @@ function Build({ build, server }: { build: BuildInfo; server: ServerMode | undef
             Plannotator {newer.version} ({newer.build}) is available. It installs by itself, or from the Inbox's own Update button.
           </Text>
         ) : null}
+        {build.waiting ? <Text muted size="xs">{waitingLine(build)}</Text> : null}
+        {inUse && build.reduced ? <Text muted size="xs">{reducedLine(build.reduced)}</Text> : null}
         {!build.updating && build.lastError ? <Callout tone="warning">{build.lastError}</Callout> : null}
         {inUse && server === 'stock' ? (
           <Callout tone="neutral">The Inbox that is running now is standard Plannotator. Restart it to use the Orca build; nothing saved is lost.</Callout>

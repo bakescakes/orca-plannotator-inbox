@@ -4,14 +4,18 @@
 //
 // What it proves, in order: the worker downloads, checks and installs the build; an agent's launcher
 // then starts Plannotator in Orca mode; a person's reply reaches the chat; the chat shows its agent's
-// icon; and an update that cannot work is shown with its reason, in the Inbox and in the panel,
-// while the build in use keeps running.
+// icon; the panel's Connect and Disconnect move Cursor and Antigravity onto the launcher and back,
+// through the build's agent route; and an update that cannot work is shown with its reason, in the
+// Inbox and in the panel, while the build in use keeps running.
 //
 // Runs only when ORCA_BUILD_E2E_BIN names an Orca build for this computer (`plannotator/build.mjs`
-// makes one). It uses a throwaway HOME and data folder.
+// makes one). It uses a throwaway HOME and data folder, and a PATH with no agent on it, so the
+// Inbox's connector finds only the agents this test makes in that HOME. The Connect step stops
+// before it changes anything unless the running Inbox has that HOME.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -70,6 +74,15 @@ async function orcaStandIn(root: string, project: string): Promise<string> {
   return bin
 }
 
+/** The HOME a running process of this user was started with, from `ps` (only that one variable is read). */
+function homeOf(pid: number): Promise<string | null> {
+  return new Promise((resolve) =>
+    execFile('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) =>
+      resolve(error ? null : (/(?:^|\s)HOME=(\S+)/.exec(String(stdout))?.[1] ?? null))
+    )
+  )
+}
+
 const skip = !BINARY ? 'set ORCA_BUILD_E2E_BIN to run' : process.platform === 'win32' ? 'not run on Windows yet' : false
 
 test('the real Orca build: installed, run in Orca mode, replies delivered, agent icon set, a failed update shown', { skip, timeout: 600_000 }, async () => {
@@ -85,12 +98,14 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
   await mkdir(project, { recursive: true })
   const base = {
     HOME: home,
-    PATH: process.env.PATH,
+    // No agent CLI is on this PATH: the connector run by Connect may only find what this test made.
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+    // Gemini CLI would otherwise count the ~/.gemini made for Antigravity as its own folder.
+    GEMINI_CLI_HOME: join(root, 'no-gemini-cli'),
     TMPDIR: process.env.TMPDIR,
     ORCA_PLANNOTATOR_HOME: shared,
     ORCA_PLANNOTATOR_RELEASES: releases.base,
     PLANNOTATOR_DATA_DIR: dataDir,
-    PLANNOTATOR_INBOX_CONNECT: '0',
     PLANNOTATOR_UPDATE_CHECK: '0',
     PLANNOTATOR_AUTO_UPDATE: '0',
     PLANNOTATOR_BROWSER: 'none'
@@ -141,7 +156,7 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
     assert.ok(messageId, `a message id in ${text}`)
 
     await until(async () => (await status()).sessions.some((chat) => chat.session === SESSION), 'the chat to be listened for', 60_000)
-    const registry = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number; token: string }
+    const registry = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number; token: string; pid: number }
     const origin = `http://127.0.0.1:${registry.port}`
     const same = { 'content-type': 'application/json', origin }
     const card = (await (await fetch(`${origin}/api/inbox/orca`, { headers: same })).json()) as { mode?: string; features?: string[] }
@@ -173,7 +188,71 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
     )
     assert.ok(faces)
 
-    // 5. A newer build that cannot work (it reports another version). The check fails with a reason,
+    // 5. Connect and Disconnect, through the panel's own requests, on the real files in the throwaway HOME.
+    //    First: nothing here may reach the real home folder.
+    const realHome = await realpath(homedir())
+    const scratch = await realpath(tmpdir())
+    assert.ok(home.startsWith(`${scratch}/`) && home !== realHome && !home.startsWith(`${realHome}/`), `the test HOME ${home} is a throwaway one`)
+    assert.equal(await homeOf(registry.pid), home, 'the running Inbox must have the throwaway HOME; stopping before anything is connected')
+    const launcher = launcherPath(shared)
+    const cursorFile = join(home, '.cursor', 'mcp.json')
+    const antigravityFile = join(home, '.gemini', 'config', 'mcp_config.json')
+    await mkdir(join(home, '.cursor'))
+    // `antigravity` is the App's data folder (INBOX_ANTIGRAVITY_DATA_DIRS): it makes Antigravity found.
+    await mkdir(join(home, '.gemini', 'antigravity'), { recursive: true })
+    await mkdir(join(home, '.gemini', 'config'), { recursive: true })
+    const ownPlannotator = join(root, 'elsewhere', 'plannotator')
+    await mkdir(join(root, 'elsewhere'))
+    await writeFile(ownPlannotator, '#!/bin/sh\nexit 1\n')
+    await chmod(ownPlannotator, 0o755)
+    const original = {
+      mcpServers: {
+        paper: { command: '/bin/echo', args: ['paper'] },
+        'plannotator-inbox': { command: ownPlannotator, args: ['inbox', 'mcp'] }
+      }
+    }
+    await writeFile(antigravityFile, `${JSON.stringify(original, null, 2)}\n`)
+    const stateOf = async (): Promise<Record<string, string>> =>
+      Object.fromEntries((await status()).agents.map((agent) => [agent.agent, agent.state]))
+    /** The file's `plannotator-inbox` entry; undefined when there is none (or no file: Disconnect removes one Connect created). */
+    const entryOf = async (file: string): Promise<{ command?: string; args?: string[] } | undefined> => {
+      const text = await readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => (error.code === 'ENOENT' ? null : Promise.reject(error)))
+      return text === null ? undefined : (JSON.parse(text) as { mcpServers?: Record<string, { command?: string; args?: string[] }> }).mcpServers?.['plannotator-inbox']
+    }
+    // The entry written only in the throwaway HOME is what the Inbox reads: the same HOME again.
+    const atFirst = await stateOf()
+    assert.equal(atFirst.antigravity, 'plannotator', JSON.stringify(atFirst))
+    assert.equal(atFirst.cursor, 'absent', JSON.stringify(atFirst))
+
+    const connected = await worker.request('agents.connect', {})
+    assert.equal(connected.ok, true, connected.message)
+    assert.match(connected.message, /Cursor/)
+    assert.match(connected.message, /Antigravity/)
+    const cursorEntry = await entryOf(cursorFile)
+    assert.equal(cursorEntry?.command, launcher, JSON.stringify(cursorEntry))
+    assert.deepEqual(cursorEntry?.args ?? [], [])
+    const antigravityEntry = await entryOf(antigravityFile)
+    assert.equal(antigravityEntry?.command, launcher, JSON.stringify(antigravityEntry))
+    assert.deepEqual((JSON.parse(await readFile(antigravityFile, 'utf8')) as typeof original).mcpServers.paper, original.mcpServers.paper)
+    const on = await stateOf()
+    assert.deepEqual([on.cursor, on.antigravity], ['connected', 'connected'], JSON.stringify(on))
+
+    const disconnected = await worker.request('agents.disconnect', {})
+    assert.equal(disconnected.ok, true, disconnected.message)
+    assert.deepEqual(JSON.parse(await readFile(antigravityFile, 'utf8')), original, 'Antigravity’s own entry is back')
+    assert.equal(await entryOf(cursorFile), undefined, 'Cursor’s entry is gone')
+    const off = await stateOf()
+    assert.deepEqual([off.cursor, off.antigravity], ['absent', 'plannotator'], JSON.stringify(off))
+
+    const again = await worker.request('agents.connect', {})
+    assert.equal(again.ok, true, again.message)
+    assert.equal((await entryOf(cursorFile))?.command, launcher)
+    assert.equal((await entryOf(antigravityFile))?.command, launcher)
+    const onAgain = await stateOf()
+    assert.deepEqual([onAgain.cursor, onAgain.antigravity], ['connected', 'connected'], JSON.stringify(onAgain))
+    process.stderr.write(`connect: ${connected.message}\ndisconnect: ${disconnected.message}\nconnect again: ${again.message}\n`)
+
+    // 6. A newer build that cannot work (it reports another version). The check fails with a reason,
     //    the Inbox shows that reason, and the build in use keeps running.
     releases.publish({ version: '99.0.0', build: 'orca.1', bytes })
     const checked = await worker.request('build.check')

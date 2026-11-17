@@ -52,6 +52,39 @@ test('shows what is connected and connects agents on request', async () => {
   await view.unmount()
 })
 
+test('lists every agent, one row each, and offers Connect for one Plannotator runs directly', async () => {
+  const agents: Status['agents'] = [
+    { agent: 'claude', name: 'Claude Code', state: 'connected', detail: 'New Claude chats in Orca reach the Inbox as Orca chats.' },
+    { agent: 'gemini', name: 'Gemini CLI', state: 'plannotator', detail: 'Connected by Plannotator. Replies come back into Orca chats once the Orca build runs the Inbox and you connect again.' },
+    { agent: 'cursor', name: 'Cursor', state: 'manual', detail: 'Add the server in Cursor’s MCP settings.' },
+    { agent: 'amp', name: 'Amp', state: 'off', detail: 'Turned off in Plannotator’s Settings.' }
+  ]
+  const disconnected: unknown[] = []
+  const host = mockHost({
+    requests: {
+      'status.get': () => ({ ...READY, agents }),
+      'agents.disconnect': (input) => {
+        disconnected.push(input)
+        return { ok: true, message: 'Disconnected Claude Code.' }
+      }
+    }
+  })
+  const view = await mount(panel, { host })
+  for (const text of ['Gemini CLI', 'No replies to Orca', 'Cursor', 'By hand', 'Add the server in Cursor’s MCP settings.', 'Amp', 'Off']) assert.ok(view.find({ text }), text)
+  assert.ok(view.find({ text: 'Connect agents' }), 'Gemini CLI can be connected through the launcher')
+  await view.press({ text: 'Disconnect' })
+  assert.deepEqual(disconnected, [{}])
+  assert.ok(view.find({ text: 'Disconnected Claude Code.' }))
+
+  // Only states Connect cannot change: no button.
+  await view.post('status.changed', { ...READY, agents: agents.filter((agent) => agent.state === 'manual' || agent.state === 'off') })
+  assert.equal(view.find({ text: 'Connect agents' }), null)
+  assert.equal(view.find({ text: 'Disconnect' }), null)
+  assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.warnings, [])
+  await view.unmount()
+})
+
 test('a blocked reply can be sent again', async () => {
   const retried: unknown[] = []
   const host = mockHost({
@@ -87,5 +120,49 @@ test('says why when delivery is not possible', async () => {
   assert.ok(view.find({ text: 'The Plannotator Inbox has not run on this computer yet.' }))
   assert.ok(view.find({ type: 'EmptyState', label: 'No chats yet' }))
   assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+
+test('a release with no Orca build yet is a wait, a real failure is a warning, and a reduced build says what it lacks', async () => {
+  const build: NonNullable<Status['build']> = {
+    mode: 'orca-build',
+    version: '0.28.66',
+    build: 'orca.1',
+    latestKnown: { version: '0.28.66', build: 'orca.1' },
+    lastError: null,
+    updating: false,
+    phase: 'ready',
+    detail: null,
+    waiting: { version: '0.28.67', since: 1_700_000_000_000 },
+    reduced: null
+  }
+  let status: Status = { ...READY, build, server: 'orca' }
+  const host = mockHost({ requests: { 'status.get': () => status } })
+  const view = await mount(panel, { host })
+  const waiting = 'Plannotator 0.28.67 is out. Its Orca build is not published yet; the Orca build of 0.28.66 stays in use and updates by itself when it is.'
+  assert.ok(view.find({ text: waiting }))
+  assert.ok(view.find({ text: 'Installed' }))
+  assert.equal(view.find({ type: 'Callout' }), null, 'waiting is not a warning')
+
+  // Stock Plannotator in use while waiting.
+  await view.post('status.changed', { ...status, build: { ...build, mode: 'stock', version: null, build: null } })
+  assert.ok(view.find({ text: 'Plannotator 0.28.67 is out. Its Orca build is not published yet; it installs by itself when it is.' }))
+
+  // A real failure is still one.
+  const failure = 'The download does not match the checksum the release lists, so it was not used. The Orca build of Plannotator 0.28.66 stays in use.'
+  await view.post('status.changed', { ...status, build: { ...build, waiting: null, lastError: failure } })
+  assert.ok(view.find({ type: 'Callout', text: failure }) ?? view.find({ text: failure }))
+  assert.equal(view.find({ text: waiting }), null)
+
+  // A reduced build of 0.28.67, then the full one.
+  const reduced = { ...build, version: '0.28.67', waiting: null, reduced: { lacks: ['per-agent icons', 'starting and stopping chats from the Inbox'], omitted: ['mark-faces', 'launch-hosts'] } }
+  status = { ...status, build: reduced }
+  await view.post('status.changed', status)
+  assert.ok(view.find({ text: 'This build lacks per-agent icons and starting and stopping chats from the Inbox. The full build installs by itself when it is published.' }))
+  await view.post('status.changed', { ...status, build: { ...reduced, build: 'orca.2', reduced: null } })
+  assert.equal(view.find({ text: /This build lacks/ }), null)
+  assert.ok(view.find({ text: 'Plannotator 0.28.67 (orca.2)' }))
+  assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.warnings, [])
   await view.unmount()
 })

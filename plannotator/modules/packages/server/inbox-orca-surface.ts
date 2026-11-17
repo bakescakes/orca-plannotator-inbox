@@ -7,7 +7,8 @@
  * In Orca mode this module:
  * - imports the projects of the plugin's bridge (`GET /api/lifecycle/catalog`) so they show before their first message;
  * - answers `GET /api/inbox/orca`, the connection card's aggregate (never a token, session id or native command);
- * - gives every MCP connect path the plugin's MCP command (`mcpCommand`);
+ * - gives every MCP connect path the plugin's MCP command (`mcpCommand`), and lets the plugin connect, move and
+ *   disconnect the agents in one call (`/api/inbox/control/orca-agents`, inbox-orca-agents.ts);
  * - routes Update now, the update button and Settings → About through the plugin's updater (`upgradeCommand`), and
  *   reflects its state file (`upgradeStateFile`) in the stock update model, so progress and failure show where a
  *   stock update's would.
@@ -23,14 +24,18 @@ import type { InboxUpdate } from "@plannotator/core/inbox-types";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import type { InboxUpdateDetails } from "./inbox-updates";
 import { releaseUrlFor } from "@plannotator/shared/update-check";
+import { ORCA_BUILD } from "./inbox-orca-build";
 
 const WINDOWS = process.platform === "win32";
 const STABLE = /^\d+\.\d+\.\d+$/;
 const PHASES = ["queued", "resolving", "building", "staged", "activating", "ready", "failed", "rolled-back"] as const;
 type Phase = (typeof PHASES)[number];
 const IN_PROGRESS: readonly Phase[] = ["queued", "resolving", "building", "staged", "activating"];
-/** The features this Orca build offers the plugin (`GET /api/inbox/orca`). */
-export const ORCA_BUILD_FEATURES = ["mark-faces", "update-state", "update-detail", "launch-hosts"] as const;
+/**
+ * The features this Orca build offers the plugin (`GET /api/inbox/orca`): those of the patches it carries, written by
+ * build.mjs into inbox-orca-build.ts, so a build that leaves an optional patch out never lists what that patch carries.
+ */
+export const ORCA_BUILD_FEATURES: readonly string[] = ORCA_BUILD.features;
 export const ORCA_UPDATER_LABEL = "Orca build updater (keeps the Orca integration)";
 const DETAIL_MAX = 300;
 
@@ -100,10 +105,11 @@ export function orcaConfig(dataDir: string): OrcaConfig {
 /**
  * The MCP argv every connect path writes and recognizes (inbox-agents.ts) and the settings' `mcp_command`: the
  * plugin's `mcpCommand` in Orca mode, else upstream's `<cli> inbox mcp`. A missing or malformed one refuses rather
- * than writing an entry that would bypass the Orca plugin.
+ * than writing an entry that would bypass the Orca plugin. `options`: the connect options; with `orcaPlain: true`
+ * (set only by inbox-orca-agents.ts, to put back an agent's own plain entry) the fallback is written in Orca mode too.
  */
-export function orcaMcpCommand(dataDir: string, fallback: readonly string[]): string[] {
-  if (!orcaMode()) return [...fallback];
+export function orcaMcpCommand(dataDir: string, fallback: readonly string[], options?: object): string[] {
+  if (!orcaMode() || (options as { orcaPlain?: unknown } | undefined)?.orcaPlain === true) return [...fallback];
   return orcaConfig(dataDir).mcpCommand;
 }
 

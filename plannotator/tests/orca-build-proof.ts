@@ -8,6 +8,11 @@
  * (updating, failed with its sentence, rolled back, ready); Update now starting the updater with `--version`;
  * the launch hosts' bridge request shapes; a Stop Orca refuses reaching the run line as an error, not as stopped;
  * and a `mark:<host>` face drawing that host's mark.
+ *
+ * A reduced build: the build writes what it carries into packages/server/inbox-orca-build.ts. The card must serve
+ * exactly that list, the required patches' features must be in it, and a feature left out must be absent, the source
+ * as stock has it: without `mark-faces`, a `mark:<host>` face is refused in both modes as stock refuses it, and the
+ * Orca marks file, the `orca` host name and the mark-face pattern are not in the source.
  */
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -92,6 +97,11 @@ globalThis.fetch = ((input: any, init: any) => {
   return realFetch(input, init);
 }) as typeof fetch;
 
+const { ORCA_BUILD } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-build.ts")).href);
+const features: string[] = [...ORCA_BUILD.features];
+for (const required of ["launch-hosts", "update-state", "update-detail", "agents"]) check(features.includes(required), "the build lacks required feature " + required);
+const marksOn = features.includes("mark-faces");
+check(marksOn === !ORCA_BUILD.omitted.includes("agent-marks"), "mark-faces and the agent-marks patch disagree: " + JSON.stringify(ORCA_BUILD));
 const { startInboxServer } = await import(pathToFileURL(join(cwd, "packages/server/inbox.ts")).href);
 const { ORCA_UPDATER_LABEL } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-surface.ts")).href);
 const inert = async () => ({ ok: false, error: "inert proof" });
@@ -126,12 +136,18 @@ try {
   check(stockUpdate.command !== ORCA_UPDATER_LABEL && stockUpdate.failure === null, "stock update details changed");
   const stockSettings = await getJson(stock.base, "/api/inbox/settings?store=0");
   check(JSON.stringify(stockSettings.mcp_command.slice(-2)) === '["inbox","mcp"]', "stock MCP command changed");
-  check((await markFace(stock.base, "stock_session", "mark:codex")) === 200, "stock refused a mark: face");
-  check((await getJson(stock.base, "/api/inbox/agent-faces")).faces.stock_session?.face === "mark:codex", "stock did not keep a mark: face");
+  if (marksOn) {
+    check((await markFace(stock.base, "stock_session", "mark:codex")) === 200, "stock refused a mark: face");
+    check((await getJson(stock.base, "/api/inbox/agent-faces")).faces.stock_session?.face === "mark:codex", "stock did not keep a mark: face");
+  } else {
+    // Left out: refused as stock Plannotator refuses a face it does not know, and nothing kept.
+    check((await markFace(stock.base, "stock_session", "mark:codex")) >= 400, "a build without mark-faces kept a mark: face");
+    check((await getJson(stock.base, "/api/inbox/agent-faces")).faces.stock_session === undefined, "a build without mark-faces kept a face for the session");
+  }
   check((await markFace(stock.base, "stock_session", "mark:Not A Host")) >= 400, "a malformed mark: face was kept");
   stock.server.stop();
   stock = null;
-  result.stock = { orcaRoute: 404, updater: "stock", mcpTail: ["inbox", "mcp"], markFaces: "accepted" };
+  result.stock = { orcaRoute: 404, updater: "stock", mcpTail: ["inbox", "mcp"], markFaces: marksOn ? "accepted" : "refused (left out)" };
 
   // ── Orca mode ────────────────────────────────────────────────────────────────────────────────────────────────
   const data = join(root, "orca-inbox"), state = join(root, "state");
@@ -165,7 +181,7 @@ try {
   check(imported.length === 1 && imported[0].threads === 0 && imported[0].listed === 0, "import invented Inbox activity");
   const card = await getJson(base, "/api/inbox/orca");
   check(card.mode === "orca" && card.connected === true && card.projects.imported === 1, "connection card aggregate wrong");
-  check(Array.isArray(card.features) && card.features.includes("mark-faces"), "features lack mark-faces");
+  check(JSON.stringify(card.features) === JSON.stringify(features), "the card's features are not the build's: " + JSON.stringify(card.features));
   check(card.upgrade.configured === true && card.upgrade.state === null, "updater not configured or a state invented");
   check((await fetch(base + "/api/inbox/orca", { method: "POST", headers: same, body: "{}" })).status === 405, "the card route took a POST");
 
@@ -219,9 +235,14 @@ try {
   check(JSON.stringify(JSON.parse(readFileSync(updaterArgs, "utf8"))) === JSON.stringify(["--version", "0.28.67"]), "the updater did not get --version");
   check(existsSync(join(state, "update-attempt.json")), "Update now kept no attempt record");
 
-  // A mark: face set through the API is kept and returned in Orca mode too.
-  check((await markFace(base, "orca_session_1", "mark:codex")) === 200, "Orca mode refused a mark: face");
-  check((await getJson(base, "/api/inbox/agent-faces")).faces.orca_session_1?.face === "mark:codex", "Orca mode did not keep a mark: face");
+  // A mark: face set through the API is kept and returned in Orca mode too (refused, as stock, without mark-faces).
+  if (marksOn) {
+    check((await markFace(base, "orca_session_1", "mark:codex")) === 200, "Orca mode refused a mark: face");
+    check((await getJson(base, "/api/inbox/agent-faces")).faces.orca_session_1?.face === "mark:codex", "Orca mode did not keep a mark: face");
+  } else {
+    check((await markFace(base, "orca_session_1", "mark:codex")) >= 400, "Orca mode without mark-faces kept a mark: face");
+    check((await getJson(base, "/api/inbox/agent-faces")).faces.orca_session_1 === undefined, "Orca mode without mark-faces kept a face for the session");
+  }
 
   // The launch hosts: every Orca chat agent, and the bridge request shapes of Start, Stop, Resume and Open.
   const { createOrcaLaunchHosts } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-host.ts")).href);
@@ -261,18 +282,30 @@ try {
   check(accepted.status === 200 && actions.filter((a) => a.path === "stop").length === 3, "a Stop Orca accepted was not answered as done: " + accepted.status);
   result.orca = { mcpCommand: "plugin's", imported: imported.length, features: card.features, update: ["updating", "failed+detail", "rolled-back", "ready", "update-now"], hosts: hosts.map((h: any) => h.agent), actions: actions.map((a) => a.path), refusedStop: "error" };
 
+  // Without mark-faces, the source is stock's where that patch would change it.
+  if (!marksOn) {
+    const types = await import(pathToFileURL(join(cwd, "packages/core/inbox-types.ts")).href);
+    check(types.INBOX_MARK_FACE === undefined && types.isInboxAgentFace("mark:codex") === false, "the source knows mark: faces without mark-faces");
+    check(types.INBOX_HOST_NAMES.orca === undefined, "the source names the orca host without mark-faces");
+    check(!existsSync(join(cwd, "packages/ui/components/inbox-thread/orca-marks.tsx")), "the Orca marks file is in a build without mark-faces");
+    check(!readFileSync(join(cwd, "packages/ui/components/inbox-thread/icons.tsx"), "utf8").includes("orca-marks"), "the marks use the Orca marks without mark-faces");
+    check(!readFileSync(join(cwd, "packages/inbox/icons.tsx"), "utf8").includes("'mark:'"), "the icons draw mark: faces without mark-faces");
+    result.marks = "left out (stock)";
+  }
   // A mark: face draws that host's own mark (and an Orca-only agent's mark from the Orca build's marks).
   // React resolves from the window's package (the tests folder has no dependencies of its own).
-  const fromInbox = (name: string) => import(pathToFileURL(Bun.resolveSync(name, join(cwd, "packages/inbox"))).href);
-  const { createElement } = await fromInbox("react");
-  const { renderToStaticMarkup } = await fromInbox("react-dom/server");
-  const { FaceOfMark } = await import(pathToFileURL(join(cwd, "packages/inbox/icons.tsx")).href);
-  const draw = (host: string, face: string) => renderToStaticMarkup(createElement(FaceOfMark, { host, face }));
-  check(draw("orca", "mark:codex") === draw("codex", "agent"), "mark:codex is not Codex's own mark");
-  check(draw("orca", "mark:copilot") !== draw("orca", "agent"), "mark:copilot drew the neutral mark");
-  for (const host of ["claude-code", "codex", "pi", "opencode", "cursor", "grok", "antigravity", "copilot", "kimi", "omp"])
-    check(draw("orca", "mark:" + host) !== draw("orca", "agent"), "mark:" + host + " drew the neutral mark");
-  result.marks = "drawn";
+  if (marksOn) {
+    const fromInbox = (name: string) => import(pathToFileURL(Bun.resolveSync(name, join(cwd, "packages/inbox"))).href);
+    const { createElement } = await fromInbox("react");
+    const { renderToStaticMarkup } = await fromInbox("react-dom/server");
+    const { FaceOfMark } = await import(pathToFileURL(join(cwd, "packages/inbox/icons.tsx")).href);
+    const draw = (host: string, face: string) => renderToStaticMarkup(createElement(FaceOfMark, { host, face }));
+    check(draw("orca", "mark:codex") === draw("codex", "agent"), "mark:codex is not Codex's own mark");
+    check(draw("orca", "mark:copilot") !== draw("orca", "agent"), "mark:copilot drew the neutral mark");
+    for (const host of ["claude-code", "codex", "pi", "opencode", "cursor", "grok", "antigravity", "copilot", "kimi", "omp"])
+      check(draw("orca", "mark:" + host) !== draw("orca", "agent"), "mark:" + host + " drew the neutral mark");
+    result.marks = "drawn";
+  }
 } finally {
   globalThis.fetch = realFetch;
   stock?.server.stop();

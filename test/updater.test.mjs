@@ -88,6 +88,11 @@ test('versions, the index and the manifest are read strictly', () => {
   assert.throws(() => readManifest({ ...good, assets: { 'linux-x64': { ...good.assets['linux-x64'], name: '../evil' } } }, ref, 'linux-x64'), /shape/)
   assert.throws(() => readManifest({ ...good, assets: { 'linux-x64': { ...good.assets['linux-x64'], size: 500 * 1024 * 1024 } } }, ref, 'linux-x64'), /shape/)
   assert.throws(() => readManifest({ ...good, pluginMin: undefined }, ref, 'linux-x64'), /which plugin/)
+  assert.deepEqual([readManifest(good, ref, 'linux-x64').features, readManifest(good, ref, 'linux-x64').omitted], [null, null], 'a manifest without the lists')
+  const lists = readManifest({ ...good, features: ['agents', 'agents', 'update-state'], omitted: ['mark-faces'] }, ref, 'linux-x64')
+  assert.deepEqual([lists.features, lists.omitted], [['agents', 'update-state'], ['mark-faces']])
+  assert.equal(readManifest({ ...good, omitted: 'mark-faces' }, ref, 'linux-x64').omitted, null, 'not a list: ignored')
+  assert.equal(readManifest({ ...good, omitted: ['../x'] }, ref, 'linux-x64').omitted, null, 'not plain names: ignored')
 })
 
 test('only GitHub, or a loopback test server, is a source; arguments are checked', () => {
@@ -160,19 +165,98 @@ test('installs the newest build, checks it, records it, and keeps only the one b
   }
 })
 
-test('a version with no Orca build fails in one sentence, and what runs stays', { skip: STAND_IN }, async () => {
+test('a release with no Orca build yet is a wait, not a failure, and what runs stays', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const b = box(server)
+  const waiting = () => (existsSync(join(b.shared, 'plannotator', 'waiting.json')) ? readJson(join(b.shared, 'plannotator', 'waiting.json')) : null)
+  try {
+    const none = await b.run({ version: '0.28.67' })
+    assert.equal(none.ok, true, none.detail)
+    assert.equal(none.installed, false)
+    assert.deepEqual(none.waiting, { version: '0.28.67' })
+    assert.equal(none.detail, 'Plannotator 0.28.67 is out. Its Orca build is not published yet; stock Plannotator stays in use until it is.')
+    assert.deepEqual({ phase: b.state().phase, version: b.state().version, detail: b.state().detail }, { phase: 'ready', version: undefined, detail: none.detail }, 'not failed, and no version: the Inbox shows the release as available')
+    assert.equal(waiting().version, '0.28.67')
+    assert.equal(statSync(join(b.shared, 'plannotator', 'waiting.json')).mode & 0o777, 0o600)
+
+    // The newest build that is published installs; the wait for 0.28.67 goes on, with its first time kept.
+    const since = waiting().since
+    assert.equal((await b.run()).installed, true)
+    const after = await b.run({ version: '0.28.67' })
+    assert.equal(after.ok, true)
+    assert.equal(after.detail, 'Plannotator 0.28.67 is out. Its Orca build is not published yet; the Orca build of Plannotator 0.28.66 stays in use and updates by itself when it is.')
+    assert.deepEqual([b.state().phase, b.state().version], ['ready', '0.28.66'])
+    assert.equal(waiting().since, since)
+    assert.equal(b.current().version, '0.28.66', 'what runs stays')
+
+    // No index at all: a wait when a version is named, and still the old sentence when none is.
+    server.faults.noIndex = true
+    assert.equal((await b.run({ version: '0.28.67' })).ok, true)
+    assert.match((await b.run()).detail, /No Orca build of Plannotator has been published yet/)
+    server.faults.noIndex = false
+
+    // Its build is published: it installs and the wait is over.
+    server.publish({ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67') })
+    const done = await b.run({ version: '0.28.67' })
+    assert.equal(done.installed, true, done.detail)
+    assert.equal(done.version, '0.28.67')
+    assert.equal(waiting(), null)
+    assert.equal(b.state().phase, 'ready')
+  } finally {
+    await server.close()
+  }
+})
+
+test('a version older than the newest build but missing from the index is still a failure', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.68', build: 'orca.1', bytes: fakeBinary('good', '0.28.68') }])
+  const b = box(server)
+  try {
+    const missing = await b.run({ version: '0.28.67' })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.detail, 'No Orca build of Plannotator 0.28.67 has been published yet, so stock Plannotator stays in use.')
+    assert.equal(b.state().phase, 'failed')
+    assert.equal(existsSync(join(b.shared, 'plannotator', 'waiting.json')), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a real failure of the build waited for is still a failure, and ends the wait', { skip: STAND_IN }, async () => {
+  const bytes = fakeBinary('good', '0.28.67')
   const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
   const b = box(server)
   try {
-    const none = await b.run({ version: '0.28.67' })
-    assert.equal(none.ok, false)
-    assert.equal(none.detail, 'No Orca build of Plannotator 0.28.67 has been published yet, so stock Plannotator stays in use.')
-    assert.deepEqual({ phase: b.state().phase, version: b.state().version, detail: b.state().detail }, { phase: 'failed', version: '0.28.67', detail: none.detail })
-    assert.equal((await b.run()).ok, true)
-    const after = await b.run({ version: '0.28.67' })
-    assert.equal(after.detail, 'No Orca build of Plannotator 0.28.67 has been published yet, so the Orca build of Plannotator 0.28.66 stays in use.')
-    server.faults.noIndex = true
-    assert.match((await b.run()).detail, /No Orca build of Plannotator has been published yet/)
+    assert.equal((await b.run()).installed, true)
+    assert.equal((await b.run({ version: '0.28.67' })).waiting?.version, '0.28.67')
+    server.publish({ version: '0.28.67', build: 'orca.1', bytes, manifest: (m) => ({ ...m, assets: { [KEY]: { ...m.assets[KEY], sha256: 'c'.repeat(64) } } }) })
+    const bad = await b.run({ version: '0.28.67' })
+    assert.equal(bad.ok, false)
+    assert.match(bad.detail, /does not match the checksum.*Orca build of Plannotator 0\.28\.66 stays in use/)
+    assert.deepEqual([b.state().phase, b.state().version], ['failed', '0.28.67'])
+    assert.equal(existsSync(join(b.shared, 'plannotator', 'waiting.json')), false, 'the build is published: no longer a wait')
+    assert.equal(b.current().version, '0.28.66')
+  } finally {
+    await server.close()
+  }
+})
+
+test('a reduced build is installed and says what it leaves out; the full build of the same version replaces it', { skip: STAND_IN }, async () => {
+  const reduced = (m) => ({ ...m, features: ['agents', 'update-state', 'update-detail'], omitted: ['mark-faces', 'launch-hosts'] })
+  const server = await releaseServer([{ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67'), manifest: reduced }])
+  const b = box(server)
+  try {
+    const first = await b.run({ version: '0.28.67' })
+    assert.equal(first.installed, true, first.detail)
+    assert.deepEqual([b.current().build, b.current().features, b.current().omitted], ['orca.1', ['agents', 'update-state', 'update-detail'], ['mark-faces', 'launch-hosts']])
+    assert.ok(readRecord(join(b.shared, 'plannotator', 'current.json'), b.shared).omitted, 'the record with its lists is trusted')
+
+    server.publish({ version: '0.28.67', build: 'orca.2', bytes: fakeBinary('good', '0.28.67', 'orca.2'), manifest: (m) => ({ ...m, features: ['mark-faces', 'launch-hosts', 'agents', 'update-state', 'update-detail'], omitted: [] }) })
+    const full = await b.run({ version: '0.28.67' })
+    assert.equal(full.installed, true, full.detail)
+    assert.equal(b.current().build, 'orca.2')
+    assert.deepEqual(b.current().omitted, [])
+    assert.deepEqual(b.versions(), ['0.28.67-orca.1', '0.28.67-orca.2'])
+    assert.equal((await b.run()).installed, false, 'already the newest')
   } finally {
     await server.close()
   }

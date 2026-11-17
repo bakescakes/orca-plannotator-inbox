@@ -1,11 +1,16 @@
-// "Connect agents": points Claude Code, Codex and OpenCode at the launcher, so their Orca chats
-// reach the Inbox as Orca chats. Orca plugins cannot contribute MCP servers yet, so this writes the
-// one `plannotator-inbox` entry each agent reads at user level, and can put back what it replaced.
+// "Connect agents": points every agent Plannotator supports at the launcher, so their Orca chats
+// reach the Inbox as Orca chats. Orca plugins cannot contribute MCP servers yet, so the one
+// `plannotator-inbox` entry each agent reads at user level is written, and can be put back.
 //
-// It never touches an entry it does not recognise: only a missing entry, its own entry, or
+// One method for every agent: Plannotator's own connector, which the Orca build of Plannotator
+// runs writing the launcher (`/api/inbox/control/orca-agents`). This file's own writer handles only
+// Claude Code, Codex and OpenCode, where the launcher needs what Plannotator's connector does not
+// do: Claude Code (Plannotator writes no entry for it), Codex (passes an MCP server no environment
+// unless each variable is listed) and OpenCode (JSONC settings Plannotator does not edit).
+//
+// The writer never touches an entry it does not recognise: only a missing entry, its own entry, or
 // Plannotator's plain `plannotator inbox mcp` entry (which it remembers and restores). It never
-// restarts or signals an agent, and never writes Antigravity's (`~/.gemini`) settings: stock
-// Plannotator connects Antigravity itself.
+// restarts or signals an agent, and never writes any other agent's settings itself.
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { copyFile, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
@@ -13,8 +18,12 @@ import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { KeyValue } from './ledger'
 import type { Env } from './paths'
-import type { ActionResult, AgentId, AgentLink } from './protocol'
+import { InboxFailed, InboxRefused, InboxUnavailable, OWN_AGENT_IDS, type InboxAgentProblem, type InboxAgentRow, type InboxClient } from './inbox'
+import type { ActionResult, AgentLink, OwnAgentId } from './protocol'
 import { errorText, isRecord, type Json } from './util'
+
+/** One agent's connect or disconnect: `changed` when its settings were written, `restored` when Plannotator's earlier entry came back. */
+export type AgentResult = ActionResult & { changed?: boolean; restored?: boolean }
 
 export const SERVER = 'plannotator-inbox'
 /**
@@ -202,7 +211,7 @@ async function setClaudeEntry(deps: ConnectDeps, entry: Json | null): Promise<vo
   throw new Error('Claude Code’s settings kept changing; nothing was written. Try again.')
 }
 
-export async function connectClaude(deps: ConnectDeps): Promise<ActionResult> {
+export async function connectClaude(deps: ConnectDeps): Promise<AgentResult> {
   const link = await claudeLink(deps)
   if (link.state === 'connected') return { ok: true, message: 'Claude Code is already connected.' }
   if (link.state === 'builtin' || link.state === 'missing' || link.state === 'other') return { ok: link.state !== 'other', message: `Claude Code: ${link.detail}` }
@@ -220,16 +229,16 @@ export async function connectClaude(deps: ConnectDeps): Promise<ActionResult> {
     if (typeof entry.command === 'string' && isAbsolute(entry.command) && !env.PLANNOTATOR_BIN) env.PLANNOTATOR_BIN = entry.command
   }
   await setClaudeEntry(deps, { type: 'stdio', command: deps.launcher, args: [], env })
-  return { ok: true, message: 'Claude Code is connected. It applies to chats started from now on.' }
+  return { ok: true, changed: true, message: 'Claude Code is connected. It applies to chats started from now on.' }
 }
 
-export async function disconnectClaude(deps: ConnectDeps): Promise<ActionResult> {
+export async function disconnectClaude(deps: ConnectDeps): Promise<AgentResult> {
   const link = await claudeLink(deps)
   if (link.state !== 'connected') return { ok: true, message: 'Claude Code was not connected by this plugin.' }
   const original = await deps.store.get(CLAUDE_ORIGINAL)
   await setClaudeEntry(deps, isRecord(original) ? (original as Json) : null)
   await deps.store.delete(CLAUDE_ORIGINAL)
-  return { ok: true, message: isRecord(original) ? 'Claude Code is back on its earlier Plannotator entry.' : 'Claude Code is disconnected.' }
+  return { ok: true, changed: true, restored: isRecord(original), message: isRecord(original) ? 'Claude Code is back on its earlier Plannotator entry.' : 'Claude Code is disconnected.' }
 }
 
 // ---------------------------------------------------------------------- Codex
@@ -405,13 +414,13 @@ async function upgradeCodex(deps: ConnectDeps, view: CodexView): Promise<void> {
   await writeChecked(deps, 'Codex', path, view.text, lines.join('\n'))
 }
 
-export async function connectCodex(deps: ConnectDeps): Promise<ActionResult> {
+export async function connectCodex(deps: ConnectDeps): Promise<AgentResult> {
   const { link, view, outdated } = await codexState(deps)
   if (link.state === 'connected') return { ok: true, message: 'Codex is already connected.' }
   if (link.state === 'missing' || link.state === 'other') return { ok: link.state === 'missing', message: `Codex: ${link.detail}` }
   if (outdated && view) {
     await upgradeCodex(deps, view)
-    return { ok: true, message: 'Codex’s connection is updated. It applies to chats started from now on.' }
+    return { ok: true, changed: true, message: 'Codex’s connection is updated. It applies to chats started from now on.' }
   }
   let env: string | null = null
   if (link.state === 'plannotator' && view) {
@@ -427,16 +436,17 @@ export async function connectCodex(deps: ConnectDeps): Promise<ActionResult> {
     }
   }
   await rewriteCodex(deps, view, codexBlock(deps.launcher, env))
-  return { ok: true, message: 'Codex is connected. It applies to chats started from now on.' }
+  return { ok: true, changed: true, message: 'Codex is connected. It applies to chats started from now on.' }
 }
 
-export async function disconnectCodex(deps: ConnectDeps): Promise<ActionResult> {
+export async function disconnectCodex(deps: ConnectDeps): Promise<AgentResult> {
   const { view, ours } = await codexState(deps)
   if (!ours) return { ok: true, message: 'Codex was not connected by this plugin.' }
   const original = await deps.store.get(CODEX_ORIGINAL)
   await rewriteCodex(deps, view, typeof original === 'string' && original !== '' ? original : null)
   await deps.store.delete(CODEX_ORIGINAL)
-  return { ok: true, message: typeof original === 'string' && original !== '' ? 'Codex is back on its earlier Plannotator entry.' : 'Codex is disconnected.' }
+  const restored = typeof original === 'string' && original !== ''
+  return { ok: true, changed: true, restored, message: restored ? 'Codex is back on its earlier Plannotator entry.' : 'Codex is disconnected.' }
 }
 
 // ------------------------------------------------------------------- OpenCode
@@ -695,7 +705,7 @@ async function writeOpenCode(deps: ConnectDeps, file: OpenCodeFile, next: string
   await writeChecked(deps, 'OpenCode', path, file.doc!.text, next)
 }
 
-export async function connectOpenCode(deps: ConnectDeps): Promise<ActionResult> {
+export async function connectOpenCode(deps: ConnectDeps): Promise<AgentResult> {
   const { link, view } = await openCodeState(deps)
   if (link.state === 'connected') return { ok: true, message: 'OpenCode is already connected.' }
   if (link.state === 'missing' || link.state === 'other') return { ok: link.state === 'missing', message: `OpenCode: ${link.detail}` }
@@ -719,7 +729,7 @@ export async function connectOpenCode(deps: ConnectDeps): Promise<ActionResult> 
     const record: OpenCodeRecord = { path: file.path, original: doc.text.slice(span.start, span.end), added: null, replaced: '' }
     await deps.store.set(OPENCODE_ORIGINAL, record as unknown as Json)
     await writeOpenCode(deps, file, next)
-    return { ok: true, message: 'OpenCode is connected. It applies to chats started from now on.' }
+    return { ok: true, changed: true, message: 'OpenCode is connected. It applies to chats started from now on.' }
   }
   const file = view.target!
   const doc = file.doc!
@@ -734,10 +744,10 @@ export async function connectOpenCode(deps: ConnectDeps): Promise<ActionResult> 
   const record: OpenCodeRecord = { path: file.path, original: null, added: edit.text, replaced: doc.text.slice(edit.start, edit.end) }
   await deps.store.set(OPENCODE_ORIGINAL, record as unknown as Json)
   await writeOpenCode(deps, file, next)
-  return { ok: true, message: 'OpenCode is connected. It applies to chats started from now on.' }
+  return { ok: true, changed: true, message: 'OpenCode is connected. It applies to chats started from now on.' }
 }
 
-export async function disconnectOpenCode(deps: ConnectDeps): Promise<ActionResult> {
+export async function disconnectOpenCode(deps: ConnectDeps): Promise<AgentResult> {
   const { link, view } = await openCodeState(deps)
   if (link.state !== 'connected') return { ok: true, message: 'OpenCode was not connected by this plugin.' }
   const file = view.withEntry[0]!
@@ -767,7 +777,7 @@ export async function disconnectOpenCode(deps: ConnectDeps): Promise<ActionResul
   }
   await writeOpenCode(deps, file, next)
   await deps.store.delete(OPENCODE_ORIGINAL)
-  return { ok: true, message: record?.original ? 'OpenCode is back on its earlier Plannotator entry.' : 'OpenCode is disconnected.' }
+  return { ok: true, changed: true, restored: !!record?.original, message: record?.original ? 'OpenCode is back on its earlier Plannotator entry.' : 'OpenCode is disconnected.' }
 }
 
 // -------------------------------------------------------------------- together
@@ -776,29 +786,212 @@ export async function agentLinks(deps: ConnectDeps): Promise<AgentLink[]> {
   return Promise.all([claudeLink(deps), codexLink(deps), openCodeLink(deps)])
 }
 
-const AGENTS: readonly { id: AgentId; name: string; connect: (deps: ConnectDeps) => Promise<ActionResult>; disconnect: (deps: ConnectDeps) => Promise<ActionResult> }[] = [
+const AGENTS: readonly { id: OwnAgentId; name: string; connect: (deps: ConnectDeps) => Promise<AgentResult>; disconnect: (deps: ConnectDeps) => Promise<AgentResult> }[] = [
   { id: 'claude', name: 'Claude Code', connect: connectClaude, disconnect: disconnectClaude },
   { id: 'codex', name: 'Codex', connect: connectCodex, disconnect: disconnectCodex },
   { id: 'opencode', name: 'OpenCode', connect: connectOpenCode, disconnect: disconnectOpenCode }
 ]
 
-async function each(deps: ConnectDeps, agent: AgentId | undefined, which: 'connect' | 'disconnect'): Promise<ActionResult> {
-  const results: ActionResult[] = []
+type Which = 'connect' | 'disconnect'
+
+async function eachOwn(deps: ConnectDeps, agent: OwnAgentId | undefined, which: Which): Promise<{ name: string; result: AgentResult }[]> {
+  const results: { name: string; result: AgentResult }[] = []
   for (const entry of AGENTS) {
     if (agent !== undefined && agent !== entry.id) continue
     try {
-      results.push(await entry[which](deps))
+      results.push({ name: entry.name, result: await entry[which](deps) })
     } catch (error) {
-      results.push({ ok: false, message: `${entry.name}: ${errorText(error)}` })
+      results.push({ name: entry.name, result: { ok: false, message: `${entry.name}: ${errorText(error)}` } })
     }
   }
+  return results
+}
+
+async function each(deps: ConnectDeps, agent: OwnAgentId | undefined, which: Which): Promise<ActionResult> {
+  const results = (await eachOwn(deps, agent, which)).map((entry) => entry.result)
   return { ok: results.every((result) => result.ok), message: results.map((result) => result.message).join(' ') }
 }
 
-export function connectAgents(deps: ConnectDeps, agent?: AgentId): Promise<ActionResult> {
+/** Claude Code, Codex and OpenCode only, one sentence each. */
+export function connectAgents(deps: ConnectDeps, agent?: OwnAgentId): Promise<ActionResult> {
   return each(deps, agent, 'connect')
 }
 
-export function disconnectAgents(deps: ConnectDeps, agent?: AgentId): Promise<ActionResult> {
+/** Claude Code, Codex and OpenCode only, one sentence each. */
+export function disconnectAgents(deps: ConnectDeps, agent?: OwnAgentId): Promise<ActionResult> {
   return each(deps, agent, 'disconnect')
+}
+
+// ------------------------------------------------------ every other agent, through the Inbox
+//
+// Plannotator's own connector, run by the running Inbox. With the Orca build of Plannotator (its
+// `agents` feature) it writes the launcher, and can take it out again. With standard Plannotator it
+// connects the agents its own way (`plannotator inbox mcp`, so replies are not delivered into Orca
+// chats), and only Plannotator's Settings turn those off again.
+
+/** What is asked of the running Inbox: an `InboxClient`. */
+export type AgentInbox = Pick<InboxClient, 'orcaFeatures' | 'orcaAgents' | 'orcaAgentsAction' | 'stockAgents' | 'stockConnect'>
+
+/** Ids whose rows Plannotator's list holds for the plugin's own three: their own links describe them. */
+const OWN_IDS = new Set<string>([...OWN_AGENT_IDS, ...AGENTS.map((entry) => entry.id)])
+/** How long a status look waits for the Inbox; a connect or disconnect waits for each agent's own CLI. */
+const LOOK_MS = 3000
+const LOOK_FEATURES_MS = 3000
+
+type Mode = 'orca' | 'stock'
+
+async function inboxMode(inbox: AgentInbox): Promise<Mode> {
+  return (await inbox.orcaFeatures(LOOK_FEATURES_MS)).includes('agents') ? 'orca' : 'stock'
+}
+
+/** One row of Plannotator's list as a link the panel shows. */
+export function linkFromRow(row: InboxAgentRow, mode: Mode): AgentLink {
+  const link = (state: AgentLink['state'], detail: string): AgentLink => ({ agent: row.id, name: row.label, state, detail })
+  switch (row.state) {
+    case 'orca':
+      return link('connected', row.reason ?? 'Connected through this plugin’s launcher.')
+    case 'plannotator':
+      return mode === 'stock'
+        ? link('plannotator', 'Connected by Plannotator. Replies come back into Orca chats once the Orca build runs the Inbox and you connect again.')
+        : link('plannotator', row.reason ?? 'Runs Plannotator directly: messages arrive, but replies do not come back into Orca chats.')
+    case 'tool':
+      return link('builtin', row.reason ?? `Plannotator’s own plugin for ${row.label} reaches the Inbox.`)
+    case 'off':
+      return link('off', row.reason ?? 'Turned off in Plannotator’s Settings.')
+    case 'manual':
+      return link('manual', row.reason ?? 'Only you can connect it, by hand.')
+    case 'absent':
+      return link('absent', row.reason ?? 'Not connected yet.')
+    case 'unreadable':
+      return link('other', row.reason ? `Its settings cannot be read: ${row.reason}` : 'Its settings cannot be read.')
+    default:
+      return link('other', row.reason ?? 'Has its own `plannotator-inbox` server, which is left alone.')
+  }
+}
+
+/**
+ * Every agent but the plugin's own three that Plannotator found on this computer. [] when this
+ * Plannotator cannot list them. Reads only (GET), with short timeouts; throws when the Inbox cannot be asked.
+ */
+export async function otherAgentLinks(inbox: AgentInbox): Promise<AgentLink[]> {
+  const mode = await inboxMode(inbox)
+  let rows: InboxAgentRow[]
+  try {
+    rows = mode === 'orca' ? await inbox.orcaAgents(LOOK_MS) : await inbox.stockAgents(LOOK_MS)
+  } catch (error) {
+    // A Plannotator without the route.
+    if (error instanceof InboxRefused) return []
+    throw error
+  }
+  return rows.filter((row) => row.detected && !OWN_IDS.has(row.id)).map((row) => linkFromRow(row, mode))
+}
+
+/**
+ * The plugin's own three, then every other agent found. When the Inbox cannot be read now, the
+ * other agents from `last` (the list before) stand; when it never could, only the three are listed.
+ */
+export async function allAgentLinks(deps: ConnectDeps, inbox: AgentInbox | null, last: readonly AgentLink[] = []): Promise<AgentLink[]> {
+  const [own, others] = await Promise.all([
+    agentLinks(deps),
+    inbox ? otherAgentLinks(inbox).catch(() => null) : Promise.resolve([] as AgentLink[])
+  ])
+  return [...own, ...(others ?? last.filter((link) => !OWN_IDS.has(link.agent)))]
+}
+
+/** "A", "A and B", "A, B and C". */
+function names(list: readonly string[]): string {
+  return list.length <= 1 ? list.join('') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`
+}
+
+const sentence = (text: string): string => (/[.!?…]$/.test(text) ? text : `${text}.`)
+
+/** `problems` failed; `manual` only a person can connect (said, but not a failure). */
+type Summary = { changed: string[]; restored: string[]; problems: { name: string; reason: string }[]; manual: { name: string; reason: string }[]; notes: string[] }
+
+/** One short message: what changed, then each problem's reason once, then what else to know. */
+export function summarize(which: Which, summary: Summary): ActionResult {
+  const parts: string[] = []
+  if (summary.changed.length > 0) {
+    parts.push(which === 'connect' ? `Connected ${names(summary.changed)}. It applies to chats started from now on.` : `Disconnected ${names(summary.changed)}.`)
+  }
+  if (summary.restored.length > 0) parts.push(`${names(summary.restored)} ${summary.restored.length === 1 ? 'is' : 'are'} back on the earlier Plannotator entry.`)
+  const byReason = new Map<string, string[]>()
+  for (const problem of [...summary.problems, ...summary.manual]) byReason.set(problem.reason, [...(byReason.get(problem.reason) ?? []), problem.name])
+  for (const [reason, who] of byReason) parts.push(`${names(who)}: ${sentence(reason)}`)
+  parts.push(...summary.notes)
+  if (parts.length === 0) parts.push(which === 'connect' ? 'Every agent found is already connected.' : 'Nothing was connected by this plugin.')
+  return { ok: summary.problems.length === 0, message: parts.join(' ') }
+}
+
+async function everyAgent(
+  deps: ConnectDeps,
+  inbox: AgentInbox | null,
+  which: Which,
+  options: { agent?: OwnAgentId; known?: readonly AgentLink[] }
+): Promise<ActionResult> {
+  const summary: Summary = { changed: [], restored: [], problems: [], manual: [], notes: [] }
+  for (const { name, result } of await eachOwn(deps, options.agent, which)) {
+    if (!result.ok) summary.problems.push({ name, reason: result.message.startsWith(`${name}: `) ? result.message.slice(name.length + 2) : result.message })
+    else if (result.restored) summary.restored.push(name)
+    else if (result.changed) summary.changed.push(name)
+  }
+  if (options.agent !== undefined) return summarize(which, summary)
+
+  const label = new Map<string, string>((options.known ?? []).map((link) => [link.agent, link.name]))
+  const nameOf = (id: string): string => label.get(id) ?? id
+  const others = (problems: readonly InboxAgentProblem[], into: Summary['problems']): void => {
+    for (const problem of problems) if (!OWN_IDS.has(problem.agent)) into.push({ name: nameOf(problem.agent), reason: problem.reason })
+  }
+  const skipped = (why: 'env' | 'sandbox' | null): void => {
+    if (why === 'env') summary.notes.push('Plannotator’s own connecting is switched off (PLANNOTATOR_INBOX_CONNECT=0), so no other agent was changed.')
+    if (why === 'sandbox') summary.notes.push('Plannotator changed no other agent: it runs as a test on the real home folder.')
+  }
+  try {
+    if (inbox === null) throw new InboxUnavailable('The Plannotator Inbox is not running.')
+    const mode = await inboxMode(inbox)
+    if (mode === 'orca') {
+      const answer = await inbox.orcaAgentsAction(which, OWN_AGENT_IDS)
+      for (const row of answer.agents) label.set(row.id, row.label)
+      summary.changed.push(...answer.changed.filter((id) => !OWN_IDS.has(id)).map(nameOf))
+      others(answer.problems, summary.problems)
+      skipped(answer.skipped)
+    } else if (which === 'connect') {
+      const report = await inbox.stockConnect()
+      const added = report.changed.filter((id) => !OWN_IDS.has(id)).map(nameOf)
+      if (added.length > 0) {
+        summary.notes.push(`Plannotator connected ${names(added)} its own way: replies to ${added.length === 1 ? 'it' : 'them'} come back into Orca chats once the Orca build runs the Inbox and you connect again.`)
+      }
+      others(report.problems, summary.problems)
+      others(report.manual, summary.manual)
+      skipped(report.skipped)
+    } else if ((options.known ?? []).some((link) => !OWN_IDS.has(link.agent) && link.state === 'plannotator')) {
+      summary.notes.push('Other agents keep the entries standard Plannotator wrote for them; turn those off in Plannotator’s Settings.')
+    }
+  } catch (error) {
+    // A server error (the Orca config cannot be used, say) is a problem to show, not a stopped Inbox.
+    if (error instanceof InboxUnavailable && !(error instanceof InboxFailed)) {
+      summary.notes.push(
+        which === 'connect'
+          ? 'The other agents are connected once the Inbox runs: open it, then connect again.'
+          : 'Other agents are left as they are while the Inbox is not running.'
+      )
+    } else {
+      summary.problems.push({ name: 'Other agents', reason: errorText(error) })
+    }
+  }
+  return summarize(which, summary)
+}
+
+/**
+ * "Connect agents": Claude Code, Codex and OpenCode with this file's own writer, then every other
+ * agent through the running Inbox (the Orca build's route, or standard Plannotator's own connect).
+ * `agent`: only that one of the three. `known`: the links shown now, for the other agents' names.
+ */
+export function connectAllAgents(deps: ConnectDeps, inbox: AgentInbox | null, options: { agent?: OwnAgentId; known?: readonly AgentLink[] } = {}): Promise<ActionResult> {
+  return everyAgent(deps, inbox, 'connect', options)
+}
+
+/** "Disconnect": the three, then the Orca build's disconnect when it has one. Standard Plannotator's own entries stay. */
+export function disconnectAllAgents(deps: ConnectDeps, inbox: AgentInbox | null, options: { agent?: OwnAgentId; known?: readonly AgentLink[] } = {}): Promise<ActionResult> {
+  return everyAgent(deps, inbox, 'disconnect', options)
 }

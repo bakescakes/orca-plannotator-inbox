@@ -52,6 +52,24 @@ export default defineCheck({
       }
     }
   },
+  // Every agent Plannotator found: the plugin's own three, then the rest through Plannotator's connector.
+  manyAgents: {
+    storage: {
+      'preview.status': {
+        ...ready,
+        agents: [
+          ...ready.agents,
+          { agent: 'opencode', name: 'OpenCode', state: 'connected', detail: 'New OpenCode chats in Orca reach the Inbox as Orca chats.' },
+          { agent: 'gemini', name: 'Gemini CLI', state: 'connected', detail: 'Connected through this plugin’s launcher.' },
+          { agent: 'qwen', name: 'Qwen Code', state: 'plannotator', detail: 'Runs Plannotator directly: messages arrive, but replies do not come back into Orca chats.' },
+          { agent: 'cursor', name: 'Cursor', state: 'manual', detail: 'Add the server in Cursor’s MCP settings.' },
+          { agent: 'amp', name: 'Amp', state: 'off', detail: 'Turned off in Plannotator’s Settings.' },
+          { agent: 'pi', name: 'Pi', state: 'builtin', detail: 'Plannotator’s own plugin for Pi reaches the Inbox.' },
+          { agent: 'kiro', name: 'Kiro', state: 'absent', detail: 'Not connected yet.' }
+        ]
+      }
+    }
+  },
   blocked: {
     storage: {
       'preview.status': {
