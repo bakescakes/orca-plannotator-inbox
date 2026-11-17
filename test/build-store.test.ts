@@ -127,6 +127,38 @@ test('a run in progress elsewhere counts as updating and is not started again', 
   assert.equal(runs, 0)
 })
 
+test('"updating" is an updater at work, not a look that starts none', async () => {
+  const b = await box()
+  const now = 10 * CHECK_EVERY_MS
+  const during: boolean[] = []
+  const after: Promise<boolean>[] = []
+  const store: BuildStore = new BuildStore({
+    sharedDir: b.shared,
+    env: {},
+    home: b.root,
+    now: () => now,
+    runUpdater: async () => {
+      during.push((await store.status()).updating)
+      return { ok: false, detail: 'It did not work.' }
+    },
+    // Called once the updater has ended, while the look is still writing down what it learned.
+    log: () => void after.push(store.status().then((status) => status.updating))
+  })
+  await store.ensure()
+  assert.deepEqual(during, [true], 'while the updater runs')
+  assert.deepEqual(await Promise.all(after), [false], 'the updater has ended')
+  // A look that is not due starts no updater, so nothing read meanwhile says "updating".
+  const looks = [store.ensure(), store.status(), store.status()] as const
+  const [, first, second] = await Promise.all(looks)
+  assert.deepEqual([first.updating, second.updating], [false, false])
+  // The Inbox restart is an updater run too.
+  const restarting: boolean[] = []
+  const restarter: BuildStore = new BuildStore({ sharedDir: b.shared, env: {}, home: b.root, runUpdater: async () => (restarting.push((await restarter.status()).updating), { ok: true, detail: 'restarted' }) })
+  await restarter.restartInbox()
+  assert.deepEqual(restarting, [true])
+  assert.equal((await restarter.status()).updating, false)
+})
+
 test('the real updater runs from the shared folder and its outcome is kept', async () => {
   const b = await box()
   await installUpdater(b.shared, { pluginVersion: '0.2.0' })

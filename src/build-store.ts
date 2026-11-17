@@ -277,7 +277,10 @@ export type ServerMode = 'orca' | 'stock' | 'stopped'
 
 export class BuildStore {
   private readonly deps: BuildStoreDeps
+  /** The look in flight (two callers share it). It may start no updater at all. */
   private running: Promise<BuildStatus> | null = null
+  /** Updater runs this store started that have not ended. */
+  private updaterRuns = 0
 
   constructor(deps: BuildStoreDeps) {
     this.deps = deps
@@ -329,7 +332,8 @@ export class BuildStore {
       build: record?.build ?? null,
       latestKnown: check.latestKnown,
       lastError,
-      updating: this.running !== null || held,
+      // An updater at work, here or elsewhere: a look that starts none is not an update.
+      updating: this.updaterRuns > 0 || held,
       phase: state?.phase ?? null,
       detail: state?.detail ?? null
     }
@@ -351,15 +355,10 @@ export class BuildStore {
       const check = await this.readCheck()
       const now = this.now()
       const wait = CHECK_EVERY_MS * 2 ** Math.min(check.failures, MAX_BACKOFF_STEPS)
-      if ((!options.force && now - check.lastAttempt < wait) || (await lockHeld(this.deps.sharedDir, now))) return this.statusWhileRunning()
+      if ((!options.force && now - check.lastAttempt < wait) || (await lockHeld(this.deps.sharedDir, now))) return this.status()
       // Saved first, so a crash part way is not retried at once.
       await this.writeCheck({ ...check, lastAttempt: now }).catch(() => undefined)
-      let result: UpdaterResult
-      try {
-        result = await (this.deps.runUpdater ?? this.defaultRunner())([])
-      } catch (error) {
-        result = { ok: false, detail: `The updater could not run (${errorText(error)}).` }
-      }
+      const result = await this.runUpdater([])
       const latestKnown = readRef(result.latest) ?? check.latestKnown
       if (result.busy) {
         await this.writeCheck({ ...check, lastAttempt: now, latestKnown }).catch(() => undefined)
@@ -369,7 +368,7 @@ export class BuildStore {
         this.deps.log?.(`Orca build of Plannotator: ${result.detail}`)
         await this.writeCheck({ v: 1, lastAttempt: now, failures: check.failures + 1, lastError: result.detail, lastErrorAt: this.now(), latestKnown }).catch(() => undefined)
       }
-      return this.statusWhileRunning()
+      return this.status()
     })()
     this.running = work
     void work.finally(() => {
@@ -378,9 +377,16 @@ export class BuildStore {
     return work
   }
 
-  /** `status()` from inside `ensure`: its own run is over, so only another run counts as updating. */
-  private async statusWhileRunning(): Promise<BuildStatus> {
-    return { ...(await this.status()), updating: await lockHeld(this.deps.sharedDir, this.now()) }
+  /** One updater run, counted while it lasts; a run that cannot start is an outcome, not an error. */
+  private async runUpdater(args: string[]): Promise<UpdaterResult> {
+    this.updaterRuns += 1
+    try {
+      return await (this.deps.runUpdater ?? this.defaultRunner())(args)
+    } catch (error) {
+      return { ok: false, detail: `The updater could not run (${errorText(error)}).` }
+    } finally {
+      this.updaterRuns -= 1
+    }
   }
 
   private defaultRunner(): (args: string[]) => Promise<UpdaterResult> {
@@ -468,12 +474,7 @@ export class BuildStore {
    * so nothing saved is lost and agents reconnect by themselves.
    */
   async restartInbox(): Promise<ActionResult> {
-    let result: UpdaterResult
-    try {
-      result = await (this.deps.runUpdater ?? this.defaultRunner())(['--restart'])
-    } catch (error) {
-      result = { ok: false, detail: `The updater could not run (${errorText(error)}).` }
-    }
+    const result = await this.runUpdater(['--restart'])
     return { ok: result.ok, message: result.detail }
   }
 }

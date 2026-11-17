@@ -32,6 +32,7 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -72,7 +73,12 @@ export const LIMITS = {
   healthMs: 30_000,
   commandMs: 90_000,
   /** A lock older than this, or whose holder is gone, is taken over. */
-  lockStaleMs: 2 * 60 * 60_000
+  lockStaleMs: 2 * 60 * 60_000,
+  /** The lock's gate is held for a moment; a run waits this often, this long, to get in. */
+  gateTries: 200,
+  gatePauseMs: 10,
+  /** A gate this old was left behind, whatever it says. */
+  gateStaleMs: 60_000
 }
 const PHASES = ['queued', 'resolving', 'building', 'staged', 'activating', 'ready', 'failed', 'rolled-back']
 const VERSION = /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})$/
@@ -284,51 +290,138 @@ function alive(pid) {
   }
 }
 
-/** The run that holds the lock now, or null. */
-export function lockHolder(shared, now = Date.now()) {
-  const { lock } = paths(shared)
+/** What a lock file says, or null when it is missing or says nothing. */
+function lockRecord(file) {
   try {
-    const held = JSON.parse(readFileSync(lock, 'utf8'))
-    if (isRecord(held) && alive(held.pid) && Number.isFinite(held.at) && now - held.at < LIMITS.lockStaleMs) return held
+    const held = JSON.parse(readFileSync(file, 'utf8'))
+    return isRecord(held) ? held : null
   } catch {
-    // No lock, or one that cannot be read: nobody holds it.
+    return null
   }
-  return null
 }
 
-/** Takes the lock, or returns null while another live run holds it. A stale lock is taken over. */
+/** The run that holds the lock now, or null. */
+export function lockHolder(shared, now = Date.now()) {
+  const held = lockRecord(paths(shared).lock)
+  // No lock, or one that cannot be read: nobody holds it.
+  return held && alive(held.pid) && Number.isFinite(held.at) && now - held.at < LIMITS.lockStaleMs ? held : null
+}
+
+const pause = (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+/** What `open` answers on Windows for a file another run is just removing. */
+const TAKEN = process.platform === 'win32' ? ['EEXIST', 'EPERM', 'EBUSY', 'EACCES'] : ['EEXIST']
+
+/**
+ * Removes a gate that was left behind: its run is gone, or it is older than any run keeps one.
+ * It is moved aside first and looked at again there, so a gate another run made in the meantime
+ * is never the one removed: that one is put back.
+ */
+function clearLeftGate(gate, now = Date.now()) {
+  let seen
+  try {
+    seen = statSync(gate, { bigint: true })
+  } catch {
+    return
+  }
+  const said = lockRecord(gate)
+  if (!(said && !alive(said.pid)) && now - Number(seen.mtimeMs) <= LIMITS.gateStaleMs) return
+  const aside = `${gate}.${process.pid}.${randomBytes(4).toString('hex')}.left`
+  try {
+    renameSync(gate, aside)
+  } catch {
+    return
+  }
+  try {
+    const moved = statSync(aside, { bigint: true })
+    if (moved.ino === seen.ino && moved.mtimeNs === seen.mtimeNs) return
+    try {
+      linkSync(aside, gate)
+    } catch (error) {
+      // A file system without links: put back by name. `EEXIST`: a run is in already; leave it.
+      if (error?.code !== 'EEXIST') renameSync(aside, gate)
+    }
+  } catch {
+    // Gone meanwhile.
+  } finally {
+    rmSync(aside, { force: true })
+  }
+}
+
+/**
+ * Runs `work` with nobody else at the lock: every look at the lock that may change it happens in
+ * here, so no run acts on what another is about to change. The gate is a second file made
+ * exclusively and held for a moment. Returns what `work` returns, or undefined when the gate
+ * stayed taken.
+ */
+function alone(shared, work) {
+  const gate = `${paths(shared).lock}.gate`
+  const id = randomBytes(8).toString('hex')
+  for (let attempt = 0; attempt < LIMITS.gateTries; attempt += 1) {
+    let fd
+    try {
+      fd = openSync(gate, 'wx', 0o600)
+    } catch (error) {
+      if (!TAKEN.includes(error?.code)) throw error
+      clearLeftGate(gate)
+      pause(LIMITS.gatePauseMs)
+      continue
+    }
+    try {
+      writeSync(fd, JSON.stringify({ pid: process.pid, id }))
+    } catch (error) {
+      closeSync(fd)
+      rmSync(gate, { force: true })
+      throw error
+    }
+    closeSync(fd)
+    try {
+      return work()
+    } finally {
+      // Only this run's own: had it stood still long enough to be taken for left behind, the
+      // gate there now is another run's.
+      if (lockRecord(gate)?.id === id) rmSync(gate, { force: true })
+    }
+  }
+  return undefined
+}
+
+/** Takes the lock, or returns null while another live run holds it. A lock left behind is taken over. */
 export function takeLock(shared, now = Date.now()) {
   const { lock, store } = paths(shared)
   mkdirSync(store, { recursive: true, mode: 0o700 })
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const id = randomBytes(8).toString('hex')
+  const taken = alone(shared, () => {
+    if (lockHolder(shared, now)) return false
+    // Free, or left by a run that is gone. Written beside it and moved into place, so the lock
+    // is never there half-written.
+    const draft = `${lock}.${process.pid}.${id}.new`
     try {
-      const fd = openSync(lock, 'wx', 0o600)
-      try {
-        writeSync(fd, JSON.stringify({ pid: process.pid, at: now }))
-      } finally {
-        closeSync(fd)
-      }
-      return () => {
+      writeFileSync(draft, JSON.stringify({ pid: process.pid, at: now, id }), { mode: 0o600, flag: 'wx' })
+      for (let attempt = 0; ; attempt += 1) {
         try {
-          const held = JSON.parse(readFileSync(lock, 'utf8'))
-          if (held.pid === process.pid) unlinkSync(lock)
-        } catch {
-          // Gone already.
+          renameSync(draft, lock)
+          return true
+        } catch (error) {
+          // Windows refuses while another program has the old lock open to read it.
+          if (attempt >= 5 || !TAKEN.includes(error?.code) || error.code === 'EEXIST') throw error
+          pause(20)
         }
       }
     } catch (error) {
-      if (error?.code !== 'EEXIST') throw error
-      if (lockHolder(shared, now)) return null
-      // Stale: move it aside first, so two runs that both find it stale cannot both take it.
-      try {
-        renameSync(lock, `${lock}.${process.pid}.stale`)
-        rmSync(`${lock}.${process.pid}.stale`, { force: true })
-      } catch {
-        return null
-      }
+      rmSync(draft, { force: true })
+      throw error
+    }
+  })
+  if (!taken) return null
+  return () => {
+    try {
+      alone(shared, () => {
+        if (lockRecord(lock)?.id === id) unlinkSync(lock)
+      })
+    } catch {
+      // Left there: it stops counting when this run ends.
     }
   }
-  return null
 }
 
 // ---------------------------------------------------------------------------------------------

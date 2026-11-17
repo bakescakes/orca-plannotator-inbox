@@ -2,10 +2,10 @@
 // Plannotator binaries, in throwaway folders. The end-to-end part at the bottom uses a real
 // Plannotator binary (PLANNOTATOR_E2E_BIN) as the "Orca build".
 import assert from 'node:assert/strict'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   LIMITS,
   compareVersions,
@@ -326,6 +326,101 @@ test('two runs never overlap, and a lock whose run is gone is taken over', { ski
     assert.equal(existsSync(join(b.shared, 'plannotator', 'update.lock')), false)
   } finally {
     await server.close()
+  }
+})
+
+test('the update lock is looked at and changed by one run at a time', () => {
+  const shared = join(tempRoot(), 'shared')
+  const lock = join(shared, 'plannotator', 'update.lock')
+  const gate = `${lock}.gate`
+  const gone = 2 ** 22 - 3
+  const read = (file) => JSON.parse(readFileSync(file, 'utf8'))
+  mkdirSync(join(shared, 'plannotator'), { recursive: true })
+  const tries = LIMITS.gateTries
+  LIMITS.gateTries = 5
+  try {
+    // Another run is at the lock right now (its gate is there and it is alive). The lock it is
+    // looking at was left by a run that is gone; this run does not take it from under it.
+    writeFileSync(lock, JSON.stringify({ pid: gone, at: Date.now() }))
+    writeFileSync(gate, JSON.stringify({ pid: process.pid, id: 'another-run' }))
+    assert.equal(takeLock(shared), null)
+    assert.equal(read(lock).pid, gone, 'the lock is as the other run found it')
+    assert.equal(read(gate).id, 'another-run')
+    // A gate another run has just made and not yet written is not mistaken for an old one.
+    writeFileSync(gate, '')
+    assert.equal(takeLock(shared), null)
+    assert.equal(readFileSync(gate, 'utf8'), '')
+    assert.equal(read(lock).pid, gone)
+    // An empty gate that has been there for long is cleared, and so is one whose run is gone.
+    utimesSync(gate, new Date(Date.now() - 10 * 60_000), new Date(Date.now() - 10 * 60_000))
+    const first = takeLock(shared)
+    assert.ok(first)
+    assert.equal(existsSync(gate), false)
+    assert.equal(read(lock).pid, process.pid)
+    assert.equal(takeLock(shared), null, 'held now')
+    first()
+    assert.equal(existsSync(lock), false)
+    writeFileSync(gate, JSON.stringify({ pid: gone, id: 'dead-run' }))
+    const second = takeLock(shared)
+    assert.ok(second)
+    assert.equal(existsSync(gate), false)
+    // A run gives back only its own lock.
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now(), id: 'a-later-run' }))
+    second()
+    assert.equal(read(lock).id, 'a-later-run')
+    assert.deepEqual(readdirSync(join(shared, 'plannotator')), ['update.lock'], 'nothing else is left behind')
+  } finally {
+    LIMITS.gateTries = tries
+  }
+})
+
+test('many runs starting at once over a lock left behind: exactly one takes it', async () => {
+  const root = tempRoot()
+  const shared = join(root, 'shared')
+  const lock = join(shared, 'plannotator', 'update.lock')
+  mkdirSync(join(shared, 'plannotator'), { recursive: true })
+  const script = join(root, 'contender.mjs')
+  // Each waits at the line until all are there, tries once, says what it got, and the one that
+  // took the lock keeps it until every other has tried.
+  writeFileSync(
+    script,
+    [
+      "import { existsSync, writeFileSync } from 'node:fs'",
+      `import { takeLock } from ${JSON.stringify(pathToFileURL(UPDATER).href)}`,
+      'const [shared, marks, name] = process.argv.slice(2)',
+      "writeFileSync(`${marks}/ready.${name}`, '')",
+      'while (!existsSync(`${marks}/go`)) {}',
+      'const release = takeLock(shared)',
+      "writeFileSync(`${marks}/tried.${name}`, release ? 'took' : 'busy')",
+      'if (release) {',
+      '  const wait = () => (existsSync(`${marks}/all-tried`) ? release() : setTimeout(wait, 10))',
+      '  wait()',
+      '}',
+      ''
+    ].join('\n')
+  )
+  const count = (marks, prefix) => readdirSync(marks).filter((name) => name.startsWith(prefix)).length
+  const when = async (condition) => {
+    for (let waited = 0; !condition(); waited += 10) {
+      assert.ok(waited < 60_000, 'the contenders got there')
+      await new Promise((done) => setTimeout(done, 10))
+    }
+  }
+  // Left by a run that is gone; left empty; and no lock at all.
+  for (const left of [JSON.stringify({ pid: 2 ** 22 - 3, at: Date.now() }), '', null]) {
+    const marks = tempRoot()
+    if (left === null) rmSync(lock, { force: true })
+    else writeFileSync(lock, left)
+    const runs = Array.from({ length: 8 }, (_, index) => runProgram(process.execPath, [script, shared, marks, String(index)], { ...process.env, ELECTRON_RUN_AS_NODE: '1' }))
+    await when(() => count(marks, 'ready.') === 8)
+    writeFileSync(join(marks, 'go'), '')
+    await when(() => count(marks, 'tried.') === 8)
+    const got = readdirSync(marks).filter((name) => name.startsWith('tried.')).map((name) => readFileSync(join(marks, name), 'utf8'))
+    writeFileSync(join(marks, 'all-tried'), '')
+    const ended = await Promise.all(runs)
+    assert.deepEqual(ended.map((run) => run.code), Array(8).fill(0), ended.map((run) => run.stderr).join('\n'))
+    assert.equal(got.filter((answer) => answer === 'took').length, 1, JSON.stringify(got))
+    assert.deepEqual(readdirSync(join(shared, 'plannotator')), [], 'given back, and nothing else left behind')
   }
 })
 
