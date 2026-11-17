@@ -221,6 +221,27 @@ test('a version older than the newest build but missing from the index is still 
   }
 })
 
+test('a release waited for that never gets a build: the build of a later release ends the wait', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const b = box(server)
+  const waitingFile = join(b.shared, 'plannotator', 'waiting.json')
+  try {
+    assert.equal((await b.run()).installed, true)
+    assert.deepEqual((await b.run({ version: '0.28.67' })).waiting, { version: '0.28.67' })
+    // 0.28.67 is skipped: only 0.28.68 gets a build. The same question, asked again, installs it.
+    server.publish({ version: '0.28.68', build: 'orca.1', bytes: fakeBinary('good', '0.28.68') })
+    const later = await b.run({ version: '0.28.67' })
+    assert.equal(later.ok, true, later.detail)
+    assert.equal(later.installed, true, later.detail)
+    assert.equal(later.version, '0.28.68')
+    assert.equal(b.current().version, '0.28.68')
+    assert.equal(existsSync(waitingFile), false, 'the wait is over')
+    assert.deepEqual([b.state().phase, b.state().version], ['ready', '0.28.68'])
+  } finally {
+    await server.close()
+  }
+})
+
 test('a real failure of the build waited for is still a failure, and ends the wait', { skip: STAND_IN }, async () => {
   const bytes = fakeBinary('good', '0.28.67')
   const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])

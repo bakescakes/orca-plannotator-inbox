@@ -887,7 +887,10 @@ export async function update(options) {
     // A wait that is over: the release has a build now, or a build of it (or a later one) is in use.
     const waited = readWaiting(shared)
     if (waited && (index.builds.some((entry) => entry.plannotator === waited.version) || (before && compareVersions(before.version, waited.version) >= 0))) clearWaiting(shared)
-    const ref = pickBuild(index, version)
+    let ref = pickBuild(index, version)
+    // The release waited for never got a build and a later release has one: that build ends the wait.
+    // Only for the release being waited for; any other version that is missing stays a failure.
+    if (!ref && version && waited?.version === version && index.latest && compareVersions(index.latest.plannotator, version) > 0) ref = pickBuild(index, null)
     if (!ref && version && (!index.latest || compareVersions(version, index.latest.plannotator) > 0)) {
       // Plannotator released it and its Orca build is not made yet: not a failure. The state says the build in
       // use is ready (the Inbox then shows the release as available), and the worker looks again soon.
