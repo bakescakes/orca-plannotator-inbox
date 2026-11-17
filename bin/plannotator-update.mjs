@@ -1159,31 +1159,50 @@ async function servesOrcaMode(dataDir, fetchImpl = fetch) {
   }
 }
 
+/** The release the Inbox of `dataDir` runs as, from its own health answer; null when it does not say. */
+async function inboxVersion(dataDir, fetchImpl = fetch) {
+  const entry = registry(dataDir)
+  if (!entry) return null
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${entry.port}/api/inbox/health`, { redirect: 'error', signal: AbortSignal.timeout(3000) })
+    const health = response.ok ? await response.json() : null
+    return isRecord(health) && typeof health.version === 'string' && VERSION.test(health.version) ? health.version : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * The Inbox runs the Plannotator installed here (`stock`, release `follow`) until its Orca build is in
- * use: records the wait, takes the older build out of use (kept on disk), and restarts an Inbox that
- * runs in Orca mode on `stock`, plain. When that does not come up, the build is put back and the
+ * use: records the wait, takes the older build out of use (kept on disk), and restarts a running Inbox
+ * on `stock`, plain, when it runs in Orca mode or as an older release than `follow` (a plain Inbox
+ * whose Plannotator was updated under it). When that does not come up, the build is put back and the
  * Inbox restarted on it. Returns `{restarted}`, or `{rolledBack, detail}`.
  */
 async function usePlain({ shared, env, home, stock, follow, before, waited, tried = null, fetchImpl, clock }) {
   const p = paths(shared)
   const now = clock()
   writePrivateJson(p.waiting, { v: 1, version: follow, since: waited?.version === follow ? waited.since : now, checkedAt: now, ...(tried ? { tried } : {}) })
-  if (!before) return { restarted: false }
   // The launcher starts what current.json names; without it, the Plannotator installed here.
   const earlier = readJsonFile(p.previous)
-  writePrivateJson(p.previous, before)
-  rmSync(p.current, { force: true })
+  if (before) {
+    writePrivateJson(p.previous, before)
+    rmSync(p.current, { force: true })
+  }
   const dataDir = inboxDataDir(shared, env, home)
   const running = await inboxRunning(stock, dataDir, env)
-  if (!running || !(await servesOrcaMode(dataDir, fetchImpl))) return { restarted: false }
+  if (!running) return { restarted: false }
+  const ran = await inboxVersion(dataDir, fetchImpl)
+  const outdated = ran !== null && compareVersions(ran, follow) < 0
+  if (!outdated && !(before && (await servesOrcaMode(dataDir, fetchImpl)))) return { restarted: false }
   if (await restartOn(stock, dataDir, env, null, { oldPid: running.pid, fetchImpl })) return { restarted: true }
+  const failed = `Plannotator ${follow} did not answer within 30 seconds after the restart`
+  if (!before) return { rolledBack: false, detail: `${failed}; the Inbox starts again with an agent’s next message.` }
   writePrivateJson(p.current, before)
   if (isRecord(earlier)) writePrivateJson(p.previous, earlier)
   else rmSync(p.previous, { force: true })
   const orcaConfig = orcaModeConfig(shared)
   const back = orcaConfig ? await restartOn(before.path, dataDir, env, orcaConfig, { fetchImpl }) : null
-  const failed = `Plannotator ${follow} did not answer within 30 seconds after the restart`
   if (back) return { rolledBack: true, detail: `${failed}, so ${describe(before)} was put back and the Inbox runs on it again.` }
   return { rolledBack: false, detail: `${failed}, and ${describe(before)} did not start again either; the Inbox starts again with an agent’s next message.` }
 }

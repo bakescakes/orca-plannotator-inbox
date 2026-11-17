@@ -326,8 +326,19 @@ test('a release with no Orca build yet: the Inbox runs the Plannotator installed
     assert.equal(still.restarted, false)
     assert.equal((await b.health()).pid, now.pid)
 
+    // Plannotator is updated again under the plain Inbox (in a terminal), still with no build: the
+    // Inbox moves to that release, so what is said to be in use is what runs.
+    installFake(stock, 'good', '0.28.68')
+    const next = await b.run()
+    assert.deepEqual([next.plain, next.restarted, next.waiting], [true, true, { version: '0.28.68' }], next.detail)
+    const moved = await b.health()
+    assert.deepEqual([moved.version, moved.orcaMode], ['0.28.68', null])
+    assert.notEqual(moved.pid, now.pid)
+    assert.equal((await b.run()).restarted, false, 'and is then left alone')
+    assert.equal((await b.health()).pid, moved.pid)
+
     // Its build is published: it installs, the Inbox moves onto it in Orca mode, and the wait is over.
-    server.publish({ version: '0.28.67', build: 'orca.1', bytes: fakeBinary('good', '0.28.67') })
+    server.publish({ version: '0.28.68', build: 'orca.1', bytes: fakeBinary('good', '0.28.68') })
     const done = await b.run()
     assert.equal(done.installed, true, done.detail)
     assert.equal(done.restarted, true)
