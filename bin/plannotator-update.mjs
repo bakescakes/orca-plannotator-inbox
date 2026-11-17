@@ -1,12 +1,25 @@
 #!/usr/bin/env node
-// Installs and updates the Orca build of Plannotator: a Plannotator binary built with its Orca mode,
-// published as a release of this plugin's own repository. Stock Plannotator stays the fallback: this
-// never touches the `plannotator` a person installed, and anything that fails leaves the build in
-// use (or stock Plannotator) as it was.
+// Keeps the Orca build of Plannotator in step with the Plannotator a person installed. The Orca build
+// is a Plannotator binary built with its Orca mode, published as a release of this plugin's own
+// repository. Plannotator owns its updates; this follows them:
 //
-//   plannotator-update [--version <x.y.z>]   install the newest Orca build of that Plannotator
-//                                            version (no --version: the newest build published)
+// - The Plannotator installed here (`plannotator` on PATH, or where its install script puts it) says
+//   which release is wanted. The Orca build of that release is installed and the Inbox runs on it.
+// - While that release has no Orca build yet (or it cannot be used), the Inbox runs the Plannotator
+//   installed here, plain, and moves to the Orca build by itself when it is published.
+// - This never replaces that `plannotator` by itself. Only when the Inbox asks for a release (a person
+//   pressed Update there, or switched Plannotator's automatic updates on) does it run Plannotator's
+//   own updater, `plannotator update`, and then follow the result.
+// - The Inbox never goes back to an older release: a build of a later Plannotator than the one
+//   installed here stays in use.
+// With no Plannotator installed here, the newest Orca build published is used, as before.
+//
+//   plannotator-update                       follow the Plannotator installed here
+//   plannotator-update --version <x.y.z>     the Inbox asks for that release: Plannotator updates
+//                                            itself when it is older, then as above
 //   plannotator-update --restart             restart the Inbox on the installed build, in Orca mode
+//   plannotator-update --again               as the first, and a build that could not be used is fetched
+//                                            again now (a person asked), not after its wait
 //
 // What runs it: the Plannotator Inbox in Orca mode (its Update button and its automatic updates run
 // `config.upgradeCommand --version <x.y.z>` detached, and read `upgradeStateFile` for progress), and
@@ -17,9 +30,12 @@
 //   plannotator/versions/<version>-<build>/plannotator[.exe]   one folder per installed build
 //   plannotator/current.json    the build in use; previous.json the one before it (kept for rollback)
 //   plannotator/update.lock     held while a run works, so two runs never overlap
-//   plannotator/waiting.json    {v, version, since, checkedAt}: a Plannotator release that is out but has
-//                               no Orca build yet. Not a failure: the state file then says the build in use
-//                               is ready, and the worker looks again every 15 minutes until the build exists.
+//   plannotator/waiting.json    {v, version, since, checkedAt}: a Plannotator release with no Orca build in
+//                               use yet (the Inbox then runs the Plannotator installed here). Not a failure:
+//                               the worker looks again every 15 minutes until the build is in use.
+//                               `tried` {tag, at, failures, reason}: that build was fetched and could not
+//                               be used (bad checksum, does not start); it is left alone for six hours,
+//                               doubling to four days, while any other build of the release is taken at once.
 // The last line on stdout is one JSON object saying what happened (the worker reads it).
 //
 // Downloads come only from https://github.com/ and the hosts GitHub redirects release assets to,
@@ -93,7 +109,17 @@ const myUid = typeof process.getuid === 'function' ? process.getuid() : null
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
 
 /** A failure whose message is one plain sentence for the person. */
-export class UpdateError extends Error {}
+export class UpdateError extends Error {
+  /**
+   * `fault`: 'build' when this published build cannot be used as it is (another download would end
+   * the same way), 'plugin' when the plugin has to be updated first; null for anything that may pass
+   * by itself, such as a connection that failed.
+   */
+  constructor(message, fault = null) {
+    super(message)
+    this.fault = fault
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Versions
@@ -552,10 +578,10 @@ export async function download(from, tag, asset, target, fetchImpl = fetch) {
   let ok = false
   try {
     const response = await open(`${from.base}/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}`, from, clock.signal, fetchImpl)
-    if (response.status === 404) throw new UpdateError(`${asset.name} is listed in the release but is not there.`)
+    if (response.status === 404) throw new UpdateError(`${asset.name} is listed in the release but is not there.`, 'build')
     if (!response.ok || !response.body) throw new UpdateError(`GitHub answered ${response.status} for ${asset.name}.`)
     const declared = Number(response.headers.get('content-length'))
-    if (Number.isFinite(declared) && declared > asset.size) throw new UpdateError('The download is larger than the release says, so it was stopped.')
+    if (Number.isFinite(declared) && declared > asset.size) throw new UpdateError('The download is larger than the release says, so it was stopped.', 'build')
     const size = await drain(
       response,
       Math.min(asset.size, LIMITS.binary),
@@ -565,8 +591,8 @@ export async function download(from, tag, asset, target, fetchImpl = fetch) {
       },
       clock.abort
     )
-    if (size !== asset.size) throw new UpdateError(`The download has ${size} bytes, not the ${asset.size} the release lists, so it was not used.`)
-    if (hash.digest('hex') !== asset.sha256) throw new UpdateError('The download does not match the checksum the release lists, so it was not used.')
+    if (size !== asset.size) throw new UpdateError(`The download has ${size} bytes, not the ${asset.size} the release lists, so it was not used.`, 'build')
+    if (hash.digest('hex') !== asset.sha256) throw new UpdateError('The download does not match the checksum the release lists, so it was not used.', 'build')
     fsyncSync(fd)
     ok = true
   } catch (error) {
@@ -591,7 +617,7 @@ function readRef(value) {
 
 /** The index's builds, newest first; throws when it is not an index. */
 export function readIndex(index) {
-  if (!isRecord(index) || index.v !== 1) throw new UpdateError('The list of Orca builds has a shape this plugin does not know; update the plugin.')
+  if (!isRecord(index) || index.v !== 1) throw new UpdateError('The list of Orca builds has a shape this plugin does not know; update the plugin.', 'plugin')
   const latest = readRef(index.latest)
   const listed = Array.isArray(index.builds) ? index.builds.slice(0, 1000).map(readRef).filter(Boolean) : []
   const builds = [...(latest ? [latest] : []), ...listed]
@@ -613,10 +639,10 @@ function nameList(value) {
 }
 
 export function readManifest(manifest, ref, key) {
-  if (!isRecord(manifest) || manifest.v !== 1) throw new UpdateError('The Orca build’s manifest has a shape this plugin does not know; update the plugin.')
-  if (manifest.plannotator !== ref.plannotator || manifest.build !== ref.build) throw new UpdateError('The Orca build’s manifest names another build, so it was not used.')
+  if (!isRecord(manifest) || manifest.v !== 1) throw new UpdateError('The Orca build’s manifest has a shape this plugin does not know; update the plugin.', 'plugin')
+  if (manifest.plannotator !== ref.plannotator || manifest.build !== ref.build) throw new UpdateError('The Orca build’s manifest names another build, so it was not used.', 'build')
   const pluginMin = typeof manifest.pluginMin === 'string' && VERSION.test(manifest.pluginMin) ? manifest.pluginMin : null
-  if (!pluginMin) throw new UpdateError('The Orca build’s manifest does not say which plugin it needs, so it was not used.')
+  if (!pluginMin) throw new UpdateError('The Orca build’s manifest does not say which plugin it needs, so it was not used.', 'build')
   // A reduced build (some Orca changes left out) says what it serves and what it leaves out; older manifests say neither.
   const features = nameList(manifest.features)
   const omitted = nameList(manifest.omitted)
@@ -631,7 +657,7 @@ export function readManifest(manifest, ref, key) {
     asset.size <= 0 ||
     asset.size > LIMITS.binary
   ) {
-    throw new UpdateError('The Orca build’s manifest lists this computer’s file in a shape this plugin does not know, so it was not used.')
+    throw new UpdateError('The Orca build’s manifest lists this computer’s file in a shape this plugin does not know, so it was not used.', 'build')
   }
   return { pluginMin, asset: { name: asset.name, sha256: asset.sha256, size: asset.size }, features, omitted }
 }
@@ -701,11 +727,40 @@ export async function smoke(binary, version, env) {
     const named = new RegExp(`(^|[^0-9.])${version.replaceAll('.', '\\.')}([^0-9.]|$)`).test(result.out)
     if (result.code !== 0 || !named) {
       const why = result.error === 'timed out' ? 'did not answer within 20 seconds' : result.code !== 0 ? `failed to start (${result.error ?? `exit ${result.code}`})` : 'reported another version'
-      throw new UpdateError(`The downloaded Plannotator ${version} ${why}, so it was not used.`)
+      throw new UpdateError(`The downloaded Plannotator ${version} ${why}, so it was not used.`, 'build')
     }
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+}
+
+/** The release `binary --version` names, in a throwaway home and data folder; null when it does not say. */
+export async function plannotatorVersion(binary, env) {
+  const home = mkdtempSync(join(tmpdir(), 'orca-plannotator-version-'))
+  try {
+    const result = await run(binary, ['--version'], {
+      env: { ...systemEnv(env), HOME: home, USERPROFILE: home, PLANNOTATOR_DATA_DIR: join(home, 'data'), PLANNOTATOR_UPDATE_CHECK: '0', PLANNOTATOR_AUTO_UPDATE: '0', PLANNOTATOR_INBOX_CONNECT: '0' },
+      timeoutMs: LIMITS.smokeMs,
+      cwd: home
+    })
+    return result.code === 0 ? (/(?:^|[^0-9.])(\d{1,6}\.\d{1,6}\.\d{1,6})(?![0-9.])/.exec(result.out)?.[1] ?? null) : null
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Plannotator's own updater, `plannotator update`: its install script, its checks, its log. It
+ * installs the newest stable release over the `plannotator` it is. Resolves `{ok, said}`; `said` is
+ * the line of its output that tells why it did not finish.
+ */
+export async function selfUpdate(stock, dataDir, env) {
+  const result = await run(stock, ['update'], { env: childEnvironment(env, { PLANNOTATOR_DATA_DIR: dataDir }), timeoutMs: LIMITS.totalMs, cwd: tmpdir() })
+  if (result.code === 0) return { ok: true, said: null }
+  if (result.error === 'timed out') return { ok: false, said: 'it did not finish within 20 minutes' }
+  const lines = result.out.split('\n').map((line) => line.trim()).filter(Boolean)
+  const telling = lines.findLast((line) => /still|can.t update itself|already running|could not|couldn.t|didn.t|interrupted/i.test(line)) ?? lines.at(-1)
+  return { ok: false, said: telling ? telling.slice(0, 240) : (result.error ?? `exit ${result.code}`) }
 }
 
 /** macOS marks some downloads as quarantined; the build is ad-hoc signed and must run as it is. */
@@ -849,8 +904,20 @@ export function prune(shared, keep) {
 export function readWaiting(shared) {
   const value = readJsonFile(paths(shared).waiting, 4096)
   return isRecord(value) && value.v === 1 && typeof value.version === 'string' && VERSION.test(value.version)
-    ? { version: value.version, since: Number.isFinite(value.since) ? value.since : 0, checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : 0 }
+    ? { version: value.version, since: Number.isFinite(value.since) ? value.since : 0, checkedAt: Number.isFinite(value.checkedAt) ? value.checkedAt : 0, tried: readTried(value.tried) }
     : null
+}
+
+/** The build of the awaited release that was fetched and could not be used: `{tag, at, failures, reason}`, or null. */
+function readTried(value) {
+  if (!isRecord(value) || typeof value.tag !== 'string' || value.tag.length > 200 || typeof value.reason !== 'string') return null
+  if (!Number.isFinite(value.at) || !Number.isInteger(value.failures) || value.failures < 1) return null
+  return { tag: value.tag, at: value.at, failures: value.failures, reason: value.reason.slice(0, 600) }
+}
+
+/** How long a build that could not be used is left alone: six hours, doubling to four days. A newer build is taken at once. */
+export function triedWait(failures) {
+  return 6 * 60 * 60 * 1000 * 2 ** Math.min(Math.max(failures, 1) - 1, 4)
 }
 
 function clearWaiting(shared) {
@@ -862,11 +929,14 @@ function describe(record) {
 }
 
 /**
- * Installs the newest Orca build of `version` (or of all), and moves the running Inbox onto it.
+ * Follows the Plannotator installed here: installs the Orca build of its release and moves the running
+ * Inbox onto it, or, while that build cannot be used, onto the Plannotator installed here. `version`:
+ * the Inbox asks for that release, so an older Plannotator here updates itself first. With no
+ * Plannotator installed here, installs the newest Orca build of `version` (or of all).
  * Returns the outcome; throws only when the lock cannot be taken safely.
  */
 export async function update(options) {
-  const { shared, env = process.env, version = null, pluginVersion = null, home = homedir(), fetchImpl = fetch, clock = Date.now } = options
+  const { shared, env = process.env, version = null, again = false, pluginVersion = null, home = homedir(), fetchImpl = fetch, clock = Date.now } = options
   const p = paths(shared)
   const release = takeLock(shared, clock())
   if (!release) return { ok: true, busy: true, detail: 'Another update of the Orca build is already running.' }
@@ -874,20 +944,84 @@ export async function update(options) {
   const state = (phase, detail) => writeState(shared, phase, target, detail, clock)
   const before = readRecord(p.current, shared)
   const staying = describe(before)
+  /** The Plannotator installed here and its release, which the Orca build follows; null: none found. */
+  let stock = null
+  let follow = null
+  /** Plannotator's own update did not finish: nothing here changes. */
+  let ownFailed = false
+  let latest = null
+  let waited = null
+  /** The build chosen from the list, once it is. */
+  let ref = null
+  /**
+   * The Inbox runs the Plannotator installed here until its Orca build is in use. `reason`: why a
+   * published build was not used; `tried`: that build, when fetching it again would end the same way;
+   * `fault`: see UpdateError.
+   */
+  const plain = async (reason, tried = null, fault = null) => {
+    const outcome = await usePlain({ shared, env, home, stock, follow, before, waited, tried, fetchImpl, clock })
+    if (outcome.rolledBack !== undefined) {
+      state(outcome.rolledBack ? 'rolled-back' : 'failed', outcome.detail)
+      return { ok: false, rolledBack: outcome.rolledBack, version: follow, latest, detail: outcome.detail }
+    }
+    const next = fault === 'plugin' ? '' : tried ? ' The plugin tries that build again later, and takes a newer one as soon as it is published.' : ' The plugin tries again by itself.'
+    const detail = reason
+      ? `Plannotator ${follow} is in use without its Orca additions. ${reason}${next}`
+      : `Plannotator ${follow} is in use. Its Orca build is not published yet, so the Orca additions (${ADDITIONS}) are missing until it is; the Inbox moves to it by itself.`
+    state('ready', detail)
+    return { ok: true, installed: false, plain: true, restarted: outcome.restarted, waiting: { version: follow }, version: null, latest, detail }
+  }
   try {
-    state('resolving', version ? `Looking for the Orca build of Plannotator ${version}.` : 'Looking for the newest Orca build of Plannotator.')
+    state('resolving', version ? `Looking for the Orca build of Plannotator ${version}.` : 'Looking for the Orca build of the Plannotator installed here.')
     const key = platformKey()
     if (!key) throw new UpdateError(`Orca builds of Plannotator are not made for ${process.platform}-${process.arch}, so ${staying} stays in use.`)
     if (version !== null && !VERSION.test(version)) throw new UpdateError(`${version} is not a Plannotator version, so ${staying} stays in use.`)
+    stock = findStock(env, home)
+    follow = stock ? await plannotatorVersion(stock, env) : null
+    if (version && follow && compareVersions(version, follow) > 0) {
+      // The Inbox asks for a newer release than the Plannotator installed here: Plannotator updates itself.
+      state('building', `Plannotator is updating itself to ${version}.`)
+      const own = await selfUpdate(stock, inboxDataDir(shared, env, home), env)
+      const now = await plannotatorVersion(stock, env)
+      if (!now || compareVersions(now, follow) <= 0) {
+        ownFailed = true
+        throw new UpdateError(
+          own.ok
+            ? `Plannotator’s own update found nothing newer than ${follow} to install, so ${staying} stays in use.`
+            : `Plannotator’s own update to ${version} did not finish${own.said ? ` (${own.said})` : ''}, so ${staying} stays in use.`
+        )
+      }
+      follow = now
+    }
+    if (follow) target = follow
     const from = source(env)
+    waited = readWaiting(shared)
+    // A wait for another release than the one installed here is over.
+    if (waited && follow && waited.version !== follow) clearWaiting(shared)
     const rawIndex = await fetchJson(from, INDEX_TAG, 'index.json', fetchImpl)
-    if (rawIndex === null && !version) throw new UpdateError(`No Orca build of Plannotator has been published yet, so ${staying} stays in use.`)
+    if (rawIndex === null && !version && !follow) throw new UpdateError(`No Orca build of Plannotator has been published yet, so ${staying} stays in use.`)
     const index = rawIndex === null ? { latest: null, builds: [] } : readIndex(rawIndex)
-    const latest = index.latest ? { version: index.latest.plannotator, build: index.latest.build } : null
+    latest = index.latest ? { version: index.latest.plannotator, build: index.latest.build } : null
     // A wait that is over: the release has a build now, or a build of it (or a later one) is in use.
-    const waited = readWaiting(shared)
     if (waited && (index.builds.some((entry) => entry.plannotator === waited.version) || (before && compareVersions(before.version, waited.version) >= 0))) clearWaiting(shared)
-    let ref = pickBuild(index, version)
+    if (follow && before && compareVersions(before.version, follow) > 0) {
+      // Never back: the build in use is of a later Plannotator than the one installed here.
+      clearWaiting(shared)
+      const detail = `The Orca build of Plannotator ${before.version} stays in use; the Plannotator installed here is ${follow}, an older release.`
+      target = before.version
+      state('ready', detail)
+      return { ok: true, installed: false, version: before.version, build: before.build, latest, detail }
+    }
+    ref = pickBuild(index, follow ?? version)
+    if (!ref && follow) {
+      if (before && before.version === follow) {
+        // Its build is in use and the list no longer names it: it stays.
+        const detail = `The Orca build of Plannotator ${before.version} (${before.build}) stays in use.`
+        state('ready', detail)
+        return { ok: true, installed: false, version: before.version, build: before.build, latest, detail }
+      }
+      return await plain(null)
+    }
     // The release waited for never got a build and a later release has one: that build ends the wait.
     // Only for the release being waited for; any other version that is missing stays a failure.
     if (!ref && version && waited?.version === version && index.latest && compareVersions(index.latest.plannotator, version) > 0) ref = pickBuild(index, null)
@@ -916,12 +1050,18 @@ export async function update(options) {
       state('ready', detail)
       return { ok: true, installed: false, version: before.version, build: before.build, latest, detail }
     }
+    // This very build was fetched and could not be used: it is left alone for a while. A person who
+    // asks (the Inbox's Update, the panel's Check now) has it tried again at once.
+    const tried = waited?.version === follow ? waited.tried : null
+    if (follow && tried && tried.tag === ref.tag && !again && version === null && (!before || compareVersions(before.version, follow) < 0) && clock() - tried.at < triedWait(tried.failures)) {
+      return await plain(tried.reason, tried, 'build')
+    }
     const manifest = await fetchJson(from, ref.tag, 'manifest.json', fetchImpl)
-    if (manifest === null) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} is listed but its release is missing, so ${staying} stays in use.`)
+    if (manifest === null) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} is listed but its release is missing, so ${staying} stays in use.`, 'build')
     const { pluginMin, asset, features, omitted } = readManifest(manifest, ref, key)
-    if (!asset) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} has no file for ${key}, so ${staying} stays in use.`)
+    if (!asset) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} has no file for ${key}, so ${staying} stays in use.`, 'build')
     if (!pluginVersion || !VERSION.test(pluginVersion) || compareVersions(pluginVersion, pluginMin) < 0) {
-      throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} needs version ${pluginMin} of the Plannotator Inbox plugin; update the plugin first. ${capitalize(staying)} stays in use.`)
+      throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} needs version ${pluginMin} of the Plannotator Inbox plugin; update the plugin first. ${capitalize(staying)} stays in use.`, 'plugin')
     }
 
     state('building', `Downloading the Orca build of Plannotator ${ref.plannotator} (${Math.round(asset.size / 1024 / 1024)} MB).`)
@@ -949,7 +1089,7 @@ export async function update(options) {
       ...(features ? { features } : {}),
       ...(omitted ? { omitted } : {})
     }
-    if (!validRecord(record, shared)) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} could not be put in place, so ${staying} stays in use.`)
+    if (!validRecord(record, shared)) throw new UpdateError(`The Orca build of Plannotator ${ref.plannotator} could not be put in place, so ${staying} stays in use.`, 'build')
 
     state('activating', `Switching to the Orca build of Plannotator ${ref.plannotator}.`)
     const outcome = await activate({ shared, env, home, record, before, fetchImpl })
@@ -957,7 +1097,8 @@ export async function update(options) {
       state(outcome.rolledBack ? 'rolled-back' : 'failed', outcome.detail)
       return { ok: false, rolledBack: outcome.rolledBack, version: ref.plannotator, build: ref.build, latest, detail: outcome.detail }
     }
-    prune(shared, [record, before])
+    // After a spell on the Plannotator installed here, the build before it is the one previous.json names.
+    prune(shared, [record, before ?? readRecord(p.previous, shared)])
     const still = readWaiting(shared)
     if (still && compareVersions(ref.plannotator, still.version) >= 0) clearWaiting(shared)
     const detail = `The Orca build of Plannotator ${ref.plannotator} (${ref.build}) is in use${outcome.restarted ? ', and the Inbox was restarted on it' : ''}.`
@@ -965,6 +1106,18 @@ export async function update(options) {
     return { ok: true, installed: true, restarted: outcome.restarted, version: ref.plannotator, build: ref.build, latest, detail }
   } catch (error) {
     let detail = error instanceof UpdateError ? error.message : `The update failed (${error?.message ?? error}), so ${staying} stays in use.`
+    if (follow && stock && !ownFailed && (!before || compareVersions(before.version, follow) < 0)) {
+      // Plannotator moved on and its Orca build could not be used: the Inbox runs the Plannotator installed here.
+      const reason = detail.replace(/,? so (the Orca build of Plannotator [\d.]+|stock Plannotator) stays in use\.$/, '.').replace(/ (The Orca build of Plannotator [\d.]+|Stock Plannotator) stays in use\.$/, '')
+      const fault = error instanceof UpdateError ? error.fault : null
+      const earlier = waited?.version === follow && ref && waited.tried?.tag === ref.tag ? waited.tried.failures : 0
+      const tried = fault === 'build' && ref ? { tag: ref.tag, at: clock(), failures: earlier + 1, reason } : null
+      try {
+        return await plain(reason, tried, fault)
+      } catch {
+        // Not even that: the failure below says what happened.
+      }
+    }
     if (!/stays in use|nothing was changed/.test(detail)) detail = `${detail} ${capitalize(staying)} stays in use.`
     try {
       state('failed', detail)
@@ -988,6 +1141,51 @@ function safeList(folder) {
   } catch {
     return []
   }
+}
+
+/** What the Orca build adds to the Inbox, in a person's words. */
+const ADDITIONS = 'Start, Stop and Open in Orca from the Inbox, and per-agent icons'
+
+/** Whether the Inbox of `dataDir` answers as Plannotator in Orca mode. */
+async function servesOrcaMode(dataDir, fetchImpl = fetch) {
+  const entry = registry(dataDir)
+  if (!entry) return false
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${entry.port}/api/inbox/orca`, { redirect: 'error', signal: AbortSignal.timeout(3000), headers: { accept: 'application/json' } })
+    const body = response.ok ? await response.json() : null
+    return isRecord(body) && body.mode === 'orca'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The Inbox runs the Plannotator installed here (`stock`, release `follow`) until its Orca build is in
+ * use: records the wait, takes the older build out of use (kept on disk), and restarts an Inbox that
+ * runs in Orca mode on `stock`, plain. When that does not come up, the build is put back and the
+ * Inbox restarted on it. Returns `{restarted}`, or `{rolledBack, detail}`.
+ */
+async function usePlain({ shared, env, home, stock, follow, before, waited, tried = null, fetchImpl, clock }) {
+  const p = paths(shared)
+  const now = clock()
+  writePrivateJson(p.waiting, { v: 1, version: follow, since: waited?.version === follow ? waited.since : now, checkedAt: now, ...(tried ? { tried } : {}) })
+  if (!before) return { restarted: false }
+  // The launcher starts what current.json names; without it, the Plannotator installed here.
+  const earlier = readJsonFile(p.previous)
+  writePrivateJson(p.previous, before)
+  rmSync(p.current, { force: true })
+  const dataDir = inboxDataDir(shared, env, home)
+  const running = await inboxRunning(stock, dataDir, env)
+  if (!running || !(await servesOrcaMode(dataDir, fetchImpl))) return { restarted: false }
+  if (await restartOn(stock, dataDir, env, null, { oldPid: running.pid, fetchImpl })) return { restarted: true }
+  writePrivateJson(p.current, before)
+  if (isRecord(earlier)) writePrivateJson(p.previous, earlier)
+  else rmSync(p.previous, { force: true })
+  const orcaConfig = orcaModeConfig(shared)
+  const back = orcaConfig ? await restartOn(before.path, dataDir, env, orcaConfig, { fetchImpl }) : null
+  const failed = `Plannotator ${follow} did not answer within 30 seconds after the restart`
+  if (back) return { rolledBack: true, detail: `${failed}, so ${describe(before)} was put back and the Inbox runs on it again.` }
+  return { rolledBack: false, detail: `${failed}, and ${describe(before)} did not start again either; the Inbox starts again with an agent’s next message.` }
 }
 
 /**
@@ -1052,13 +1250,14 @@ export async function restartInbox(options) {
 // Command line
 
 export function parseArgs(argv) {
-  const out = { version: null, restart: false, sharedDir: null }
+  const out = { version: null, restart: false, again: false, sharedDir: null }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--version') {
       out.version = argv[i + 1] ?? ''
       i += 1
     } else if (arg === '--restart') out.restart = true
+    else if (arg === '--again') out.again = true
     else if (arg === '--shared-dir') {
       out.sharedDir = argv[i + 1] ?? ''
       i += 1
@@ -1081,7 +1280,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const shared = args.sharedDir ? resolve(args.sharedDir) : sharedDir(env, homedir(), self)
   const installed = readJsonFile(paths(shared).installed)
   const pluginVersion = isRecord(installed) && typeof installed.pluginVersion === 'string' ? installed.pluginVersion : null
-  const result = args.restart ? await restartInbox({ shared, env }) : await update({ shared, env, version: args.version, pluginVersion })
+  const result = args.restart ? await restartInbox({ shared, env }) : await update({ shared, env, version: args.version, again: args.again, pluginVersion })
   process.stdout.write(`${JSON.stringify(result)}\n`)
   if (result.ok || result.busy) return 0
   return result.rolledBack ? 2 : 1

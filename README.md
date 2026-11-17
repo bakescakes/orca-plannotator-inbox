@@ -107,32 +107,43 @@ yourself is never replaced, and standard Plannotator is never sent one.
 ### The Orca build of Plannotator
 
 Standard Plannotator can take messages from an Orca chat, but it cannot start, stop or resume one,
-and its Update button knows nothing about Orca. The Orca build adds that. It is the Plannotator
+or show which agent each chat runs. The Orca build adds that. It is the Plannotator
 release of the same number with the changes under [`plannotator/`](plannotator/) applied, built by
 this repository's public CI for macOS, Linux and Windows, and published on its Releases page with
 a checksum for each file.
 
-- **Install.** On start, and at most every six hours after, the worker reads the list of Orca
-  builds, downloads the newest one for your computer, checks its size and SHA-256, runs it once
-  to see that it answers, and only then records it under
-  `~/.orca-plannotator-inbox/plannotator/`. Nothing is installed over your own `plannotator`.
+- **Plannotator owns its updates.** The plugin never decides which Plannotator release you run.
+  It follows the `plannotator` installed on your computer: the Orca build in use is always the one
+  of that release. When no Plannotator is installed, it uses the newest Orca build.
+- **Install.** On start, at most every six hours after, and within seconds of your Plannotator
+  changing, the worker reads the list of Orca builds, downloads the one of your Plannotator's
+  release for your computer, checks its size and SHA-256, runs it once to see that it answers, and
+  only then records it under `~/.orca-plannotator-inbox/plannotator/`. Nothing is installed over
+  your own `plannotator`.
 - **Use.** The launcher and **Open Inbox** start the Orca build when one is installed and the
   worker is delivering; otherwise they start your own Plannotator. A `PLANNOTATOR_BIN` you set
   always wins. If the Inbox is already running on standard Plannotator, the panel offers
   **Restart Inbox**; nothing saved is lost.
-- **Update.** When Plannotator releases a new version, CI builds the Orca build of it. The worker
-  installs it by itself; the Inbox's own **Update** button does the same at once. The new build
-  must start and answer within 30 seconds, or the one before it is put back. Progress and the
-  reason for a failure show in the Inbox's update card and in the plugin's panel, so a failed
-  update is never silent.
-- **Waiting for a build.** When Plannotator has released a version whose Orca build is not
-  published yet, that is a wait, not a failure. The current build stays in use, the panel says
-  "Plannotator 0.28.67 is out. Its Orca build is not published yet; the Orca build of 0.28.66
-  stays in use and updates by itself when it is.", and the worker looks for it every 15 minutes
-  until it arrives, then installs it and restarts the Inbox on it. The Inbox shows the new version
-  as available; pressing its **Update** button looks once, briefly shows the update as under way,
-  and goes back to available without an error. A real failure (a bad download, a build that does
-  not start) is still shown as one, and is retried after six hours, then longer.
+- **Update.** Press **Update** in the Inbox, leave Plannotator's automatic updates on, or run
+  `plannotator update` in a terminal: each one is Plannotator updating itself, with its own
+  installer. From the Inbox, the Orca build hands the request to Plannotator's own
+  `plannotator update` and the plugin then follows; from a terminal, the worker notices the new
+  release within seconds. If Plannotator's own update fails, nothing changes and the Inbox's
+  update card says why, in Plannotator's words.
+- **After an update.** If the Orca build of the new release is published, the Inbox restarts on it.
+  It must start and answer within 30 seconds, or the one before it is put back. If it is not
+  published yet, the Inbox restarts on the Plannotator you just updated to, without the Orca
+  additions: no Start, Stop or Open in Orca from the Inbox, and no per-agent icons. Replies still
+  reach your chats. The panel says "Plannotator 0.28.67 is in use. Its Orca build is not published
+  yet, so the Orca additions (Start, Stop and Open in Orca from the Inbox, and per-agent icons) are
+  missing until it is; the Inbox moves to it by itself.", the worker looks every 15 minutes, and
+  when the build arrives the Inbox restarts on it. CI builds a new release within about 15 minutes
+  of Plannotator publishing it. An Orca build that cannot be downloaded or fails its checks is
+  treated the same way, with the reason shown. A failed download is tried again every 15 minutes; a
+  build that fails its checks is left alone for six hours (then longer) unless you press **Check
+  for a new build** in the panel, and a newer build of the release is taken at once.
+- **Never back.** The plugin does not move you to an older release. If the Plannotator installed
+  here is older than the Orca build in use, the build stays.
 - **Reduced builds.** When a Plannotator release breaks some of the Orca changes, CI may publish a
   build that leaves those out. Its `manifest.json` lists what it serves (`features`) and what it
   leaves out (`omitted`); manifests without these lists are full builds. The panel says in one line
@@ -298,10 +309,12 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   in question. Where Orca cannot do one of them, the Inbox says so and nothing is sent.
 - The Orca build is downloaded from this repository's GitHub releases only. Without a connection
   the build already installed (or your own Plannotator) stays in use.
-- While a new Plannotator has no Orca build yet, the Inbox offers its **Update** button as usual;
-  it cannot say that the build is not published yet, and only the plugin's panel does. An Inbox
-  that an older plugin left showing "No Orca build ... has been published yet" as a failure shows
-  it until the worker's next look, within 15 minutes.
+- For the minutes between a Plannotator release and its Orca build, an Inbox you update runs
+  standard Plannotator: Start, Stop and Open in Orca are missing from the Inbox and per-agent icons
+  are not shown. Both are back when the Inbox restarts on the Orca build.
+- The **Update** button reaches Plannotator's own updater only for a `plannotator` installed by
+  Plannotator's install script. For any other copy, Plannotator says it cannot update itself and
+  nothing changes.
 - A reduced build lacks what its panel line says until the full build is published. If none is
   ever published, the worker keeps looking every 15 minutes; that is one small download of the
   list of builds each time.

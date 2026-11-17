@@ -1,18 +1,18 @@
-// The Orca build of Plannotator, as the worker sees it: which build is in use, keeping it current,
-// and starting or restarting the Inbox on it. The work itself (download, checks, switch, rollback)
+// The Orca build of Plannotator, as the worker sees it: which build is in use, keeping it in step
+// with the Plannotator installed here, and starting or restarting the Inbox on it. The work itself (download, checks, switch, rollback)
 // is bin/plannotator-update.mjs, which the Inbox's own Update button also runs; this file reads
 // what it leaves behind and starts it.
 //
 //   <shared>/plannotator/current.json   the build in use (written only by the updater)
 //   <shared>/plannotator/check.json     when the worker last ran the updater, and what came of it
 //   <shared>/bridge/upgrade-state.json  the updater's progress, read by the Inbox in Orca mode
-//   <shared>/plannotator/waiting.json   a Plannotator release that is out with no Orca build yet
+//   <shared>/plannotator/waiting.json   the Plannotator installed here has no Orca build in use yet
 //
 // Stock Plannotator is the fallback everywhere: with no valid build, or no Orca bridge config, or
 // the plugin not delivering, everything runs the `plannotator` the person installed, as before.
 import { execFile } from 'node:child_process'
 import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { findOnPath } from './connect'
 import { InboxClient } from './inbox'
@@ -24,8 +24,8 @@ import { errorText, isRecord } from './util'
 /** The updater runs at most this often by itself; each failure in a row doubles it, up to 8×. */
 export const CHECK_EVERY_MS = 6 * 60 * 60 * 1000
 /**
- * While a newer Plannotator has no Orca build yet, or the build in use is a reduced one, the
- * updater looks this often instead (one small read of the release list), until the build is there.
+ * While the Plannotator installed here has no Orca build in use yet, or the build in use is a reduced
+ * one, the updater looks this often instead (one small read of the release list), until the build is there.
  */
 export const WAITING_CHECK_MS = 15 * 60 * 1000
 /** The updater's sentence for a release with no build yet, as versions before 0.3.0 wrote it as a failure. */
@@ -53,7 +53,7 @@ export type BuildRecord = {
   features?: string[]
   omitted?: string[]
 }
-/** A Plannotator release that is out and has no Orca build yet; `since` in ms. */
+/** A Plannotator release with no Orca build in use yet (the Inbox runs the Plannotator installed here); `since` in ms. */
 export type Waiting = { version: string; since: number }
 /** A build in use that leaves out some of the Orca changes. `lacks`: plain words for what it lacks. */
 export type Reduced = { lacks: string[]; omitted: string[] }
@@ -69,8 +69,10 @@ export type UpdaterResult = {
   version?: string | null
   build?: string
   latest?: BuildRef | null
-  /** A release that is out with no Orca build yet: the run waited, it did not fail. */
+  /** A release with no Orca build in use yet: the run waited, it did not fail. */
   waiting?: { version: string } | null
+  /** The Inbox runs the Plannotator installed here until that build is in use. */
+  plain?: boolean
   detail: string
 }
 
@@ -112,8 +114,30 @@ export function reducedOf(record: Pick<BuildRecord, 'features' | 'omitted'> | nu
   return { lacks, omitted: [...omitted] }
 }
 
-type Check = { v: 1; lastAttempt: number; failures: number; lastError: string | null; lastErrorAt: number; latestKnown: BuildRef | null }
-const NO_CHECK: Check = { v: 1, lastAttempt: 0, failures: 0, lastError: null, lastErrorAt: 0, latestKnown: null }
+/** `stock`: the Plannotator installed here as the last look saw it (`stockSignature`, "" when none was found); null before the first look. */
+type Check = { v: 1; lastAttempt: number; failures: number; lastError: string | null; lastErrorAt: number; latestKnown: BuildRef | null; stock: string | null }
+const NO_CHECK: Check = { v: 1, lastAttempt: 0, failures: 0, lastError: null, lastErrorAt: 0, latestKnown: null, stock: null }
+
+/**
+ * The Plannotator installed here, as its file's place, size and time: it changes when Plannotator
+ * updates itself or a person installs another release. Found as the updater finds it. Null: none.
+ */
+export async function stockSignature(env: Env, home: string, platform: NodeJS.Platform = process.platform): Promise<string | null> {
+  const explicit = (env.PLANNOTATOR_BIN ?? '').trim()
+  const names = platform === 'win32' ? ['plannotator.exe', 'plannotator.cmd', 'plannotator'] : ['plannotator']
+  const folders = [...(env.PATH ?? '').split(delimiter).filter(Boolean), join(home, '.local', 'bin')]
+  if (platform === 'win32' && env.LOCALAPPDATA) folders.push(join(env.LOCALAPPDATA, 'plannotator'))
+  const candidates = [...(explicit ? [explicit] : []), ...folders.flatMap((folder) => names.map((name) => join(folder, name)))]
+  for (const candidate of candidates) {
+    try {
+      const info = await stat(candidate)
+      if (info.isFile()) return `${candidate}:${info.size}:${Math.floor(info.mtimeMs)}`
+    } catch {
+      // Not there: the next place.
+    }
+  }
+  return null
+}
 
 export function storePaths(sharedDir: string) {
   const store = join(sharedDir, 'plannotator')
@@ -390,7 +414,8 @@ export class BuildStore {
         failures: Math.max(0, Math.min(100, Math.floor(number(parsed.failures)))),
         lastError: typeof parsed.lastError === 'string' ? parsed.lastError.slice(0, 500) : null,
         lastErrorAt: number(parsed.lastErrorAt),
-        latestKnown: readRef(parsed.latestKnown)
+        latestKnown: readRef(parsed.latestKnown),
+        stock: typeof parsed.stock === 'string' ? parsed.stock.slice(0, 5000) : null
       }
     } catch {
       return NO_CHECK
@@ -433,11 +458,12 @@ export class BuildStore {
   }
 
   /**
-   * Runs the updater when it is due: at most every 6 hours, longer after failures in a row. It
-   * installs the newest Orca build when none is installed or a newer one is published, and does
-   * nothing else otherwise. While a newer Plannotator has no Orca build yet, or the build in use is a
-   * reduced one, it is due every 15 minutes instead (unless the last run failed), and asks for that
-   * release by name. `force` (a person pressed "Check now") skips the wait.
+   * Runs the updater when it is due: at most every 6 hours, longer after failures in a row. The
+   * updater follows the Plannotator installed here: it installs the Orca build of that release, and
+   * never asks Plannotator to update. While that release has no Orca build in use yet, or the build
+   * in use is a reduced one, it is due every 15 minutes instead (unless the last run failed). It is
+   * due at once when the Plannotator installed here changed (it updated itself, or a person did).
+   * `force` (a person pressed "Check now") skips the wait.
    */
   ensure(options: { force?: boolean } = {}): Promise<BuildStatus> {
     if (this.running) {
@@ -453,18 +479,28 @@ export class BuildStore {
       const waiting = await readWaiting(this.deps.sharedDir, record?.version ?? null, state)
       const soon = (waiting !== null || reducedOf(record) !== null) && check.failures === 0
       const wait = soon ? WAITING_CHECK_MS : CHECK_EVERY_MS * 2 ** Math.min(check.failures, MAX_BACKOFF_STEPS)
-      if ((!options.force && now - check.lastAttempt < wait) || (await lockHeld(this.deps.sharedDir, now))) return this.status()
+      const signature = () => stockSignature(this.deps.env, this.deps.home, this.deps.platform).then((found) => found ?? '', () => '')
+      const seen = await signature()
+      // The first look only notes it; a change after that (a first install, too) is followed at once.
+      const moved = check.stock !== null && seen !== check.stock
+      if ((!options.force && !moved && now - check.lastAttempt < wait) || (await lockHeld(this.deps.sharedDir, now))) {
+        if (check.stock === null) await this.writeCheck({ ...check, stock: seen }).catch(() => undefined)
+        return this.status()
+      }
       // Saved first, so a crash part way is not retried at once.
-      await this.writeCheck({ ...check, lastAttempt: now }).catch(() => undefined)
-      const result = await this.runUpdater(waiting ? ['--version', waiting.version] : [])
+      await this.writeCheck({ ...check, lastAttempt: now, stock: seen }).catch(() => undefined)
+      // A person asked: a build that could not be used is fetched again now, not after its wait.
+      const result = await this.runUpdater(options.force ? ['--again'] : [])
       const latestKnown = readRef(result.latest) ?? check.latestKnown
+      // As it is after the run: the Inbox may have asked Plannotator to update meanwhile.
+      const stock = await signature()
       if (result.busy) {
-        await this.writeCheck({ ...check, lastAttempt: now, latestKnown }).catch(() => undefined)
+        await this.writeCheck({ ...check, lastAttempt: now, latestKnown, stock: seen }).catch(() => undefined)
       } else if (result.ok) {
-        await this.writeCheck({ v: 1, lastAttempt: now, failures: 0, lastError: null, lastErrorAt: 0, latestKnown }).catch(() => undefined)
+        await this.writeCheck({ v: 1, lastAttempt: now, failures: 0, lastError: null, lastErrorAt: 0, latestKnown, stock }).catch(() => undefined)
       } else {
         this.deps.log?.(`Orca build of Plannotator: ${result.detail}`)
-        await this.writeCheck({ v: 1, lastAttempt: now, failures: check.failures + 1, lastError: result.detail, lastErrorAt: this.now(), latestKnown }).catch(() => undefined)
+        await this.writeCheck({ v: 1, lastAttempt: now, failures: check.failures + 1, lastError: result.detail, lastErrorAt: this.now(), latestKnown, stock }).catch(() => undefined)
       }
       return this.status()
     })()

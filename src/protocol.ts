@@ -62,7 +62,7 @@ export type BuildInfo = {
   updating: boolean
   phase: string | null
   detail: string | null
-  /** A newer Plannotator that is out with no Orca build yet (`since` in ms); absent from older workers. */
+  /** A Plannotator release with no Orca build in use yet (`since` in ms): the Inbox runs the Plannotator installed here. Absent from older workers. */
   waiting?: { version: string; since: number } | null
   /** The build in use leaves out some Orca changes: `lacks` in plain words, `omitted` the changes' names. */
   reduced?: { lacks: string[]; omitted: string[] } | null

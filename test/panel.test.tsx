@@ -144,9 +144,15 @@ test('a release with no Orca build yet is a wait, a real failure is a warning, a
   assert.ok(view.find({ text: 'Installed' }))
   assert.equal(view.find({ type: 'Callout' }), null, 'waiting is not a warning')
 
-  // Stock Plannotator in use while waiting.
+  // The Plannotator installed here in use while its Orca build is not published.
   await view.post('status.changed', { ...status, build: { ...build, mode: 'stock', version: null, build: null } })
-  assert.ok(view.find({ text: 'Plannotator 0.28.67 is out. Its Orca build is not published yet; it installs by itself when it is.' }))
+  assert.ok(view.find({ text: 'Plannotator 0.28.67 is in use. Its Orca build is not published yet, so the Orca additions (Start, Stop and Open in Orca from the Inbox, and per-agent icons) are missing until it is; the Inbox moves to it by itself.' }))
+  assert.equal(view.find({ type: 'Callout' }), null)
+
+  // Its build is published and could not be used: the updater's own sentence says why.
+  const unused = 'Plannotator 0.28.67 is in use without its Orca additions. The downloaded Plannotator 0.28.67 failed to start (exit 1), so it was not used. The plugin tries again by itself.'
+  await view.post('status.changed', { ...status, build: { ...build, mode: 'stock', version: null, build: null, detail: unused } })
+  assert.ok(view.find({ text: unused }))
 
   // A real failure is still one.
   const failure = 'The download does not match the checksum the release lists, so it was not used. The Orca build of Plannotator 0.28.66 stays in use.'
