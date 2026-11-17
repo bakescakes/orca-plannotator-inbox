@@ -227,12 +227,21 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     const keyHex = (await readFile(join(bridgeDir, 'link-key'))).toString('hex')
     const bridge = async (path: string, body?: Json): Promise<{ status: number; body: Json }> => {
       const { port } = JSON.parse(await readFile(join(bridgeDir, 'navigation.json'), 'utf8')) as { port: number }
-      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-        method: body ? 'POST' : 'GET',
-        headers: { authorization: `Bearer ${keyHex}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-        ...(body ? { body: JSON.stringify(body) } : {})
-      })
-      return { status: response.status, body: (await response.json()) as Json }
+      // A read that Orca answers too late for the bridge's limit is a 503 that says to try again,
+      // which is what a person does. The other test files run beside this one, so on a small
+      // machine one read can be that late; an action is never asked twice here.
+      const giveUp = Date.now() + 60_000
+      for (;;) {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: body ? 'POST' : 'GET',
+          headers: { authorization: `Bearer ${keyHex}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {})
+        })
+        const answer = { status: response.status, body: (await response.json()) as Json }
+        if (body || answer.status !== 503 || Date.now() > giveUp) return answer
+        note(`the bridge answered ${path} with 503 (${String(answer.body.text)}); asking again`)
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+      }
     }
 
     // ---------------------------------------------------------------------------------------
