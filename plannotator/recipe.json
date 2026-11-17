@@ -134,7 +134,7 @@
     {
       "file": "tests/orca-agents-proof.ts",
       "target": "tests/orca-agents-proof.ts",
-      "sha256": "478e5df92f31f793a332e023fd024ad893b945df6eef37f2e9877d6d3af080b3",
+      "sha256": "1812c9571644bee4f5770499878833c5911dcf6b71e96f701329ddf9df358b57",
       "run": [
         "{bun}",
         "tests/orca-agents-proof.ts"
