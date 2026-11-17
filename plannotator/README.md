@@ -91,7 +91,7 @@ The config file must be owner-only JSON:
 | `patches/agent-marks.patch` | Optional. `mark:<host>` faces, the host name "Orca", and the hook for the extra marks. Feature `mark-faces`. |
 | `modules/…` | Added files, at their paths in the Plannotator tree. `orca-marks.tsx` belongs to `agent-marks`. |
 | `modules/packages/server/inbox-orca-build.ts` | What a build carries: its `features` and the patches it left out. `build.mjs` writes it for each build. The copy here is a full build's. |
-| `tests/orca-*.ts` | Gates: MCP identity, the real routes in Orca mode (owner-only tailnet), the full proof (stock mode, updates, marks or their absence, and launch requests), the agents route against fake agents in a temporary home, and the marks drawn in a DOM (`orca-marks-proof.ts`, part of `agent-marks`). |
+| `tests/orca-*.ts` | Gates: MCP identity, the real routes in Orca mode (owner-only tailnet), the full proof (stock mode, updates, marks or their absence, and launch requests), the agents route against fake agents in a temporary home (on Windows its guards and list only: upstream's fake agent CLIs are `sh` scripts), and the marks drawn in a DOM (`orca-marks-proof.ts`, part of `agent-marks`). |
 | `recipe.json` | Tag and commit, Bun pin, the patches in order (each `required` or not, with the `features` it carries), module paths, the sha256 of every file, and the build steps. |
 | `build.mjs` | The build (Node built-ins only). |
 | `release.mjs` | Used by the workflow: composes `manifest.json` and the release notes, and decides what a run's issue says. |
