@@ -34,6 +34,8 @@ async function until<T>(read: () => Promise<T>, ok: (value: T) => boolean, what:
 
 Object.assign(process.env, {
   HOME: join(root, "home"),
+  USERPROFILE: join(root, "home"),
+  PLANNOTATOR_DATA_DIR: join(root, "config"),
   PLANNOTATOR_TEST_SANDBOX: "1",
   PLANNOTATOR_INBOX_TAILSCALE: "0",
   PLANNOTATOR_INBOX_CONNECT: "0",
@@ -47,6 +49,9 @@ Object.assign(process.env, {
 delete process.env.PLANNOTATOR_ORCA_MODE;
 delete process.env.PLANNOTATOR_ORCA_CONFIG;
 mkdirSync(join(root, "home"), { recursive: true });
+mkdirSync(join(root, "config"), { recursive: true });
+// Starting agents from the Inbox, switched on in so many words: Plannotator leaves it off on Windows until it is.
+writeFileSync(join(root, "config", "config.json"), JSON.stringify({ inboxLaunch: { enabled: true } }));
 
 // The inert bridge: catalog, health, status and the four lifecycle actions; every request's bearer is checked.
 const key = Buffer.alloc(32, 23);

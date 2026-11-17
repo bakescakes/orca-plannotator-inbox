@@ -99,7 +99,7 @@
     {
       "file": "tests/orca-build-proof.ts",
       "target": "tests/orca-build-proof.ts",
-      "sha256": "c0392def80be4772f3263aeb9718f259516f6408c576defa5ad59f9330570c98",
+      "sha256": "f944706a331ffe82bc6f34b5d85a801cbe3e17471cece16ba4c09083162bfefb",
       "run": [
         "{bun}",
         "tests/orca-build-proof.ts"
