@@ -89,6 +89,11 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
     ORCA_USER_DATA_PATH: profile,
     ORCA_E2E_HEADLESS: '1'
   } as NodeJS.ProcessEnv
+  // This test is the plugin with the Plannotator a person installed, so "Use the Orca build of Plannotator" is
+  // switched off the way Orca's Settings stores it. Left on, the worker downloads the published build and
+  // restarts the Inbox on it halfway through (test/in-app-build.test.ts is the test of that).
+  await mkdir(join(profile, 'plugins-data', 'local.plannotator-inbox'), { recursive: true })
+  await writeFile(join(profile, 'plugins-data', 'local.plannotator-inbox', 'settings.json'), JSON.stringify({ orcaBuild: false }))
   const plannotatorEnv = { ...env, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0', PLANNOTATOR_AUTO_UPDATE: '0', PLANNOTATOR_BROWSER: 'none' }
   const run = (file: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<string> =>
     new Promise((resolve) => execFile(file, args, { env: options.env ?? env, cwd: options.cwd ?? root, timeout: 90_000, maxBuffer: 32 * 1024 * 1024 }, (_error, stdout) => resolve(String(stdout))))
@@ -112,6 +117,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
     serve.stdout.on('data', (chunk: Buffer) => (serveLog += chunk.toString('utf8')))
     serve.stderr.on('data', (chunk: Buffer) => (serveLog += chunk.toString('utf8')))
     let agent: ReturnType<typeof spawn> | null = null
+    let lastPoll = ''
     try {
       await until(() => serveLog.includes('orca_server_ready'), 'the second Orca to start', 90_000)
       const version = ((await orca('status')).result?.runtime as { appVersion?: string } | undefined)?.appVersion
@@ -174,6 +180,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
 
       // The installed worker sends it through this Orca to that chat, once, and Orca hands it over.
       let mail: Mail[] = []
+      lastPoll = ''
       await until(
         async () => {
           const box = await orca('orchestration', 'inbox', '--terminal', `orca_session_id:${session}`, '--full')
@@ -195,7 +202,10 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
             headers: { 'content-type': 'application/json', authorization: `Bearer ${registry.token}` },
             body: JSON.stringify({ host: 'orca', session, waitMs: 0 })
           })
-          return ((await again.json()) as { commands: unknown[] }).commands.length === 0
+          // An answer without `commands` is an error; asked again until the time is up.
+          lastPoll = `${again.status} ${(await again.clone().text()).slice(0, 600)}`
+          const { commands } = (await again.json()) as { commands?: unknown[] }
+          return Array.isArray(commands) && commands.length === 0
         },
         'the acknowledgement',
         30_000
@@ -222,7 +232,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       const logs = await run(cli, ['plugin', 'logs', 'local.plannotator-inbox', '--json'])
       const seen = await readdir(chatEnvDir).catch(() => [] as string[])
       const agentSays = await run(join(bin, 'claude'), ['--version'])
-      process.stderr.write(`second Orca said:\n${serveLog.slice(-12_000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\nchats whose agent started: ${JSON.stringify(seen)}\nthe agent program (${await realpath(CLAUDE!)}) says: ${agentSays.trim() || 'nothing'}\n`)
+      process.stderr.write(`the Inbox last answered the test’s poll: ${lastPoll || 'not asked'}\nsecond Orca said:\n${serveLog.slice(-12_000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\nchats whose agent started: ${JSON.stringify(seen)}\nthe agent program (${await realpath(CLAUDE!)}) says: ${agentSays.trim() || 'nothing'}\n`)
       throw error
     } finally {
       agent?.stdin?.end()

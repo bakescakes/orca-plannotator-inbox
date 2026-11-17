@@ -87,7 +87,8 @@ async function pinnedBun(dir) {
   mkdirSync(into, { recursive: true });
   const tgz = join(into, "bun.tgz");
   writeFileSync(tgz, bytes);
-  run(["tar", "-xzf", tgz, "-C", into], { what: "unpacking Bun" });
+  // Relative names from inside the folder: GNU tar (Git Bash on Windows) reads "C:\…" as a remote host.
+  run(["tar", "-xzf", "bun.tgz"], { cwd: into, what: "unpacking Bun" });
   if (process.platform !== "win32") chmodSync(bin, 0o755);
   return bin;
 }
@@ -163,6 +164,8 @@ async function main() {
   const home = join(work, "home");
   mkdirSync(home, { recursive: true });
   Object.assign(env, { HOME: home, USERPROFILE: home, PLANNOTATOR_DATA_DIR: join(work, "data"), BUN_INSTALL_CACHE_DIR: join(work, "bun-cache"), PATH: dirname(bun) + (process.platform === "win32" ? ";" : ":") + env.PATH });
+  // Plannotator's UI build needs more memory than Node allows itself where its own limit is 2 GB (an Intel Mac runner).
+  env.NODE_OPTIONS = "--max-old-space-size=6144";
   const fill = (argv, out) => argv.map((part) => part.replaceAll("{bun}", bun).replaceAll("{version}", a.version).replaceAll("{bunTarget}", TARGETS[a.target]).replaceAll("{out}", out ?? ""));
   const steps = gatesOnly ? recipe.steps.prepare : [...recipe.steps.prepare, ...recipe.steps.check, ...recipe.steps.build];
   for (const step of steps) run(fill(step), { cwd: tree, env, failCode: 4 });

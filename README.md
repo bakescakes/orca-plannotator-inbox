@@ -245,6 +245,9 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   the build already installed (or your own Plannotator) stays in use.
 - Uninstalling the plugin leaves the launcher folder and the agent entries. Press **Disconnect**
   first, then delete `~/.orca-plannotator-inbox`.
+- On Windows, Plannotator keeps starting agents from the Inbox switched off, and the Orca build
+  does the same: Start, Stop and Resume are not offered there unless `inboxLaunch.enabled` is
+  `true` in Plannotator's `config.json`. That has not been tried inside Orca on Windows.
 - On Windows, CI runs the tests and the end-to-end run with the real Plannotator through the
   launcher. The plugin has not been run inside Orca on Windows, nor with a real agent there.
 
