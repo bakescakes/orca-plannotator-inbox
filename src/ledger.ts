@@ -18,7 +18,8 @@ export type DeliveryState =
   | 'accepted' // Orca queued it for the chat
   | 'acknowledged' // the chat received it and the Inbox was told
   | 'blocked' // needs a person: it may or may not have been sent
-  | 'rejected' // the Inbox handed over something that cannot be delivered
+  | 'rejected' // the Inbox handed over something that cannot be delivered, or a reply whose source failed its checks
+  | 'ignored' // written before the plugin was first activated for this Inbox: never delivered, not a problem
 
 export type Delivery = {
   request: string
@@ -33,18 +34,21 @@ export type Delivery = {
   updated: number
 }
 export type Envelope = { session: string; subject: string; body: string; payload: string }
+type SettledFields = { session: string; replyId: string; threadId?: string | null; subject?: string | null }
 
 const LEDGER_KEY = 'ledger.v1'
 const MAX_ROWS = 300
 const KEEP_SETTLED_MS = 14 * 24 * 60 * 60 * 1000
-const SETTLED: ReadonlySet<DeliveryState> = new Set(['acknowledged', 'rejected'])
+const ACTIVATION_KEY = 'activation.v1'
+const STATES: readonly string[] = ['prepared', 'sending', 'accepted', 'acknowledged', 'blocked', 'rejected', 'ignored'] satisfies DeliveryState[]
+const SETTLED: ReadonlySet<DeliveryState> = new Set(['acknowledged', 'rejected', 'ignored'])
 
 function parseDelivery(value: unknown): Delivery | null {
   if (!isRecord(value)) return null
   const { request, state, session, replyId, updated } = value
   if (typeof request !== 'string' || typeof state !== 'string' || typeof session !== 'string') return null
   if (typeof replyId !== 'string' || typeof updated !== 'number') return null
-  if (!['prepared', 'sending', 'accepted', 'acknowledged', 'blocked', 'rejected'].includes(state)) return null
+  if (!STATES.includes(state)) return null
   const text = (field: unknown): string | null => (typeof field === 'string' ? field : null)
   return {
     request,
@@ -107,22 +111,13 @@ export class Ledger {
   }
 
   counts(): Record<DeliveryState, number> {
-    const counts: Record<DeliveryState, number> = { prepared: 0, sending: 0, accepted: 0, acknowledged: 0, blocked: 0, rejected: 0 }
+    const counts: Record<DeliveryState, number> = { prepared: 0, sending: 0, accepted: 0, acknowledged: 0, blocked: 0, rejected: 0, ignored: 0 }
     for (const row of this.rows.values()) counts[row.state] += 1
     return counts
   }
 
-  /**
-   * Records a new delivery and its frozen envelope; returns the existing row when there is one.
-   * `already` is a mail that is known to carry this reply: the row then starts as accepted, in the
-   * same write, so no restart can find it as something still to send.
-   */
-  async create(
-    key: string,
-    fields: { session: string; replyId: string; threadId: string | null; subject: string | null },
-    envelope: Envelope,
-    already: { message: string; mailbox: string } | null = null
-  ): Promise<Delivery> {
+  /** Records a new delivery and its frozen envelope; returns the existing row when there is one. */
+  async create(key: string, fields: { session: string; replyId: string; threadId: string | null; subject: string | null }, envelope: Envelope): Promise<Delivery> {
     this.assertLoaded()
     const existing = this.rows.get(key)
     if (existing) return { ...existing }
@@ -130,13 +125,13 @@ export class Ledger {
     await this.store.set(this.envelopeKey(key), envelope)
     const row: Delivery = {
       request: randomUUID(),
-      state: already ? 'accepted' : 'prepared',
+      state: 'prepared',
       session: fields.session,
       replyId: fields.replyId,
       threadId: fields.threadId,
       subject: fields.subject ? fields.subject.slice(0, 120) : null,
-      message: already?.message ?? null,
-      mailbox: already?.mailbox ?? null,
+      message: null,
+      mailbox: null,
       error: null,
       updated: this.now()
     }
@@ -146,16 +141,25 @@ export class Ledger {
   }
 
   /** Records something the Inbox handed over that can never be delivered, so it is not retried forever. */
-  async reject(key: string, fields: { session: string; replyId: string }, error: string): Promise<void> {
+  async reject(key: string, fields: SettledFields, error: string): Promise<void> {
+    await this.settle(key, fields, 'rejected', error)
+  }
+
+  /** Records a reply that is never this plugin's to deliver (written before it was activated), so it is not looked at again. */
+  async ignore(key: string, fields: SettledFields): Promise<void> {
+    await this.settle(key, fields, 'ignored', null)
+  }
+
+  private async settle(key: string, fields: SettledFields, state: 'rejected' | 'ignored', error: string | null): Promise<void> {
     this.assertLoaded()
     if (this.rows.has(key)) return
     this.rows.set(key, {
       request: randomUUID(),
-      state: 'rejected',
+      state,
       session: fields.session,
       replyId: fields.replyId,
-      threadId: null,
-      subject: null,
+      threadId: fields.threadId ?? null,
+      subject: fields.subject ? fields.subject.slice(0, 120) : null,
       message: null,
       mailbox: null,
       error,
@@ -215,5 +219,53 @@ export class Ledger {
     })
     this.writing = write.catch(() => undefined)
     return write
+  }
+}
+
+/**
+ * When this plugin was first activated for each Inbox (ms since the epoch), kept in the plugin's own
+ * storage beside the ledger. Replies written before it are never delivered: installing the plugin
+ * must not wake a chat with old, unanswered history. A boundary is set once and never moves.
+ */
+export class Activation {
+  private readonly store: KeyValue
+  private readonly now: () => number
+  private at: Map<string, number> | null = null
+
+  constructor(store: KeyValue, now: () => number = Date.now) {
+    this.store = store
+    this.now = now
+  }
+
+  /** The boundary for one Inbox, or null while it is not known (nothing is delivered then). */
+  get(inboxKey: string): number | null {
+    return this.at?.get(inboxKey) ?? null
+  }
+
+  /**
+   * Sets the boundary for one Inbox the first time, and returns it. Throws when the saved boundaries
+   * cannot be read or written: delivering without a boundary could wake old replies.
+   */
+  async ensure(inboxKey: string): Promise<number> {
+    if (this.at === null) {
+      const saved = await this.store.get(ACTIVATION_KEY)
+      const at = new Map<string, number>()
+      if (saved !== null && saved !== undefined) {
+        if (!isRecord(saved)) throw new Error('The saved activation time is unreadable.')
+        for (const [key, value] of Object.entries(saved)) {
+          if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error('The saved activation time is unreadable.')
+          at.set(key, value)
+        }
+      }
+      this.at = at
+    }
+    const current = this.at.get(inboxKey)
+    const next = current ?? this.now()
+    if (next !== current) {
+      const updated = new Map(this.at).set(inboxKey, next)
+      await this.store.set(ACTIVATION_KEY, Object.fromEntries(updated))
+      this.at = updated
+    }
+    return next
   }
 }

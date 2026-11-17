@@ -35,7 +35,6 @@ async function setup(options: { sessions?: string[]; register?: string[]; settin
     fetch: inbox.fetch,
     locateCli: () => ['orca'],
     tickMs: 30,
-    legacyConfig: join(home, 'legacy.json')
   })
   const heartbeat = async (): Promise<{ delivering: boolean; dataDir: string }> => JSON.parse(await readFile(join(shared, 'state.json'), 'utf8'))
   return { root, home, shared, dataDir, orca, inbox, engine, statuses, settings, register, heartbeat }
@@ -199,38 +198,6 @@ test('if Orca starts naming chats differently, nothing is polled and the status 
     assert.deepEqual(status.sessions, [])
     assert.equal(t.inbox.state.polls.length, 0)
     assert.match(status.detail ?? '', /not in Orca’s list of open chats/)
-  } finally {
-    await t.engine.stop()
-  }
-})
-
-test('it stands by while the adapter it replaces is alive for the same Inbox', async () => {
-  const t = await setup()
-  const stateDir = join(t.home, 'legacy-state')
-  await mkdir(stateDir, { recursive: true })
-  await writeFile(join(t.home, 'legacy.json'), JSON.stringify({ stateDir, dataDirs: [t.dataDir] }))
-  await writeFile(join(stateDir, 'status.json'), JSON.stringify({ version: 1, at: new Date().toISOString() }))
-  t.engine.start()
-  try {
-    assert.equal((await t.engine.refresh()).phase, 'standby')
-    assert.equal(t.inbox.state.polls.length, 0)
-    assert.equal((await t.heartbeat()).delivering, false)
-    // The adapter stopped: its status goes stale and the plugin takes over.
-    await writeFile(join(stateDir, 'status.json'), JSON.stringify({ version: 1, at: new Date(Date.now() - 10 * 60_000).toISOString() }))
-    assert.equal((await t.engine.refresh()).phase, 'ready')
-    // What the adapter had already put in the chat's mailbox is finished, not sent a second time.
-    t.orca.state.mail.push({
-      id: 'mail_theirs',
-      from_handle: 'plannotator-orca-adapter',
-      to_handle: `orca_session_id:${SESSION}`,
-      subject: 'Plannotator: Ship it?',
-      body: 'Plannotator Inbox item',
-      payload: JSON.stringify({ adapter: 'plannotator-orca-adapter', version: 1, replyId: 'msg_1', nativeSessionId: SESSION }),
-      delivered_at: '2026-01-01T00:00:00Z'
-    })
-    t.inbox.state.queue.set(SESSION, [reply('msg_1')])
-    await until(() => t.inbox.state.acknowledged.length === 1, 'the acknowledgement')
-    assert.equal(t.orca.sends().length, 0)
   } finally {
     await t.engine.stop()
   }

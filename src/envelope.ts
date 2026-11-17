@@ -77,7 +77,7 @@ export function buildEnvelope(inboxKey: string, session: string, command: InboxC
     body = `${head}\n\nTheir reply is too long to include here. Read it now with read_thread (thread_id ${command.thread_id}, message_id ${command.id}).\n\n${CLOSING}`
   }
   const payload = JSON.stringify({
-    adapter: SENDER,
+    sender: SENDER,
     version: 1,
     inbox: inboxKey.slice(0, 16),
     replyId: command.id,

@@ -80,7 +80,6 @@ test('live agent: a signed-in Orca chat asks, is answered, is woken by the reply
     onStatus: () => undefined,
     locateCli: () => [CLI],
     tickMs: 1000,
-    legacyConfig: null
   })
   try {
     await mkdir(join(WORKTREE, '.claude'), { recursive: true })

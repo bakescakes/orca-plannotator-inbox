@@ -5,8 +5,14 @@ An [Orca](https://github.com/stablyai/orca) plugin that brings your
 
 An agent in a native Orca chat sends you a question through the Plannotator Inbox. You answer in
 the Inbox window when you get to it. The answer arrives in that same Orca chat by itself, as its
-next turn. Nothing in Plannotator or Orca is patched: the plugin talks to the stock Plannotator
-Inbox and to Orca's own CLI.
+next turn.
+
+From the Inbox you can also start a new Orca chat on a thread, stop one, resume it and bring it
+forward, and each Orca chat shows the icon of the agent it runs. For that the plugin downloads
+the **Orca build of Plannotator** (the same Plannotator release with a small set of Orca changes,
+built in public from this repository) and keeps it up to date. Switch that off in Settings and
+the plugin works with the Plannotator installed on your computer exactly as it is; replies still
+come back to the chat that asked.
 
 ## Install
 
@@ -21,7 +27,8 @@ Then, in Orca:
 1. Approve the plugin when Orca asks. It runs a worker with your user account's access, stores
    its delivery record in its own plugin storage, and may show a notification.
 2. Open the **Plannotator Inbox** panel in the right sidebar and press **Connect agents**. This
-   adds one `plannotator-inbox` MCP server to Claude Code and Codex at user level. It is the only
+   adds one `plannotator-inbox` MCP server to Claude Code, Codex and OpenCode at user level
+   (whichever are installed). It is the only
    time the plugin writes outside its own folders, it happens only when you press it, and
    **Disconnect** puts back what was there. An entry that ran Plannotator directly keeps its
    environment settings (such as `PLANNOTATOR_DATA_DIR`) and its binary, so the same Plannotator
@@ -38,6 +45,11 @@ The status bar shows an **Inbox** item; pressing it opens the Inbox window.
 | Courier | `src/courier.ts`, `src/ledger.ts` | Delivers one reply to one chat through `orca orchestration send`, exactly once as far as both sides can prove. |
 | Launcher | `~/.orca-plannotator-inbox/inbox-mcp` | What agents run as their `plannotator-inbox` MCP server: Plannotator's own `plannotator inbox mcp`, with the Orca chat filled in as the author. |
 | Panel | `src/panel.tsx` | Status, the chats that are listening, agent connections, and replies that need you. |
+| Links | `src/navigation.ts`, `bin/reveal.cjs` | Ends each message an Orca chat sends with an **Open in Orca** link that brings that chat forward. |
+| Pictures | `src/presentation.ts` | Gives an Inbox project the icon of its Orca repository. |
+| Agent icons | `src/faces.ts` | Gives each Orca chat the icon of the agent it runs. |
+| Orca build | `src/build-store.ts`, `~/.orca-plannotator-inbox/plannotator-update` | Downloads, checks, installs and updates the Orca build of Plannotator. |
+| Bridge | `src/bridge.ts`, `src/lifecycle.ts`, `bin/session.cjs` | What the Orca build calls to start, stop, resume and open Orca chats. |
 
 A reply moves through `prepared → sending → accepted → acknowledged`. Each step is saved before
 the next program is asked to do anything, with the request id Orca will see, so a crash or a lost
@@ -46,6 +58,76 @@ answer resumes the same request instead of sending twice. A lost answer is settl
 settle it, the reply is **blocked** and shown in the panel for you to send again; it also stays in
 the Inbox. The Inbox is told a reply was delivered only after Orca's mailbox shows the chat
 received it.
+
+### Checks before anything is sent or delivered
+
+A reply wakes an agent, so both directions are checked rather than trusted.
+
+- **Sending.** The launcher does not take the chat's identity from its environment. Orca's own
+  CLI must say that this exact chat is live, and Orca's workspace list says which repository and
+  worktree it works in. Until that is proven, the launcher is plain Plannotator and rewrites
+  nothing. With it, the chat is filled in as the author and its own project as the project. A
+  call that names another chat, or a project folder that is not the chat's, is refused with a
+  message that starts `Not sent:` and says what to change. The launcher keeps a small record of
+  each send under `~/.orca-plannotator-inbox/receipts` so a retried call is not posted twice.
+- **Delivering.** Before a reply is sent to a chat, its thread is read from the Inbox. The reply
+  must be written by a person, be newer than the moment this plugin first served that Inbox
+  (older replies are skipped, so installing the plugin never wakes chats for old mail), belong to
+  a project that is one of the chat's own folders, and follow a `reply_to` chain that leads to a
+  message this same chat wrote or that was addressed to it. A reply that fails is never sent and
+  never marked delivered: it stays in the Inbox and the panel lists it under **Not delivered**
+  with the reason.
+- **Only these projects.** When the setting lists folders, only chats whose worktree or
+  repository is in one of them send as Orca chats and get replies. Others use plain Plannotator.
+
+### Open in Orca links
+
+Each message a proven Orca chat sends ends with an **Open in Orca** link. It points at a listener
+on `127.0.0.1` that the worker runs, and is signed with a key kept in
+`~/.orca-plannotator-inbox/link-key`. A click brings that exact chat tab forward where this Orca
+allows it, and otherwise opens the chat's workspace through Orca's CLI. The link names a chat,
+never a path; it is checked against Orca's current chats on every click; a link preview or a
+script gets a page with one button instead of opening anything. Links work only on this computer
+and only while Orca runs. Switch them off in Settings.
+
+### Project pictures
+
+Once a minute the worker gives each Inbox project the icon of the Orca repository at the same
+folder (an emoji or an image Orca holds itself; remote images are never fetched). It only fills
+an empty picture or replaces one it set itself, so a picture you choose in the Inbox stays.
+
+### Agent icons
+
+In the Inbox every Orca chat has the same host, Orca. With the Orca build, the worker gives each
+chat the mark of the agent it runs (Claude Code, Codex, OpenCode, Pi, Cursor, Grok, Antigravity,
+Copilot and the others Orca can run), through the Inbox's own face picker route. A face you chose
+yourself is never replaced, and standard Plannotator is never sent one.
+
+### The Orca build of Plannotator
+
+Standard Plannotator can take messages from an Orca chat, but it cannot start, stop or resume one,
+and its Update button knows nothing about Orca. The Orca build adds that. It is the Plannotator
+release of the same number with the changes under [`plannotator/`](plannotator/) applied, built by
+this repository's public CI for macOS, Linux and Windows, and published on its Releases page with
+a checksum for each file.
+
+- **Install.** On start, and at most every six hours after, the worker reads the list of Orca
+  builds, downloads the newest one for your computer, checks its size and SHA-256, runs it once
+  to see that it answers, and only then records it under
+  `~/.orca-plannotator-inbox/plannotator/`. Nothing is installed over your own `plannotator`.
+- **Use.** The launcher and **Open Inbox** start the Orca build when one is installed and the
+  worker is delivering; otherwise they start your own Plannotator. A `PLANNOTATOR_BIN` you set
+  always wins. If the Inbox is already running on standard Plannotator, the panel offers
+  **Restart Inbox**; nothing saved is lost.
+- **Update.** When Plannotator releases a new version, CI builds the Orca build of it. The worker
+  installs it by itself; the Inbox's own **Update** button does the same at once. The new build
+  must start and answer within 30 seconds, or the one before it is put back. Progress and the
+  reason for a failure show in the Inbox's update card and in the plugin's panel, so a failed
+  update is never silent. Until the Orca build of a new Plannotator exists, the current one stays.
+- **Start, Stop, Resume, Open.** The Orca build calls a listener the worker runs on `127.0.0.1`,
+  with a key kept in `~/.orca-plannotator-inbox/bridge/`. A launch is recorded before Orca is
+  asked, so a retry never starts a second chat. A chat you stopped takes no reply until you write
+  to it again or resume it. Workspaces offered are limited to **Only these projects** when set.
 
 Only native Orca chats on this computer are served. Terminal agents keep Plannotator's own
 integrations, and chats on SSH, WSL or paired hosts are left alone.
@@ -86,9 +168,15 @@ checks all of it at run time:
   and `bridge/event`, and the stdio MCP server. Which identity fields a tool takes is read from
   the server's own `tools/list`, so new or renamed tools need no change here. Unknown fields are
   ignored or passed along.
-- **Orca**: plugin Host API 1 (frozen and additive), and four CLI calls with `--json`:
-  `status`, `worktree ps`, `orchestration send|request-show|inbox`. The worker runs the CLI that
+- **Orca**: plugin Host API 1 (frozen and additive), and these CLI calls with `--json`:
+  `status`, `worktree ps`, `repo list`, `worktree activate`, `orchestration
+  send|request-show|inbox`. Bringing one exact chat tab forward uses a call Orca does not
+  publish; when an Orca update changes it, the link opens the chat's workspace instead. The worker runs the CLI that
   ships inside the same Orca, so the two are always the same version.
+- **The Orca build** follows Plannotator's releases by itself (see above). Its changes are kept as
+  a few small patches and whole added files, and CI applies them to each new Plannotator release;
+  when a release no longer takes them, CI fails, no build is published, and the plugin keeps the
+  build it has.
 - **The launcher** lives in `~/.orca-plannotator-inbox`, not in the plugin's folder, because Orca
   replaces that folder on every plugin update. It is rewritten each time Orca starts, so agent
   settings never point at a stale path.
@@ -121,10 +209,16 @@ Plannotator 0.28.66.
 | --- | --- | --- |
 | Deliver replies to Orca chats | on | Off: replies wait in the Inbox. |
 | Notify when a reply needs you | on | A desktop notification when a reply is blocked. |
+| Add an "Open in Orca" link to Inbox messages | on | Off: no link is added and the listener does not run. |
+| Use Orca's repository icons as project pictures | on | Off: project pictures are left alone. |
+| Show each Orca chat with its agent's icon | on | Off: agent icons are left alone. Needs the Orca build. |
+| Use the Orca build of Plannotator | on | Off: nothing is downloaded, and your own Plannotator is used as it is. Start, Stop and Resume from the Inbox need it on. |
+| Only these projects | empty | One folder per line. Empty: every project. |
 | Plannotator data folder | empty | Empty follows Plannotator: `PLANNOTATOR_DATA_DIR`, then `~/.plannotator`. When set, Orca chats send to that Inbox too, unless the agent's own environment names a folder. |
 | Orca CLI path | empty | Empty uses the CLI inside this Orca. |
 
-Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agents**.
+Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agents**,
+**Restart Inbox on the Orca Build**, **Check for a New Orca Build**.
 
 ## Limits
 
@@ -134,11 +228,21 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   already holds a thread it wrote). A reply that arrives while the chat is closed waits in the
   Inbox and is delivered when the chat is open again.
 - At most 64 chats are listened for at once.
+- A reply in a thread whose project is not one of the chat's folders is not delivered, even when
+  the chat started that thread. It is listed under **Not delivered** and stays in the Inbox.
+- A plugin older than 0.2.0 cannot read the delivery record a newer one wrote, so do not go back
+  to 0.1.x after running 0.2.0 without clearing the plugin's storage.
+- Whether OpenCode passes Orca's chat variables to the launcher has not been checked with a real
+  OpenCode chat. If it does not, OpenCode chats use plain Plannotator.
 - On Windows a reply longer than about 12,000 bytes is not included in the mail; the chat is told
   to read it from the thread. Elsewhere that happens from about 62,000 bytes.
 - Two Orca profiles under one user account share the launcher folder. A profile whose plugin is
   switched off does not stop the other from delivering, but the launcher cannot tell which
   profile a chat belongs to, so use the plugin in one profile at a time.
+- Start, Stop and Resume from the Inbox need the Orca build, and Orca's own support for the agent
+  in question. Where Orca cannot do one of them, the Inbox says so and nothing is sent.
+- The Orca build is downloaded from this repository's GitHub releases only. Without a connection
+  the build already installed (or your own Plannotator) stays in use.
 - Uninstalling the plugin leaves the launcher folder and the agent entries. Press **Disconnect**
   first, then delete `~/.orca-plannotator-inbox`.
 - On Windows, CI runs the tests and the end-to-end run with the real Plannotator through the

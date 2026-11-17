@@ -1,0 +1,232 @@
+# The Orca build of Plannotator: once a day (and by hand), build the newest stable Plannotator release that has no
+# Orca build yet, for five targets, run the gates and a --version smoke on each native runner, then publish a release
+# `plannotator-<version>-orca.<n>` with the binaries and manifest.json, and point the `plannotator-orca-index`
+# release's index.json at it. A patch that no longer applies or a failed gate publishes nothing; the index keeps
+# pointing at the last good build.
+#
+# Windows: the binary is cross-compiled on Linux (Bun's --compile --target=bun-windows-x64), because upstream's UI
+# build scripts (vendor.sh, the Vite builds) are written for POSIX shells. A Windows runner then runs the gates on the
+# patched source and the --version smoke on that binary before anything is published.
+#
+# BUILD_DIR is the folder with the patches, added files, recipe and build script.
+name: Orca build of Plannotator
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plannotator version x.y.z (blank: the newest stable release)"
+        required: false
+        default: ""
+      rebuild:
+        description: "Publish a new orca.<n> even when this version already has one"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: orca-build-of-plannotator
+  cancel-in-progress: false
+
+env:
+  BUILD_DIR: plannotator
+  UPSTREAM: backnotprop/plannotator
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      commit: ${{ steps.pick.outputs.commit }}
+      build: ${{ steps.pick.outputs.build }}
+      tag: ${{ steps.pick.outputs.tag }}
+      skip: ${{ steps.pick.outputs.skip }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_REBUILD: ${{ inputs.rebuild }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)"
+            version="${version#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a stable Plannotator version: $version"; exit 1
+          fi
+          # The tag's commit (peeled for an annotated tag); build.mjs refuses a checkout at any other commit.
+          commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version^{}" | cut -f1)"
+          if [ -z "$commit" ]; then commit="$(git ls-remote "https://github.com/$UPSTREAM.git" "refs/tags/v$version" | cut -f1)"; fi
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::Plannotator v$version has no tag commit"; exit 1; fi
+          existing="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
+            --jq "[.[].tagName | select(startswith(\"plannotator-$version-orca.\"))] | length")"
+          skip=false
+          if [ "$existing" -gt 0 ] && [ "${INPUT_REBUILD:-false}" != "true" ]; then skip=true; fi
+          build="orca.$((existing + 1))"
+          {
+            echo "version=$version"; echo "commit=$commit"; echo "build=$build"
+            echo "tag=plannotator-$version-$build"; echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+          echo "Plannotator $version ($commit): $([ "$skip" = true ] && echo "already has an Orca build" || echo "building $build")" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: darwin-arm64, os: macos-14, asset: plannotator-orca-darwin-arm64 }
+          - { target: darwin-x64, os: macos-15-intel, asset: plannotator-orca-darwin-x64 }
+          - { target: linux-x64, os: ubuntu-24.04, asset: plannotator-orca-linux-x64 }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, asset: plannotator-orca-linux-arm64 }
+          - { target: win32-x64, os: ubuntu-24.04, asset: plannotator-orca-win32-x64.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, gate and smoke
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          # stdout is the build's one-line JSON report; everything else (stderr) is the log, kept for the reason line.
+          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target "$TARGET" --out "out/$ASSET" \
+               2>&1 > "out/$ASSET.json" | tee build.err; then
+            reason="$(grep '^orca-build: ' build.err | tail -1)"
+            echo "::error::${reason:-orca-build: failed}"
+            echo "${reason:-orca-build: failed}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cat "out/$ASSET.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            out/${{ matrix.asset }}
+            out/${{ matrix.asset }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-check:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plannotator-orca-win32-x64.exe
+          path: out
+      - name: Gates on Windows and --version smoke
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -o pipefail
+          if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target win32-x64 --gates-only 2>&1 | tee build.err \
+             || ! node "$BUILD_DIR/build.mjs" --check-binary out/plannotator-orca-win32-x64.exe --version "$VERSION" 2>&1 | tee -a build.err; then
+            reason="$(grep '^orca-build: ' build.err | tail -1)"
+            echo "::error::${reason:-orca-build: failed on Windows}"
+            echo "${reason:-orca-build: failed on Windows}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  publish:
+    needs: [resolve, build, windows-check]
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: out
+          merge-multiple: true
+      - name: Compose manifest.json
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD: ${{ needs.resolve.outputs.build }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+            import { createHash } from "node:crypto";
+            const targets = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"];
+            const assets = {};
+            for (const target of targets) {
+              const name = "plannotator-orca-" + target + (target.startsWith("win32") ? ".exe" : "");
+              const bytes = readFileSync("out/" + name);
+              const built = JSON.parse(readFileSync("out/" + name + ".json", "utf8"));
+              const sha256 = createHash("sha256").update(bytes).digest("hex");
+              if (built.sha256 !== sha256) throw Error(name + " changed between its build and publishing");
+              assets[target] = { name, sha256, size: bytes.length };
+            }
+            const manifest = { v: 1, plannotator: process.env.VERSION, build: process.env.BUILD, pluginMin: "0.2.0", assets };
+            writeFileSync("out/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+            console.log(JSON.stringify(manifest));
+          '
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            --title "Plannotator $VERSION, Orca build ${TAG##*-}" \
+            --notes "The Orca build of Plannotator $VERSION (upstream commit $COMMIT), for the Orca plugin. See manifest.json for each binary's sha256." \
+            out/plannotator-orca-darwin-arm64 out/plannotator-orca-darwin-x64 out/plannotator-orca-linux-x64 \
+            out/plannotator-orca-linux-arm64 out/plannotator-orca-win32-x64.exe out/manifest.json
+      - name: Point the index at this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD: ${{ needs.resolve.outputs.build }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          index_tag=plannotator-orca-index
+          if ! gh release view "$index_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$index_tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Orca builds of Plannotator: index" --notes "index.json names the newest Orca build of Plannotator."
+          fi
+          mkdir -p index
+          gh release download "$index_tag" --repo "$GITHUB_REPOSITORY" --pattern index.json --dir index 2> /dev/null || true
+          node --input-type=module -e '
+            import { existsSync, readFileSync, writeFileSync } from "node:fs";
+            const path = "index/index.json";
+            const before = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { v: 1, latest: null, builds: [] };
+            const entry = { plannotator: process.env.VERSION, build: process.env.BUILD, tag: process.env.TAG, published_at: new Date().toISOString() };
+            const builds = [entry, ...(Array.isArray(before.builds) ? before.builds : []).filter((b) => b.tag !== entry.tag)];
+            const key = (b) => [...b.plannotator.split(".").map(Number), Number(String(b.build).split(".")[1])];
+            const newer = (a, b) => { const x = key(a), y = key(b); for (let i = 0; i < 4; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
+            const latest = builds.reduce((best, b) => (!best || newer(b, best) ? b : best), null);
+            const index = { v: 1, latest: { plannotator: latest.plannotator, build: latest.build, tag: latest.tag }, builds };
+            writeFileSync(path, JSON.stringify(index, null, 2) + "\n");
+            console.log(JSON.stringify(index.latest));
+          '
+          gh release upload "$index_tag" index/index.json --repo "$GITHUB_REPOSITORY" --clobber

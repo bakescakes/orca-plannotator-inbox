@@ -19,12 +19,39 @@ const ready: Status = {
   agents: [
     { agent: 'claude', name: 'Claude Code', state: 'connected', detail: 'New Claude chats in Orca reach the Inbox as Orca chats.' },
     { agent: 'codex', name: 'Codex', state: 'absent', detail: 'Not connected yet.' }
-  ]
+  ],
+  build: { mode: 'orca-build', version: '0.28.66', build: 'orca.1', latestKnown: { version: '0.28.66', build: 'orca.1' }, lastError: null, updating: false, phase: 'ready', detail: null },
+  server: 'orca'
 }
 
 export default defineCheck({
   fresh: {},
   ready: { storage: { 'preview.status': ready } },
+  // The Orca build is installed but the running Inbox is still standard Plannotator.
+  restart: { storage: { 'preview.status': { ...ready, server: 'stock' } } },
+  // An update did not work: the reason is shown, and the build in use stays.
+  updateFailed: {
+    storage: {
+      'preview.status': {
+        ...ready,
+        build: {
+          ...ready.build,
+          latestKnown: { version: '0.28.67', build: 'orca.1' },
+          lastError: 'The new build did not start, so Plannotator 0.28.66 (orca.1) is still in use.',
+          phase: 'rolled-back'
+        }
+      }
+    }
+  },
+  noBuild: {
+    storage: {
+      'preview.status': {
+        ...ready,
+        server: 'stock',
+        build: { mode: 'stock', version: null, build: null, latestKnown: null, lastError: 'The list of Orca builds could not be read (no connection).', updating: false, phase: null, detail: null }
+      }
+    }
+  },
   blocked: {
     storage: {
       'preview.status': {
@@ -34,11 +61,6 @@ export default defineCheck({
           { key: 'k1', subject: 'Ship the importer?', session: 'claude_1b491d4a', error: 'It is not known whether Orca received this reply, so it was not sent again.', updated: 1_700_000_000_000 }
         ]
       }
-    }
-  },
-  standby: {
-    storage: {
-      'preview.status': { ...ready, phase: 'standby', headline: 'Standing by', detail: 'Another adapter already delivers replies for this Inbox.', sessions: [] }
     }
   }
 })

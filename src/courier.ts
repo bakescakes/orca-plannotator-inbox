@@ -3,27 +3,99 @@
 // Each step is saved before the next process is asked to do anything. A lost answer is settled by
 // reading (Orca's request receipt, then the chat's mailbox), never by sending again; when reading
 // cannot settle it the delivery is blocked for a person to decide.
+//
+// Before a reply is first sent, and again whenever a prepared reply is about to be sent, its thread
+// is read from the Inbox and the reply must prove it belongs to this chat (see `judgeSource`). A
+// reply that fails is never sent and never acknowledged: it is recorded as rejected, with a reason.
 import { randomUUID } from 'node:crypto'
+import { realpath } from 'node:fs/promises'
+import { isAbsolute, resolve } from 'node:path'
 import { EnvelopeError, buildEnvelope } from './envelope'
-import { InboxRefused, type InboxClient, type InboxCommand } from './inbox'
+import { InboxRefused, InboxUnavailable, type InboxClient, type InboxCommand, type ThreadSource } from './inbox'
 import { Ledger, type Delivery } from './ledger'
 import { OrcaContractError, OrcaNotRun, OrcaRefused, type MailMessage, type OrcaCli } from './orca-cli'
-import { KeyedQueue, errorText, isRecord } from './util'
+import { KeyedQueue, canonicalSession, errorText, isRecord } from './util'
 
-export type Outcome = 'acknowledged' | 'queued' | 'deferred' | 'blocked' | 'rejected'
-export type Route = { session: string; raw: string }
+export type Outcome = 'acknowledged' | 'queued' | 'deferred' | 'blocked' | 'rejected' | 'ignored'
+/**
+ * The chat a reply goes to. `roots` are the chat's own folders (its worktree, its repository root,
+ * the folder its agent runs in), when known: a reply's thread must belong to one of them.
+ */
+export type Route = { session: string; raw: string; roots?: readonly string[] }
+/** What the checks on a reply's source found. */
+export type Verdict = { kind: 'deliver' } | { kind: 'early' } | { kind: 'refuse'; reason: string }
 
 export const AMBIGUOUS = 'It is not known whether Orca received this reply, so it was not sent again.'
 const RECONCILE_AFTER_MS = 30_000
+/** How far up a thread's `reply_to` chain a reply may be from what proves its chat. */
+export const MAX_HOPS = 64
 
-/** The reply a mail's payload says it carries; this plugin and the adapter it replaces both name it `replyId`. */
-function replyIdOf(payload: unknown): string | null {
-  try {
-    const parsed: unknown = typeof payload === 'string' ? JSON.parse(payload) : payload
-    return isRecord(parsed) && typeof parsed.replyId === 'string' ? parsed.replyId : null
-  } catch {
-    return null
+export const REFUSED = {
+  gone: 'The Inbox no longer holds this reply, so it was not delivered.',
+  threadGone: 'The Inbox no longer holds this reply’s thread, so it was not delivered.',
+  notPerson: 'This item was not written by a person in the Inbox, so it was not delivered.',
+  noTime: 'This reply has no readable time, so it was not delivered.',
+  project: 'This reply’s thread belongs to a different project than this chat, so it was not delivered.',
+  recipient: 'Nothing in this reply’s thread shows it is meant for this chat, so it was not delivered.'
+} as const
+
+/** A path with links resolved; the path itself when it cannot be (it does not exist here). */
+export async function realOrSelf(path: string): Promise<string> {
+  return realpath(path).catch(() => path)
+}
+
+/** An ISO time with an explicit zone, as the Inbox writes them; null for anything else. */
+function parseTime(value: string | null): number | null {
+  if (value === null || !/^\d{4}-\d{2}-\d{2}T[^ ]+(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return null
+  const at = Date.parse(value)
+  return Number.isFinite(at) ? at : null
+}
+
+/**
+ * Whether one reply may be delivered to one chat, from its thread as the Inbox holds it: the reply
+ * must be a message a person wrote; written before the activation boundary it is ignored; the thread must belong to one of
+ * the chat's folders when those are known (`threadRoot` and `roots` are real paths); and following
+ * `reply_to` (at most MAX_HOPS messages) must reach either an explicit addressee that is this Orca
+ * chat, or an agent message this same Orca chat wrote. Titles and folders never choose a chat.
+ */
+export function judgeSource(
+  source: Pick<ThreadSource, 'messages'>,
+  replyId: string,
+  session: string,
+  options: { boundary?: number | null; threadRoot?: string; roots?: readonly string[] } = {}
+): Verdict {
+  const item = source.messages.get(replyId)
+  if (!item) return { kind: 'refuse', reason: REFUSED.gone }
+  if (item.author.kind !== 'person') return { kind: 'refuse', reason: REFUSED.notPerson }
+  if (options.boundary !== undefined && options.boundary !== null) {
+    const at = parseTime(item.createdAt)
+    if (at === null) return { kind: 'refuse', reason: REFUSED.noTime }
+    if (at < options.boundary) return { kind: 'early' }
   }
+  if (options.roots && options.roots.length > 0 && (options.threadRoot === undefined || !options.roots.includes(options.threadRoot))) {
+    return { kind: 'refuse', reason: REFUSED.project }
+  }
+  const mine = (value: string | null): boolean => canonicalSession(value) === session
+  let current = item
+  const seen = new Set<string>()
+  for (let hop = 0; hop < MAX_HOPS; hop += 1) {
+    if (seen.has(current.id)) break
+    seen.add(current.id)
+    // An explicit addressee decides, whoever wrote the message.
+    if (current.to !== null) {
+      if (current.to.host === 'orca' && mine(current.to.session)) return { kind: 'deliver' }
+      break
+    }
+    // The first agent up the chain is the one that asked.
+    if (current.author.kind === 'agent') {
+      if (current.author.host === 'orca' && mine(current.author.session)) return { kind: 'deliver' }
+      break
+    }
+    const parent = current.replyTo === null ? undefined : source.messages.get(current.replyTo)
+    if (!parent) break
+    current = parent
+  }
+  return { kind: 'refuse', reason: REFUSED.recipient }
 }
 
 export class Courier {
@@ -31,14 +103,17 @@ export class Courier {
   private readonly orca: OrcaCli
   private readonly ledger: Ledger
   private readonly now: () => number
-  private readonly earlier: () => string | null
+  private readonly boundary: ((inboxKey: string) => number | null) | null
 
-  /** `earlier` names the sender of an adapter that delivered for this Inbox before and has stopped, if any. */
-  constructor(orca: OrcaCli, ledger: Ledger, now: () => number = Date.now, earlier: () => string | null = () => null) {
+  /**
+   * `boundary` gives the activation time for an Inbox: replies written before it are ignored, and
+   * while it returns null nothing is sent. Without it (tests of delivery alone) no time is checked.
+   */
+  constructor(orca: OrcaCli, ledger: Ledger, now: () => number = Date.now, boundary: ((inboxKey: string) => number | null) | null = null) {
     this.orca = orca
     this.ledger = ledger
     this.now = now
-    this.earlier = earlier
+    this.boundary = boundary
   }
 
   /** One session's deliveries run one at a time, so retries and restarts never overlap. */
@@ -57,37 +132,38 @@ export class Courier {
 
   private async step(inbox: InboxClient, route: Route, command: InboxCommand): Promise<Outcome> {
     const key = Ledger.key(inbox.key, command.id, route.session)
+    const fields = {
+      session: route.session,
+      replyId: command.id,
+      threadId: command.thread_id,
+      subject: typeof command.subject === 'string' ? command.subject : null
+    }
     let row = this.ledger.get(key)
+    let verified = false
     if (row === null) {
-      // The adapter that delivered here before may have put this very reply in the chat's mailbox and
-      // stopped before it told the Inbox. Its mail is then the delivery, and nothing is sent again.
-      // Read before anything is recorded: if Orca cannot say, this reply is looked at afresh next time.
-      const earlier = this.earlier()
-      const theirs = earlier
-        ? (await this.orca.mailbox(`orca_session_id:${route.session}`)).find(
-            (mail) => mail.from_handle === earlier && replyIdOf(mail.payload) === command.id
-          )
-        : undefined
+      // Nothing is recorded until the source is known: a thread that cannot be read now is read again next time.
+      const verdict = await this.verify(inbox, route, command)
+      if (verdict === null) return 'deferred'
+      if (verdict.kind === 'early') {
+        await this.ledger.ignore(key, fields)
+        return 'ignored'
+      }
+      if (verdict.kind === 'refuse') {
+        await this.ledger.reject(key, fields, verdict.reason)
+        return 'rejected'
+      }
+      verified = true
       try {
         const envelope = buildEnvelope(inbox.key, route.session, command)
-        row = await this.ledger.create(
-          key,
-          {
-            session: route.session,
-            replyId: command.id,
-            threadId: command.thread_id,
-            subject: typeof command.subject === 'string' ? command.subject : null
-          },
-          envelope,
-          theirs ? { message: theirs.id, mailbox: theirs.to_handle } : null
-        )
+        row = await this.ledger.create(key, fields, envelope)
       } catch (error) {
         if (!(error instanceof EnvelopeError)) throw error
-        await this.ledger.reject(key, { session: route.session, replyId: command.id }, error.message)
+        await this.ledger.reject(key, fields, error.message)
         return 'rejected'
       }
     }
     if (row.state === 'rejected') return 'rejected'
+    if (row.state === 'ignored') return 'ignored'
     if (row.state === 'acknowledged') {
       // The Inbox restarted before it saved the acknowledgement: tell it again.
       await this.acknowledge(inbox, route, command, key)
@@ -102,6 +178,20 @@ export class Courier {
       if (row.error !== AMBIGUOUS || this.now() - row.updated < RECONCILE_AFTER_MS) return 'blocked'
       // A late receipt can settle an earlier doubt. Only the reading branch below runs: never a second send.
       row = await this.ledger.update(key, { state: 'sending' })
+    }
+    if (row.state === 'prepared' && !verified) {
+      // Resumed after a restart, a deferral or a person's retry: the person may have deleted or
+      // redirected the reply meanwhile, so its source is checked again before anything is sent.
+      const verdict = await this.verify(inbox, route, command)
+      if (verdict === null) return 'deferred'
+      if (verdict.kind === 'early') {
+        await this.ledger.update(key, { state: 'ignored' })
+        return 'ignored'
+      }
+      if (verdict.kind === 'refuse') {
+        await this.ledger.update(key, { state: 'rejected', error: verdict.reason })
+        return 'rejected'
+      }
     }
     if (row.state === 'prepared') {
       row = await this.ledger.update(key, { state: 'sending' })
@@ -119,6 +209,30 @@ export class Courier {
     if (row.state === 'sending') row = await this.reconcile(key, row, envelope)
     if (row.state === 'accepted') return this.confirm(inbox, route, command, key, row)
     return row.state === 'blocked' ? 'blocked' : 'queued'
+  }
+
+  /**
+   * Reads the reply's thread and judges its source. Null means "not now": the Inbox cannot be read
+   * at the moment, or the activation boundary is not known yet; the reply is looked at again later
+   * and nothing is sent meanwhile. A thread the Inbox answers in an unknown shape throws, so the
+   * chat's poll says what is wrong; that is never a rejection either.
+   */
+  private async verify(inbox: InboxClient, route: Route, command: InboxCommand): Promise<Verdict | null> {
+    let boundary: number | null | undefined
+    if (this.boundary) {
+      boundary = this.boundary(inbox.key)
+      if (boundary === null) return null
+    }
+    let source: ThreadSource
+    try {
+      source = await inbox.thread(command.thread_id)
+    } catch (error) {
+      if (error instanceof InboxUnavailable) return null
+      if (error instanceof InboxRefused && error.status === 404) return { kind: 'refuse', reason: REFUSED.threadGone }
+      throw error
+    }
+    const roots = route.roots && route.roots.length > 0 ? await Promise.all(route.roots.map(realOrSelf)) : undefined
+    return judgeSource(source, command.id, route.session, { boundary, roots, threadRoot: await realOrSelf(isAbsolute(source.root) ? resolve(source.root) : source.root) })
   }
 
   private async reconcile(key: string, row: Delivery, envelope: NonNullable<Awaited<ReturnType<Ledger['envelope']>>>): Promise<Delivery> {

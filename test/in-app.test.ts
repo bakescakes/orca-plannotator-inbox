@@ -2,7 +2,9 @@
 // home installs this plugin the way a user would, opens a real native chat, and the installed
 // worker delivers a real Plannotator reply into it. Nothing here is a stand-in except the agent's
 // side of the conversation, which this test plays through the launcher (the chat's own agent is
-// not signed in inside a throwaway home, and does not need to be).
+// not signed in inside a throwaway home, and does not need to be). The launcher only acts for a chat
+// Orca itself vouches for, so it is run with the variables Orca really gave that chat's agent: the
+// `claude` on the throwaway PATH notes them down before it runs the real one.
 //
 // With ORCA_INAPP_CLI_BEFORE and/or PLANNOTATOR_E2E_BIN_BEFORE it is also an update test: the
 // older programs run first, then the newer ones take over the same profile and the same Inbox
@@ -15,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, realpath, symlink } from 'node:fs/promises'
+import { chmod, cp, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -33,6 +35,8 @@ const CLAUDE = text('PATH')
   .map((folder) => join(folder, 'claude'))
   .find((candidate) => existsSync(candidate))
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url))
+/** What Orca gives a native chat's agent, and Connect passes on to the launcher. */
+const CHAT_VARIABLES = ['ORCA_AGENT_SESSION_ID', 'ORCA_STRUCTURED_SESSION', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_USER_DATA_PATH', 'ORCA_CLI_COMMAND', 'ORCA_TERMINAL_HANDLE']
 const skip = !CLI || !BINARY ? 'set ORCA_INAPP_CLI and PLANNOTATOR_E2E_BIN to run' : !CLAUDE ? 'needs `claude` on PATH' : false
 
 type Answer = { ok: boolean; result?: Record<string, unknown>; error?: { code?: string; message?: string; data?: Record<string, unknown> } }
@@ -50,7 +54,29 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
   await mkdir(bin, { recursive: true })
   await mkdir(project, { recursive: true })
   await mkdir(copy, { recursive: true })
-  await symlink(CLAUDE!, join(bin, 'claude'))
+  // The chat's agent, as Orca starts it: note the chat's Orca variables, then be the real program.
+  const chatEnvDir = join(root, 'chat-env')
+  await mkdir(chatEnvDir, { recursive: true })
+  const quoted = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
+  await writeFile(
+    join(bin, 'claude'),
+    [
+      '#!/bin/sh',
+      'if [ -n "${ORCA_AGENT_SESSION_ID:-}" ]; then',
+      `  target=${quoted(chatEnvDir)}/"$ORCA_AGENT_SESSION_ID"`,
+      `  for name in ${CHAT_VARIABLES.join(' ')}; do eval "value=\\\${$name-}"; printf '%s=%s\\n' "$name" "$value"; done > "$target.$$.tmp" && mv "$target.$$.tmp" "$target"`,
+      'fi',
+      // Its own empty settings folder: the chat's agent is signed out here on every computer, so this
+      // test never talks to a model with someone's account, and runs the same everywhere.
+      `CLAUDE_CONFIG_DIR=${quoted(join(root, 'claude-config'))} exec ${quoted(await realpath(CLAUDE!))} "$@"`,
+      ''
+    ].join('\n')
+  )
+  await chmod(join(bin, 'claude'), 0o755)
+  // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
+  // (Homebrew's among them, where an installed `claude` may be), then what it inherited. So this
+  // folder is put first the way a person would do it, in the shell's own profile.
+  for (const name of ['.zprofile', '.zshrc', '.bash_profile', '.profile']) await writeFile(join(home, name), `export PATH=${quoted(bin)}:"$PATH"\n`)
   // What a published repository holds: no node_modules, no generated typings.
   for (const name of ['orca-plugin.json', 'package.json', 'README.md', 'src', 'bin']) await cp(join(PLUGIN, name), join(copy, name), { recursive: true })
 
@@ -115,7 +141,15 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       const session = outcome.sessionId as string
 
       // The agent's side: the launcher exactly as the chat's agent would run it.
-      agent = spawn(join(shared, 'inbox-mcp'), [], { cwd: project, env: { ...plannotatorEnv, PLANNOTATOR_BIN: plannotator, ORCA_AGENT_SESSION_ID: session, ORCA_STRUCTURED_SESSION: '1' }, stdio: ['pipe', 'pipe', 'pipe'] })
+      await until(() => existsSync(join(chatEnvDir, session)), 'Orca to start the chat’s agent', 60_000)
+      const chatEnv: Record<string, string> = {}
+      for (const line of (await readFile(join(chatEnvDir, session), 'utf8')).split('\n')) {
+        const at = line.indexOf('=')
+        if (at > 0 && line.slice(at + 1) !== '') chatEnv[line.slice(0, at)] = line.slice(at + 1)
+      }
+      assert.equal(chatEnv.ORCA_AGENT_SESSION_ID, session)
+      assert.ok(chatEnv.ORCA_CLI_COMMAND, `Orca names its CLI to a chat: ${Object.keys(chatEnv).join(', ')}`)
+      agent = spawn(join(shared, 'inbox-mcp'), [], { cwd: project, env: { ...plannotatorEnv, PLANNOTATOR_BIN: plannotator, ...chatEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
       const mcp = mcpClient(agent as never)
       const hello = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-plannotator-inapp', version: '0' } })
       assert.match(String(hello.instructions), /In this Orca chat you are already connected/)
@@ -166,10 +200,29 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
         'the acknowledgement',
         30_000
       )
-      return `Orca ${version}, Plannotator ${health.version}`
+
+      // The message the chat sent ends with a signed link, and that link opens the chat in this Orca.
+      const thread = await (await fetch(`${origin}/api/inbox/threads/${messageId}`)).text()
+      const link = /\[Open in Orca\]\((http:\/\/127\.0\.0\.1:(\d+)\/open\/([A-Za-z0-9_.-]+))\)/.exec(thread)
+      assert.ok(link, `the sent message carries an Open in Orca link: ${thread.slice(0, 600)}`)
+      const [, address, port, token] = link
+      const preview = await fetch(address!)
+      assert.equal(preview.status, 200)
+      assert.match(await preview.text(), /<form/, 'a fetch that is not a click only gets the button')
+      const clicked = await fetch(`http://127.0.0.1:${port}/open`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: `http://127.0.0.1:${port}` },
+        body: `token=${encodeURIComponent(token!)}`
+      })
+      const page = await clicked.text()
+      assert.equal(clicked.status, 200, page)
+      const how = /Opened the chat/.test(page) ? 'the chat tab' : 'the workspace'
+      return `Orca ${version}, Plannotator ${health.version} (link opened ${how})`
     } catch (error) {
       const logs = await run(cli, ['plugin', 'logs', 'local.plannotator-inbox', '--json'])
-      process.stderr.write(`second Orca said:\n${serveLog.slice(-2000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\n`)
+      const seen = await readdir(chatEnvDir).catch(() => [] as string[])
+      const agentSays = await run(join(bin, 'claude'), ['--version'])
+      process.stderr.write(`second Orca said:\n${serveLog.slice(-12_000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\nchats whose agent started: ${JSON.stringify(seen)}\nthe agent program (${await realpath(CLAUDE!)}) says: ${agentSays.trim() || 'nothing'}\n`)
       throw error
     } finally {
       agent?.stdin?.end()
