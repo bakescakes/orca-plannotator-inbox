@@ -137,8 +137,9 @@ a checksum for each file.
   reach your chats. The panel says "Plannotator 0.28.67 is in use. Its Orca build is not published
   yet, so the Orca additions (Start, Stop and Open in Orca from the Inbox, and per-agent icons) are
   missing until it is; the Inbox moves to it by itself.", the worker looks every 15 minutes, and
-  when the build arrives the Inbox restarts on it. CI builds a new release within about 15 minutes
-  of Plannotator publishing it. An Orca build that cannot be downloaded or fails its checks is
+  when the build arrives the Inbox restarts on it. CI looks for a new Plannotator release
+  four times an hour, but GitHub starts scheduled runs when it has room: on this repository they
+  have come hours apart, so the build of a new release can take that long. An Orca build that cannot be downloaded or fails its checks is
   treated the same way, with the reason shown. A failed download is tried again every 15 minutes; a
   build that fails its checks is left alone for six hours (then longer) unless you press **Check
   for a new build** in the panel, and a newer build of the release is taken at once.
@@ -309,7 +310,7 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   in question. Where Orca cannot do one of them, the Inbox says so and nothing is sent.
 - The Orca build is downloaded from this repository's GitHub releases only. Without a connection
   the build already installed (or your own Plannotator) stays in use.
-- For the minutes between a Plannotator release and its Orca build, an Inbox you update runs
+- Between a Plannotator release and its Orca build (minutes to hours), an Inbox you update runs
   standard Plannotator: Start, Stop and Open in Orca are missing from the Inbox and per-agent icons
   are not shown. Both are back when the Inbox restarts on the Orca build.
 - The **Update** button reaches Plannotator's own updater only for a `plannotator` installed by

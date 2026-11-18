@@ -6,7 +6,9 @@
 # already made from this recipe (recipe.json and build.mjs: `node plannotator/build.mjs --recipe-hash`, recorded in
 # each manifest.json). A build with no recipe recorded counts as another recipe. So one version and recipe is never
 # published twice, a new release gets its first build, and a recipe change (a fixed patch) gets orca.<n+1>.
-# - every 15 minutes: a run with nothing to do stops in the first job, quietly. A version whose build failed is tried
+# - four times an hour, off the busy minutes (GitHub starts scheduled runs when it has room: on this repository they
+#   have come hours apart, so a new release's build can take that long): a run with nothing to do stops in the first
+#   job, quietly. A version whose build failed is tried
 #   again once a day (its open issue says when it last failed). The schedule also catches a push whose own run was
 #   dropped while another run held the concurrency group.
 # - on a push to main that changes plannotator/**, and by hand: at once.
@@ -35,7 +37,7 @@ name: Orca build of Plannotator
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,22,37,52 * * * *"
   push:
     branches: [main]
     paths: ["plannotator/**"]

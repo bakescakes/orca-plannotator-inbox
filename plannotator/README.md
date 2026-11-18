@@ -144,7 +144,8 @@ After changing a file here, update its sha256 in `recipe.json`. After changing a
 `.github/workflows/orca-build.yml` builds the newest stable Plannotator release for every target. It publishes
 `plannotator-<version>-orca.<n>` and points the `plannotator-orca-index` release at it.
 
-- It looks every 15 minutes, on each push to `main` that changes this folder, and when run by hand.
+- It looks four times an hour (GitHub may start those runs hours late), on each push to `main` that changes this
+  folder, and when run by hand.
 - It builds a version unless one of that version's builds was made from the same recipe. So a new release gets its
   first build, and a fixed patch gets a new `orca.<n+1>`. The same version and recipe is never published twice.
 - A run with nothing to do stops after its first job.
