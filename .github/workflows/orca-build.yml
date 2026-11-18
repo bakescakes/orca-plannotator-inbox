@@ -18,8 +18,10 @@
 # the last good build.
 #
 # Issues: a reduced or failed build opens one issue naming the version, the patch or gate, and the first error line.
-# Only issues this workflow opened itself count (author github-actions): an issue anyone else writes, whatever its
-# text, never delays a build and is never commented on or closed.
+# Only issues this workflow opened itself count: an issue anyone else writes, whatever its text, never delays a build
+# and is never commented on or closed. The list is asked for by author (`github-actions[bot]`, the name the search
+# takes), so other people's issues cannot crowd these out of the 200 it returns, and each one's author is checked
+# again on what comes back (there the same author reads `app/github-actions`).
 # The same version and cause never opens a second one, and gets at most one comment a day. A later full build of that
 # version or a newer one closes it.
 #
@@ -107,8 +109,8 @@ jobs:
           # On the schedule, a failed build of this version is tried again once a day: its open issue was updated less
           # than a day ago. A push or a run by hand tries at once.
           if [ "$skip" != true ] && [ "$EVENT" = schedule ]; then
-            recent="$(gh issue list --repo "$GITHUB_REPOSITORY" --author app/github-actions --state open --limit 200 --json author,body,updatedAt \
-              --jq "[.[] | select(.author.is_bot == true) | select(.body | contains(\"<!-- orca-build version=$version \") and contains(\" kind=failed \"))
+            recent="$(gh issue list --repo "$GITHUB_REPOSITORY" --author "github-actions[bot]" --state open --limit 200 --json author,body,updatedAt \
+              --jq "[.[] | select(.author.is_bot == true and .author.login == \"app/github-actions\") | select(.body | contains(\"<!-- orca-build version=$version \") and contains(\" kind=failed \"))
                      | select((now - (.updatedAt | fromdateiso8601)) < 86400)] | length" 2> /dev/null || echo 0)"
             if [ "$recent" -gt 0 ]; then skip=true; why="failed less than a day ago; tried again daily, on a push or by hand"; fi
           fi
@@ -328,8 +330,8 @@ jobs:
           kind="$(node -p 'JSON.parse(process.argv[1]).kind' "$verdict")"
           cause="$(node -p 'JSON.parse(process.argv[1]).cause ?? ""' "$verdict")"
           line="$(node -p 'JSON.parse(process.argv[1]).line' "$verdict")"
-          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --author app/github-actions --state open --limit 200 --json author,number,body,updatedAt \
-            --jq '[.[] | select(.author.is_bot == true) | select(.body | contains("<!-- orca-build version="))]')"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --author "github-actions[bot]" --state open --limit 200 --json author,number,body,updatedAt \
+            --jq '[.[] | select(.author.is_bot == true and .author.login == "app/github-actions") | select(.body | contains("<!-- orca-build version="))]')"
           case "$kind" in
             full)
               # Close every open build issue of this version or an older one.
