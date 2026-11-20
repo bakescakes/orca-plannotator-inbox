@@ -265,6 +265,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     log: (message) => orca.log(message),
     owned: () => [...owned.values()],
     gate: (session, reply) => (bridge ? bridge.lifecycle.deliveryAllowed(session, reply) : Promise.resolve(true)),
+    exclusive: (session, task) => (bridge ? bridge.lifecycle.exclusive(session, task) : task()),
     onStatus: (status) => {
       publish(whole(status))
       void notifyNewlyBlocked(status).catch(() => undefined)
@@ -432,7 +433,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
             cli: cliNow,
             store,
             status: () => engine.status(),
-            deliveryState: (session, launch) => engine.deliveryState(session, launch.replyId ?? launch.messageId),
+            deliveryState: (session, launch) => engine.launchDeliveryState(session, launch),
             register: (chat) => {
               owned.set(chat.session, chat)
               void engine.refresh().catch(() => undefined)

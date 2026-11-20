@@ -957,6 +957,15 @@ export class Lifecycle {
   // Delivery
 
   /**
+   * Runs `task` for this chat with no Stop, Resume or Open for it running meanwhile. The courier
+   * runs a reply's `deliveryAllowed` check and its send in here, so a Stop pressed while a reply is
+   * prepared waits for that send, and every reply checked after it is held. Other chats are not held up.
+   */
+  exclusive<T>(session: string, task: () => Promise<T>): Promise<T> {
+    return this.perSession.run(session, task)
+  }
+
+  /**
    * Whether a reply may be delivered to this chat now. A chat no launch owns is not this
    * module's to judge (true). An owned chat that is stopped receives only a person's reply
    * written after the Stop, which also resumes it; older replies are held in the Inbox until it
