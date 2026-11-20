@@ -288,6 +288,38 @@ test('a Stop pressed while a reply is being prepared waits for it, and nothing r
   }
 })
 
+test('a reply that waited behind another action is not sent once its chat is no longer listened for', async () => {
+  // The per-chat step is busy (a Resume or an Open holds it) while the reply waits its turn.
+  let release!: () => void
+  const busy = new Promise<void>((resolve) => (release = resolve))
+  let waiting = 0
+  const t = await setup({
+    deps: () => ({
+      exclusive: async (_session, task) => {
+        waiting += 1
+        await busy
+        return task()
+      }
+    })
+  })
+  t.inbox.state.queue.set(SESSION, [reply('msg_late')])
+  t.engine.start()
+  try {
+    await until(() => waiting === 1, 'the reply waiting for its chat’s turn')
+    // Delivery ends for the chat while the reply still waits.
+    const stopping = t.engine.stop()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release()
+    await stopping
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(t.orca.sends().length, 0, 'nothing is sent for a route that was stopped while the reply waited')
+    assert.equal(t.inbox.state.acknowledged.length, 0, 'and nothing is acknowledged')
+  } finally {
+    release()
+    await t.engine.stop()
+  }
+})
+
 test('a Stop on one chat does not wait for a delivery to another', async () => {
   const lifeOrca = fakeLifecycleOrca()
   const native = fakeNative(lifeOrca)

@@ -571,10 +571,13 @@ export class Engine {
           // A chat a person stopped from the Inbox takes nothing until they write again or resume it.
           // The check and the send are one step with Stop for this chat (`exclusive`), never the long poll.
           const gated = async (): Promise<Outcome | null> => {
+            // It may have waited here behind a Resume or an Open; a route stopped meanwhile begins no delivery.
+            if (signal.aborted) return null
             if (this.deps.gate && !(await this.deps.gate(route.session, { id: command.id, threadId: command.thread_id }).catch(() => false))) return null
             return courier.deliver(inbox, { session: route.session, raw: route.raw, roots: route.roots }, command)
           }
           const outcome = this.deps.exclusive ? await this.deps.exclusive(route.session, gated) : await gated()
+          if (signal.aborted) return
           if (outcome === null) {
             pause = Math.max(pause, 15_000)
             continue
