@@ -1,13 +1,13 @@
 diff --git a/packages/inbox/components/RunLine.tsx b/packages/inbox/components/RunLine.tsx
-index 4d0a6f603..1517a347f 100644
+index cc4e8ccec..62bc69efe 100644
 --- a/packages/inbox/components/RunLine.tsx
 +++ b/packages/inbox/components/RunLine.tsx
-@@ -90,3 +90,3 @@ export function RunLine({
-     } catch (cause) {
+@@ -98,3 +98,3 @@ export function RunLine({
+       }
 -      setError(cause instanceof InboxApiError ? cause.message : what === 'open' ? 'Terminal did not open; copy the command instead.' : 'That did not work; try again.');
 +      setError(cause instanceof InboxApiError ? cause.message : what === 'open' ? (run.open_in === 'orca' ? 'Orca did not open the chat; it is still there.' : 'Terminal did not open; copy the command instead.') : 'That did not work; try again.');
        // The folder changed since this line was read: draw the new warning for the next click.
-@@ -123,3 +123,3 @@ export function RunLine({
+@@ -131,3 +131,3 @@ export function RunLine({
        <Icon name="terminal" size={14} />
 -      Open in Terminal
 +      {run.open_in === 'orca' ? 'Open in Orca' : 'Open in Terminal'}
@@ -78,10 +78,10 @@ index e716d6975..bde3a1e6c 100644
 +  const command = orcaMcpCommand(options.dataDir, [...options.selfCommand, "inbox", "mcp"], options);
    if (way.kind === "none") return { kind: "none" };
 diff --git a/packages/server/inbox.ts b/packages/server/inbox.ts
-index 90a515f39..e5beccbc4 100644
+index 79fefe60f..3448c5f3e 100644
 --- a/packages/server/inbox.ts
 +++ b/packages/server/inbox.ts
-@@ -408,3 +408,6 @@ import {
+@@ -429,3 +429,6 @@ import {
   */
 -const BRIDGE_WAKING_HOSTS: ReadonlySet<string> = new Set(INBOX_WAKING_HOSTS.filter((host) => !INBOX_MCP_WAKING_HOSTS.includes(host)));
 +const BRIDGE_WAKING_HOSTS: ReadonlySet<string> = new Set([...INBOX_WAKING_HOSTS.filter((host) => !INBOX_MCP_WAKING_HOSTS.includes(host)), ...(orcaMode() ? ["orca"] : [])]);
@@ -89,30 +89,30 @@ index 90a515f39..e5beccbc4 100644
 +import { createOrcaSurface, orcaMcpCommand } from "./inbox-orca-surface";
 +import { orcaAgentsRoute } from "./inbox-orca-agents";
  
-@@ -1702,3 +1705,5 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+@@ -1907,3 +1910,5 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     */
 -  const projectFolders = (rows?: readonly InboxListRow[]) => {
-+  const orcaSurface = createOrcaSurface(dataDir, store, version, { updates, autoOn: () => resolveAutoUpdate(loadConfig()) && resolveUpdateCheck(loadConfig()), onChange: () => { for (const listener of deliveryListeners) listener(false, true, false, true); }, onUpdateChange: () => { for (const listener of statusListeners) listener(); } });
++  const orcaSurface = createOrcaSurface(dataDir, store, version, { updates, autoOn: () => resolveAutoUpdate(loadConfig()) && resolveUpdateCheck(loadConfig()), onChange: () => { for (const listener of deliveryListeners) listener(false, true, false, true); }, onUpdateChange: () => { if (statusListeners.size === 0) return; const restartAgents = live.restartAgents(); for (const listener of statusListeners) listener(restartAgents); } });
 +  const projectFolders = (rows?: readonly InboxListRow[]) => orcaSurface.markImported(stockProjectFolders(rows));
 +  const stockProjectFolders = (rows?: readonly InboxListRow[]) => {
      const byThread = snoozesById();
-@@ -3673,3 +3678,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+@@ -3977,3 +3982,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
      /** The stdio MCP entry as argv: `<this CLI> inbox mcp`. */
 -    mcp_command: [...selfCommand, "inbox", "mcp"],
 +    mcp_command: orcaMcpCommand(dataDir, [...selfCommand, "inbox", "mcp"]),
      home: homedir(),
-@@ -4751,3 +4756,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+@@ -5169,3 +5174,3 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
      selfCommand,
 -    hosts: options.launchHosts,
 +    hosts: options.launchHosts ?? createOrcaLaunchHosts,
    });
-@@ -5405,2 +5410,4 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+@@ -5872,2 +5877,4 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
        }
 +      // The Orca plugin: connect, move and disconnect the agents for Orca (inbox-orca-agents.ts; 404 outside Orca mode).
 +      if (path === "/api/inbox/control/orca-agents") return orcaAgentsRoute(req, { json, dataDir, selfCommand, environment: agentEnvironment, connectAgents });
        // `plannotator inbox --open <thread>`: the window on this computer the person used last shows the thread,
-@@ -5473,2 +5480,4 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
+@@ -5940,2 +5947,4 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
        }
 +      const orcaAnswer = await orcaSurface.route(req, path, { json, crossSite: crossSiteCardRead });
 +      if (orcaAnswer) return orcaAnswer;
-       if (path === "/api/inbox/health" && req.method === "GET") return json(health());
+       if (path === "/api/inbox/health" && req.method === "GET") {

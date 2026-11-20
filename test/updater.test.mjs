@@ -776,6 +776,21 @@ test('--restart moves a stock Inbox onto the installed build in Orca mode', { sk
   }
 })
 
+test('--restart where Plannotator has the Inbox off says so, and starts nothing', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await b.run()
+    // Never ran here: no mark and no inbox.json. Plannotator's own `inbox restart` would refuse.
+    const result = await restartInbox({ shared: b.shared, env: b.env, home: b.home })
+    assert.deepEqual([result.ok, result.detail], [false, 'The Inbox is off on this computer, so it was not restarted. Open Inbox turns it on.'])
+    assert.equal(existsSync(join(b.data, 'inbox', 'inbox.json')), false, 'nothing started')
+  } finally {
+    await server.close()
+  }
+})
+
 // --- With a real Plannotator ---------------------------------------------------------------------
 
 test(
@@ -794,7 +809,8 @@ test(
     const version = (await runProgram(stock, ['--version'], env)).stdout.match(/\d+\.\d+\.\d+/)[0]
     server.publish({ version, build: 'orca.1', bytes })
     try {
-      assert.equal((await runProgram(stock, ['inbox', '--background'], env)).code, 0)
+      // A person's start: from 0.29.1 it turns the Inbox on, and `--background` and `inbox call` refuse until one has.
+      assert.equal((await runProgram(stock, ['inbox', '--open'], env)).code, 0)
       const kept = await runProgram(stock, ['inbox', 'call', '--session', 'e2e-session', 'send_message', JSON.stringify({ body: 'Kept across the update', project_path: root })], env)
       assert.equal(kept.code, 0, kept.stderr)
       const before = await b.health()

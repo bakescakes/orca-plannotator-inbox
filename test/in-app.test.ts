@@ -129,6 +129,9 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
         const installed = await orca('plugin', 'install', copy, '--approve', String(asked.error?.data?.approvalFingerprint))
         assert.equal(installed.ok, true, JSON.stringify(installed).slice(0, 600))
         assert.equal((await orca('repo', 'add', '--path', project, '--kind', 'git')).ok, true)
+        // The person's one setup step: from 0.29.1 the Inbox is off, with no tools for any chat, until a person
+        // runs `plannotator inbox` once. It stays on across the update (its data folder says it ran).
+        await run(plannotator, ['inbox', '--open'], { env: plannotatorEnv })
       }
 
       // The worker starts by itself with Orca, writes the launcher for this Orca and says it can deliver.

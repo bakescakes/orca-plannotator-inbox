@@ -85,6 +85,9 @@ test('live agent: a signed-in Orca chat asks, is answered, is woken by the reply
     await mkdir(join(WORKTREE, '.claude'), { recursive: true })
     await writeFile(mcpFile, `${JSON.stringify({ mcpServers: { [SERVER]: { type: 'stdio', command: launcherPath(shared), args: [], env: { ...plannotatorEnv, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared } } } }, null, 2)}\n`)
     await writeFile(settingsFile, `${JSON.stringify({ enableAllProjectMcpServers: true, permissions: { allow: [TOOL] } }, null, 2)}\n`)
+    // The person's one setup step: from 0.29.1 the Inbox is off, with no tools for any chat, until a person
+    // runs `plannotator inbox` once.
+    await new Promise<void>((resolve, reject) => execFile(BINARY, ['inbox', '--open'], { env: plannotatorEnv as NodeJS.ProcessEnv, timeout: 60_000 }, (error) => (error ? reject(error) : resolve())))
     engine.start()
     await until(async () => existsSync(join(shared, 'state.json')) && JSON.parse(await readFile(join(shared, 'state.json'), 'utf8')).delivering === true, 'the engine to say it delivers', 30_000)
 
@@ -99,7 +102,7 @@ test('live agent: a signed-in Orca chat asks, is answered, is woken by the reply
     assert.ok(isRecord(outcome) && outcome.kind === 'structured' && typeof outcome.sessionId === 'string', JSON.stringify(launched).slice(0, 600))
     const session = canonicalSession(outcome.sessionId as string)!
 
-    // The agent's first message starts the throwaway Inbox and makes the chat known.
+    // The agent's first message reaches the throwaway Inbox and makes the chat known.
     await until(() => engine.status().sessions.some((chat) => chat.session === session), 'the agent’s first Inbox message', 240_000)
     const registry = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number; token: string }
     const origin = `http://127.0.0.1:${registry.port}`

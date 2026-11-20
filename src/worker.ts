@@ -9,7 +9,7 @@ import { bridgeConfigPath, startBridge, type Bridge, type BridgeConfig, type Bri
 import { BuildStore, installUpdater, pluginVersion, type BuildStoreDeps } from './build-store'
 import { agentLinks, allAgentLinks, connectAllAgents, disconnectAllAgents, type ConnectDeps } from './connect'
 import { Engine, type EngineDeps, type EngineSettings, type EngineStatus } from './engine'
-import { InboxClient } from './inbox'
+import { InboxClient, inboxTurnedOn } from './inbox'
 import type { KeyValue } from './ledger'
 import type { OwnedSession } from './lifecycle'
 import { resolveDataDir, sharedDir, type Env } from './paths'
@@ -340,13 +340,29 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
       ? { ok: true, message: `Using the Orca build of Plannotator ${done.version} (${done.build}).` }
       : { ok: true, message: 'No Orca build is installed.' }
   }
+  /**
+   * Connect is the person choosing to use the Inbox. Where Plannotator has it off (never run here),
+   * a connected chat would list no tools, so Connect first turns it on the one way Plannotator offers:
+   * its own setup step, `plannotator inbox --open` (Open Inbox), which writes Plannotator's mark,
+   * starts the Inbox and opens it. Nothing else in this plugin turns the Inbox on.
+   */
+  const turnOnFirst = async (): Promise<ActionResult | null> => {
+    const resolved = resolveDataDir((await settings()).dataDir, runtime.env, runtime.home)
+    if (await inboxTurnedOn(resolved)) return null
+    const opened = await open()
+    return opened.ok
+      ? { ok: true, message: `The Inbox was off on this computer, so Plannotator turned it on. ${opened.message.replace(/\.$/, '')}.` }
+      : { ok: false, message: `The Inbox is off on this computer and was not turned on: ${opened.message}` }
+  }
   const connect = async (action: typeof connectAllAgents, agent?: OwnAgentId): Promise<ActionResult> => {
     let result: ActionResult
+    const turnedOn = action === connectAllAgents ? await turnOnFirst().catch((error: unknown) => ({ ok: false, message: errorText(error) })) : null
     try {
       result = await action(connectDeps, await inboxNow(), { agent, known: agents })
     } catch (error) {
       result = { ok: false, message: errorText(error) }
     }
+    if (turnedOn) result = { ok: result.ok && turnedOn.ok, message: `${turnedOn.message} ${result.message}` }
     await refreshAgents()
     publish(whole(engine.status()))
     return result

@@ -100,7 +100,7 @@ The config file must be owner-only JSON:
 ## Build
 
 ```sh
-node build.mjs --version 0.28.67 --target darwin-arm64 --out dist/plannotator-orca-darwin-arm64
+node build.mjs --version 0.29.1 --target darwin-arm64 --out dist/plannotator-orca-darwin-arm64
 ```
 
 Targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`.
