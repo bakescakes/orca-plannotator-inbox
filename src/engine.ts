@@ -104,6 +104,11 @@ export type EngineDeps = {
   owned?: () => ReadonlyArray<{ session: string; launchId: string; inboxKey: string; project: string; folder: string; agentType?: string | null }>
   /** Whether a reply may go to a chat now: false holds it in the Inbox (a chat a person stopped). */
   gate?: (session: string, reply: { id: string; threadId: string }) => Promise<boolean>
+  /**
+   * Runs one reply's gate and delivery for a chat as one step with that chat's Stop, so a Stop
+   * either waits for a reply already let through or holds it; never a send after the Stop.
+   */
+  exclusive?: <T>(session: string, task: () => Promise<T>) => Promise<T>
 }
 
 type RouteState = {
@@ -206,6 +211,19 @@ export class Engine {
     if (!this.inbox || !this.ledgerLoaded) return 'unknown'
     const row = this.ledger.get(Ledger.key(this.inbox.key, id, session))
     return row?.state === 'acknowledged' ? 'acknowledged' : row?.state === 'accepted' ? 'queued' : 'unknown'
+  }
+
+  /**
+   * The Orca build's delivery check for a chat the Inbox started (Resume with `deliver: true`).
+   * With `replyId`, that one reply. Without it (published Orca builds do not name the reply) the
+   * reply being delivered is not known, so it is never reported delivered: the launch message's
+   * receipt says nothing about a later reply. While this chat is listened for it is `queued`,
+   * held in the Inbox for the courier, which takes it from there; otherwise `unknown`.
+   */
+  launchDeliveryState(session: string, launch: { replyId: string | null }): 'acknowledged' | 'queued' | 'unknown' {
+    if (launch.replyId !== null) return this.deliveryState(session, launch.replyId)
+    if (!this.inbox || !this.ledgerLoaded) return 'unknown'
+    return [...this.routes.values()].some((route) => route.session === session && route.listening) ? 'queued' : 'unknown'
   }
 
   async retry(key: string): Promise<boolean> {
@@ -549,12 +567,21 @@ export class Engine {
         route.note = invalid > 0 ? `${invalid} item(s) from the Inbox could not be read and were left there.` : null
         for (const command of commands) {
           if (signal.aborted) return
+          const courier = this.courier!
           // A chat a person stopped from the Inbox takes nothing until they write again or resume it.
-          if (this.deps.gate && !(await this.deps.gate(route.session, { id: command.id, threadId: command.thread_id }).catch(() => false))) {
+          // The check and the send are one step with Stop for this chat (`exclusive`), never the long poll.
+          const gated = async (): Promise<Outcome | null> => {
+            // It may have waited here behind a Resume or an Open; a route stopped meanwhile begins no delivery.
+            if (signal.aborted) return null
+            if (this.deps.gate && !(await this.deps.gate(route.session, { id: command.id, threadId: command.thread_id }).catch(() => false))) return null
+            return courier.deliver(inbox, { session: route.session, raw: route.raw, roots: route.roots }, command)
+          }
+          const outcome = this.deps.exclusive ? await this.deps.exclusive(route.session, gated) : await gated()
+          if (signal.aborted) return
+          if (outcome === null) {
             pause = Math.max(pause, 15_000)
             continue
           }
-          const outcome: Outcome = await this.courier!.deliver(inbox, { session: route.session, raw: route.raw, roots: route.roots }, command)
           // The Inbox hands an unacknowledged reply back on every poll; wait before asking again.
           // A busy chat takes its mail when its turn ends: look again soon at first, then less often.
           if (outcome === 'queued') pause = Math.max(pause, Math.min(15_000, 2000 * (waiting + 1)))
