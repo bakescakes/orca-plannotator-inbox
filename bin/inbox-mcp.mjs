@@ -832,11 +832,16 @@ export const ORCA_NOTE = [
   'Send Inbox messages with these tools, not with the `plannotator` command line, which does not know this chat.'
 ].join(' ')
 
-/** Appends the Orca note to an `initialize` answer, in place. Returns whether it changed. */
+/**
+ * Appends the Orca note to an `initialize` answer, in place. Returns whether it changed. An answer
+ * with no instructions of its own is left alone: Plannotator gives none while the Inbox is off on
+ * this computer, and then lists no tools, so "send your message with these tools" would be false.
+ */
 export function annotate(message) {
   if (!isRecord(message.result)) return false
   const own = typeof message.result.instructions === 'string' ? message.result.instructions.trimEnd() : ''
-  message.result.instructions = own ? `${own}\n\n${ORCA_NOTE}` : ORCA_NOTE
+  if (!own) return false
+  message.result.instructions = `${own}\n\n${ORCA_NOTE}`
   return true
 }
 

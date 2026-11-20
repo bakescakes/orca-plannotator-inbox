@@ -16,7 +16,7 @@ come back to the chat that asked.
 
 ## Install
 
-You need Orca 1.4.248 or later and Plannotator (`plannotator inbox` run once).
+You need Orca 1.4.248 or later and Plannotator.
 
 ```sh
 orca plugin install bakescakes/orca-plannotator-inbox
@@ -33,6 +33,10 @@ Then, in Orca:
    there. An entry that ran Plannotator directly keeps its environment settings (such as
    `PLANNOTATOR_DATA_DIR`) and its binary, so the same Plannotator and the same Inbox are used.
    See [Which agents are connected](#which-agents-are-connected).
+   From Plannotator 0.29.1 the Inbox is off on a computer where it never ran, and chats see none of
+   its tools until a person starts it. Pressing **Connect agents** is that choice: where the Inbox
+   is off, Connect first has Plannotator turn it on with its own setup step, `plannotator inbox
+   --open`, which starts the Inbox and opens its window. Nothing else in the plugin turns it on.
 3. Start a new chat. Connections apply to chats started afterwards.
 
 The status bar shows an **Inbox** item; pressing it opens the Inbox window.
@@ -182,7 +186,7 @@ Plannotator's connector does not do for them:
 The panel lists these three, then every other agent Plannotator found on this computer. It reads
 that list from the running Inbox when you press **Refresh** and after a connect, never on a
 timer. While the Inbox is not running, Connect does the three and says the others are connected
-once the Inbox runs.
+once the Inbox runs (where the Inbox is off, Connect turns it on first, so it is running).
 
 **With standard Plannotator** (the Orca build switched off), Connect still does the three, then
 asks Plannotator to connect the others its own way. Those entries run Plannotator directly:

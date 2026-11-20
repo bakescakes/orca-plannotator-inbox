@@ -1,43 +1,43 @@
 diff --git a/packages/server/inbox-launch.ts b/packages/server/inbox-launch.ts
-index cc2e5736c..ebf1f25e6 100644
+index 04e304cf8..8b803f9c5 100644
 --- a/packages/server/inbox-launch.ts
 +++ b/packages/server/inbox-launch.ts
-@@ -626,3 +626,4 @@ export function createInboxLaunch(options: {
+@@ -664,3 +664,4 @@ export function createInboxLaunch(options: {
    /** The run line of a launched root; null for an agent with no host here. */
 -  const runOfRoot = (root: InboxMessage): InboxRun | null => {
 +  const runOfRoot = (root: InboxMessage): InboxRun | null => { const run = hostRunOfRoot(root), via = hostOf(root.launch!)?.routeHost; return run && via ? { ...run, open_in: via } : run; };
 +  const hostRunOfRoot = (root: InboxMessage): InboxRun | null => {
      const launch = root.launch!;
-@@ -818,3 +819,3 @@ export function createInboxLaunch(options: {
-       const name = head.thread_name ?? head.subject ?? "Inbox";
--      const result = await host.start(launch, { name, login });
-+      const result = await host.start(launch, { name, login, source: { messageId: root.id, threadId: root.thread_id }, reconcile: again });
-       // Deleted while it started: the session it made goes too, and the thread stays as the person left it.
-@@ -830,3 +831,3 @@ export function createInboxLaunch(options: {
+@@ -920,3 +921,3 @@ export function createInboxLaunch(options: {
+       const viaRex = asked && !("away" in asked) ? asked : null;
+-      const result = viaRex ?? (await host.start(launch, { name, login }));
++      const result = viaRex ?? (await host.start(launch, { name, login, source: { messageId: root.id, threadId: root.thread_id }, reconcile: again }));
+       // Rex not here, or it said no: it started in the background, and the line says why.
+@@ -934,3 +935,3 @@ export function createInboxLaunch(options: {
        }
--      if (result.ok) store.settleLaunch(root.id, { to: { host: launch.agent, session: result.session }, session_ref: result.ref });
-+      if (result.ok) store.settleLaunch(root.id, { to: { host: host.routeHost ?? launch.agent, session: result.session }, session_ref: result.ref });
-       else store.settleLaunch(root.id, { error: { code: result.code, text: result.text, at: new Date(now()).toISOString() } });
-@@ -1150,2 +1151,3 @@ ${result.text}`);
+-      if (result.ok) store.settleLaunch(root.id, { to: { host: launch.agent, session: result.session }, session_ref: result.ref, ...(rex ? { rex } : {}) });
++      if (result.ok) store.settleLaunch(root.id, { to: { host: host.routeHost ?? launch.agent, session: result.session }, session_ref: result.ref, ...(rex ? { rex } : {}) });
+       else store.settleLaunch(root.id, { error: { code: result.code, text: result.text, at: new Date(now()).toISOString() }, ...(rex ? { rex } : {}) });
+@@ -1440,2 +1441,3 @@ ${result.text}`);
      startLog(launch.id, `stop ${launch.session_ref}: exit ${result.exitCode}\n${result.text}`);
 +    if (host.routeHost && result.exitCode !== 0) { memo.heldReply = null; throw new InboxError("stop_unavailable", result.text.slice(0, 300)); } // Refused: the chat still runs, and the run line says why.
      memo.stoppedAt = now();
-@@ -1405,2 +1407,3 @@ ${result.text}`);
+@@ -1720,2 +1722,3 @@ ${result.text}`);
          if (via === "tailnet") return localOnly();
 +        if (host.open) { const answer = await host.open(launch); if (answer.exitCode !== 0) throw new InboxError("open_unavailable", answer.text.slice(0, 300)); return json({ ok: true, openedIn: host.routeHost ?? host.agent }); }
-         const e = await environment();
-@@ -1869,3 +1872,3 @@ ${result.text}`);
+         // In Rex its tab is the way in: Terminal would run a second copy (or a command that fails).
+@@ -2207,3 +2210,3 @@ ${result.text}`);
        }
 -      return { project, to: { host: host.agent, session: `launch:${id}` }, launch, trust };
 +      return { project, to: { host: host.routeHost ?? host.agent, session: `launch:${id}` }, launch, trust };
      },
-@@ -2017,3 +2020,3 @@ ${result.text}`);
+@@ -2355,3 +2358,3 @@ ${result.text}`);
        if (!host.deliver) return "queue";
 -      const ofSession = roots().filter((m) => m.launch!.agent === agent && m.to?.host === agent && m.to.session === session && m.launch!.session_ref);
 +      const ofSession = roots().filter((m) => m.launch!.agent === agent && m.to?.host === (host.routeHost ?? agent) && m.to.session === session && m.launch!.session_ref);
        const root = ofSession.find((m) => !m.launch!.deleted_at) ?? ofSession[0];
-@@ -2129,3 +2132,3 @@ ${result.text}`);
+@@ -2488,3 +2491,3 @@ ${result.text}`);
          if (launch.deleted_at || !session || !hostOf(launch)) return [];
--        return [{ launch_id: launch.id, session, thread_id: root.thread_id, host: launch.agent, project_id: root.project_id, started_at: launch.started_at, started: !!launch.session_ref, run: runOfRoot(root)?.state ?? null, scratch: launch.scratch ? basename(launch.folder) : null, scheduled: !!root.scheduled_run }];
-+        return [{ launch_id: launch.id, session, thread_id: root.thread_id, host: hostOf(launch)?.routeHost ?? launch.agent, project_id: root.project_id, started_at: launch.started_at, started: !!launch.session_ref, run: runOfRoot(root)?.state ?? null, scratch: launch.scratch ? basename(launch.folder) : null, scheduled: !!root.scheduled_run }];
+-        return [{ launch_id: launch.id, session, thread_id: root.thread_id, host: launch.agent, project_id: root.project_id, started_at: launch.started_at, started: !!launch.session_ref, run: runOfRoot(root)?.state ?? null, scratch: launch.scratch ? basename(launch.folder) : null, scheduled: !!root.scheduled_run, rex: inboxLaunchRexUnstoppable(launch) }];
++        return [{ launch_id: launch.id, session, thread_id: root.thread_id, host: hostOf(launch)?.routeHost ?? launch.agent, project_id: root.project_id, started_at: launch.started_at, started: !!launch.session_ref, run: runOfRoot(root)?.state ?? null, scratch: launch.scratch ? basename(launch.folder) : null, scheduled: !!root.scheduled_run, rex: inboxLaunchRexUnstoppable(launch) }];
        });

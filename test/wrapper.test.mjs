@@ -410,6 +410,13 @@ test('the server’s own instructions gain the Orca note', () => {
   assert.match(ORCA_NOTE, /change nothing/)
 })
 
+test('an answer with no instructions of its own (Plannotator with the Inbox off) gets no Orca note', () => {
+  // Plannotator 0.29.1's `inbox mcp` while the Inbox is off: no instructions, and `tools/list` is empty.
+  const off = { id: 0, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'plannotator-inbox', version: '1.0.0' } } }
+  assert.equal(annotate(off), false)
+  assert.equal('instructions' in off.result, false)
+})
+
 // --- The real child process ----------------------------------------------------------------------
 
 // A stand-in for `plannotator inbox mcp`: answers each request with what it received.

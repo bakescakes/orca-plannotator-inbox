@@ -2,9 +2,9 @@
   "v": 1,
   "plannotator": {
     "repo": "https://github.com/backnotprop/plannotator.git",
-    "version": "0.28.67",
-    "tag": "v0.28.67",
-    "commit": "969084882013ac7634283ebca06f3118e766d30d"
+    "version": "0.29.1",
+    "tag": "v0.29.1",
+    "commit": "e44c3b93590f97bf4365915ddbbfff487c11c6ec"
   },
   "bun": {
     "version": "1.4.4",
@@ -42,7 +42,7 @@
     {
       "name": "orca-host",
       "file": "patches/orca-host.patch",
-      "sha256": "8f69612d2a562b8081f409ce01b5ce9c10358ffa90eaed51a78effaee037826d",
+      "sha256": "0e35816e6c48c831604b2a9bf12536aa516711e769ec197fcb8d6099686531ad",
       "required": true,
       "features": [
         "launch-hosts"
@@ -51,7 +51,7 @@
     {
       "name": "interop-surface",
       "file": "patches/interop-surface.patch",
-      "sha256": "1c5ea4ded4cad262433957a6344958e53a7edf7513064485c8a67a5e164f2a13",
+      "sha256": "46291d352d4112ac65accb2493258a23087bd0a8c2c892db3e97e476db98302c",
       "required": true,
       "features": [
         "update-state",
@@ -62,7 +62,7 @@
     {
       "name": "agent-marks",
       "file": "patches/agent-marks.patch",
-      "sha256": "0e0a1b9d6404c9f8b200a7b1a5798b2e5a61021512830194732a0df22647c986",
+      "sha256": "503b9e83a17c2b22c7158c0d62b55395c23e92d0be9e8dececda268e9854a0ef",
       "required": false,
       "features": [
         "mark-faces"

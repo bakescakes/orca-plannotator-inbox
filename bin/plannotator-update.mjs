@@ -808,6 +808,30 @@ export function registry(dataDir) {
   }
 }
 
+/**
+ * Whether the person has turned the Inbox on for `dataDir`, by Plannotator's own rule (0.29.1 on): its mark
+ * `inbox/turned-on` says on unless it reads `"on": false`; with no mark, an Inbox that ran here (`inbox.json`)
+ * is on. Until then `inbox restart` refuses. Only read; a file that cannot be read counts as on.
+ */
+export function inboxTurnedOn(dataDir) {
+  const missing = (error) => error?.code === 'ENOENT' || error?.code === 'ENOTDIR'
+  try {
+    const mark = readFileSync(join(dataDir, 'inbox', 'turned-on'), 'utf8')
+    try {
+      return JSON.parse(mark)?.on !== false
+    } catch {
+      return true
+    }
+  } catch (error) {
+    if (!missing(error)) return true
+  }
+  try {
+    return lstatSync(join(dataDir, 'inbox', 'inbox.json')).isFile()
+  } catch (error) {
+    return !missing(error)
+  }
+}
+
 /** Whether an Inbox runs for `dataDir`: Plannotator's own `inbox status` (exit 0 running, 2 not answering). */
 export async function inboxRunning(binary, dataDir, env) {
   const result = await run(binary, ['inbox', 'status', '--json'], { env: childEnvironment(env, { PLANNOTATOR_DATA_DIR: dataDir }), timeoutMs: 20_000 })
@@ -1249,6 +1273,8 @@ export async function restartInbox(options) {
     if (!record) return { ok: false, detail: 'No Orca build of Plannotator is installed yet, so the Inbox stays as it is.' }
     if (!orcaConfig) return { ok: false, detail: 'Orca has not set up the Inbox connection yet, so the Inbox stays as it is.' }
     const running = await inboxRunning(findStock(env, home) ?? record.path, dataDir, env)
+    // Plannotator's `inbox restart` refuses until a person has turned the Inbox on; say that, not "did not answer".
+    if (!running && !inboxTurnedOn(dataDir)) return { ok: false, detail: 'The Inbox is off on this computer, so it was not restarted. Open Inbox turns it on.' }
     if (await restartOn(record.path, dataDir, env, orcaConfig, { oldPid: running?.pid ?? null, fetchImpl })) {
       return { ok: true, version: record.version, build: record.build, detail: `The Inbox runs on the Orca build of Plannotator ${record.version}.` }
     }

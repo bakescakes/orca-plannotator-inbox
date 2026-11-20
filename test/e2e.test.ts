@@ -53,6 +53,23 @@ async function orcaStandIn(root: string, project: string): Promise<string> {
   return bin
 }
 
+/** Whether version `have` is `want` or later (x.y.z). */
+function atLeast(have: string, want: string): boolean {
+  const a = have.split('.').map(Number)
+  const b = want.split('.').map(Number)
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!
+  return true
+}
+
+/** Runs a program to its end: its exit code and output. */
+function run(file: string, args: string[], env: Record<string, string | undefined>): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) =>
+    execFile(file, args, { env: env as NodeJS.ProcessEnv, timeout: 60_000 }, (error, stdout, stderr) =>
+      resolve({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout: String(stdout), stderr: String(stderr) })
+    )
+  )
+}
+
 test('a real Plannotator Inbox: an Orca chat sends, the person replies, the reply reaches the chat', { skip: BINARY ? false : 'set PLANNOTATOR_E2E_BIN to run' }, async () => {
   const root = await realpath(await tempDir('orca-plannotator-e2e-'))
   const home = join(root, 'home')
@@ -102,25 +119,58 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
 
   // A `.cmd` starts only through Windows' command interpreter, which is also how an agent's host runs it.
   const viaShell = process.platform === 'win32'
-  const child = spawn(viaShell ? (process.env.ComSpec ?? 'cmd.exe') : launcher, viaShell ? ['/d', '/s', '/c', `""${launcher}""`] : [], {
-    cwd: project,
-    windowsVerbatimArguments: viaShell,
-    env: { ...base, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1', ORCA_CLI_COMMAND: orcaCli }
-  })
   let stderr = ''
-  child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
-  const mcp = mcpClient(child)
+  /** One chat's MCP server: the launcher, as the agent's settings run it. */
+  const chat = () => {
+    const child = spawn(viaShell ? (process.env.ComSpec ?? 'cmd.exe') : launcher, viaShell ? ['/d', '/s', '/c', `""${launcher}""`] : [], {
+      cwd: project,
+      windowsVerbatimArguments: viaShell,
+      env: { ...base, PLANNOTATOR_BIN: BINARY, ORCA_PLANNOTATOR_HOME: shared, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1', ORCA_CLI_COMMAND: orcaCli }
+    })
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
+    return { child, mcp: mcpClient(child) }
+  }
+  const hello = (mcp: ReturnType<typeof mcpClient>) => mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-plannotator-e2e', version: '0' } })
+  const toolsOf = async (mcp: ReturnType<typeof mcpClient>) => ((await mcp.request('tools/list')) as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools
+  const version = /\d+\.\d+\.\d+/.exec((await run(BINARY, ['--version'], base)).stdout)?.[0] ?? '0.0.0'
+  // From 0.29.1 the Inbox is off until a person runs `plannotator inbox` (bare, --no-open or --open) once.
+  const hasOffSwitch = atLeast(version, '0.29.1')
+  const first = chat()
+  let current = first
   try {
     // Before the Inbox has ever run here, the plugin already says it will deliver.
     await until(async () => existsSync(join(shared, 'state.json')) && JSON.parse(await readFile(join(shared, 'state.json'), 'utf8')).delivering === true, 'the worker heartbeat')
     assert.equal(engine.status().phase, 'no-plannotator')
 
-    const hello = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-plannotator-e2e', version: '0' } })
-    assert.match(String(hello.instructions), /Plannotator Inbox/, 'Plannotator’s own instructions')
-    assert.match(String(hello.instructions), /In this Orca chat you are already connected/)
+    if (hasOffSwitch) {
+      // Plannotator never ran here, so its Inbox is off: no instructions, so no Orca note either; no tools; a call
+      // gets Plannotator's one line, which names the person's command. Nothing starts the Inbox.
+      const off = await hello(first.mcp)
+      assert.equal(off.instructions, undefined, 'Plannotator gives no instructions while the Inbox is off')
+      first.mcp.notify('notifications/initialized')
+      assert.deepEqual(await toolsOf(first.mcp), [], 'no tools while the Inbox is off')
+      await assert.rejects(first.mcp.request('tools/call', { name: 'send_message', arguments: { body: 'Is anyone there?' } }), /off on this computer[\s\S]*plannotator inbox --open/)
+      assert.equal(existsSync(join(dataDir, 'inbox', 'inbox.json')), false, 'the Inbox did not start')
+
+      // The person turns it on with Plannotator's own setup step (what the plugin's Connect and Open Inbox run).
+      const on = await run(BINARY, ['inbox', '--open'], base)
+      assert.equal(on.code, 0, on.stderr)
+      assert.match(on.stdout, /^http:\/\/\S+/m)
+      assert.equal(JSON.parse(await readFile(join(dataDir, 'inbox', 'turned-on'), 'utf8')).on, true)
+      // The chat that started while it was off reads it again on its next request: the tools are there now.
+      // Plannotator sends no list_changed, so an agent that does not ask again keeps its empty list until a new chat.
+      assert.ok((await toolsOf(first.mcp)).some((tool) => tool.name === 'send_message'), 'the open chat lists the tools once the Inbox is on')
+      first.child.stdin.end()
+      current = chat()
+    }
+    const { mcp } = current
+
+    const greeting = await hello(mcp)
+    assert.match(String(greeting.instructions), /Plannotator Inbox/, 'Plannotator’s own instructions')
+    assert.match(String(greeting.instructions), /In this Orca chat you are already connected/)
     mcp.notify('notifications/initialized')
 
-    const listed = (await mcp.request('tools/list')) as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }
+    const listed = { tools: await toolsOf(mcp) }
     const send = listed.tools.find((tool) => tool.name === 'send_message')
     assert.ok(send, 'Plannotator still has send_message')
     for (const field of ['agent_host', 'agent_session', 'agent_name', 'body']) assert.ok(field in send.inputSchema.properties, `send_message takes ${field}`)
@@ -133,7 +183,7 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
     assert.ok(messageId, `a message id in ${text}`)
     assert.match(text, /by itself/i, 'Plannotator tells the agent the reply arrives by itself')
 
-    // The message started the Inbox; the engine finds it and starts listening for this chat.
+    // The message started the Inbox (from 0.29.1 the person's turn-on did); the engine finds it and listens for this chat.
     await until(() => engine.status().sessions.some((chat) => chat.session === SESSION), 'the chat to be listened for', 30_000)
     const registry = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { port: number; token: string }
     const origin = `http://127.0.0.1:${registry.port}`
@@ -175,7 +225,8 @@ test('a real Plannotator Inbox: an Orca chat sends, the person replies, the repl
     if (stderr) process.stderr.write(`wrapper stderr:\n${stderr}\n`)
     throw error
   } finally {
-    child.stdin.end()
+    first.child.stdin.end()
+    current.child.stdin.end()
     await engine.stop()
     await new Promise<void>((resolve) => execFile(BINARY, ['inbox', 'stop'], { env: base as NodeJS.ProcessEnv, timeout: 20_000 }, () => resolve()))
   }

@@ -43,6 +43,32 @@ export type ThreadSource = { threadId: string; root: string; messages: Map<strin
 
 const MAX_THREAD_MESSAGES = 10_000
 
+/**
+ * Whether the person has turned the Inbox on for `dataDir`, by Plannotator's own rule (0.29.1 on): its
+ * mark `<data>/inbox/turned-on` says on unless it reads `"on": false`; with no mark, an Inbox that ran
+ * here (`inbox.json`) is on. Until it is on, `plannotator inbox mcp` lists no tools and nothing starts
+ * the Inbox but a person's `plannotator inbox` (bare, `--no-open` or `--open`), which writes the mark.
+ * Only read here, never written; a file that cannot be read counts as on, as Plannotator counts it.
+ */
+export async function inboxTurnedOn(dataDir: string): Promise<boolean> {
+  const missing = (error: unknown): boolean => ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException | null)?.code ?? '')
+  try {
+    const mark = await readFile(join(dataDir, 'inbox', 'turned-on'), 'utf8')
+    try {
+      return (JSON.parse(mark) as { on?: unknown } | null)?.on !== false
+    } catch {
+      return true
+    }
+  } catch (error) {
+    if (!missing(error)) return true
+  }
+  try {
+    return (await lstat(join(dataDir, 'inbox', 'inbox.json'))).isFile()
+  } catch (error) {
+    return !missing(error)
+  }
+}
+
 /** The Inbox is not installed, not running, or not answering: replies simply wait in it. */
 export class InboxUnavailable extends Error {}
 /**

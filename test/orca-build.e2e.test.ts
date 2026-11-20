@@ -146,13 +146,40 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
 
     // 2. An agent's launcher, with no PLANNOTATOR_BIN: it runs the Orca build, in Orca mode.
     const orcaCli = await orcaStandIn(root, project)
-    child = spawn(launcherPath(shared), [], {
-      cwd: project,
-      env: { ...base, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1', ORCA_CLI_COMMAND: orcaCli } as NodeJS.ProcessEnv
-    })
-    child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
+    const chat = () => {
+      const started = spawn(launcherPath(shared), [], {
+        cwd: project,
+        env: { ...base, PLANNOTATOR_CWD: project, ORCA_AGENT_SESSION_ID: SESSION, ORCA_STRUCTURED_SESSION: '1', ORCA_CLI_COMMAND: orcaCli } as NodeJS.ProcessEnv
+      })
+      started.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
+      return started
+    }
+    const initialize = { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-build-e2e', version: '0' } }
+    const toolNames = async (client: ReturnType<typeof mcpClient>) => ((await client.request('tools/list')) as { tools: { name: string }[] }).tools.map((tool) => tool.name)
+    if (compareVersions(version, '0.29.1') >= 0) {
+      // From 0.29.1 Plannotator's Inbox is off where it never ran: the chat gets no instructions (so no Orca
+      // note) and no tools, and nothing it does starts the Inbox.
+      child = chat()
+      const early = mcpClient(child as Parameters<typeof mcpClient>[0])
+      assert.equal((await early.request('initialize', initialize)).instructions, undefined)
+      early.notify('notifications/initialized')
+      assert.deepEqual(await toolNames(early), [])
+      // The person presses Connect: the plugin has Plannotator turn the Inbox on (its own `inbox --open`), in Orca mode.
+      // Connect writes agent settings, so first: this HOME is a throwaway one.
+      const realHomeFirst = await realpath(homedir())
+      assert.ok(home.startsWith(`${await realpath(tmpdir())}/`) && home !== realHomeFirst && !home.startsWith(`${realHomeFirst}/`), `the test HOME ${home} is a throwaway one`)
+      const turnedOn = await worker.request('agents.connect', {})
+      assert.match(turnedOn.message, /^The Inbox was off on this computer, so Plannotator turned it on\. The Inbox is open/, turnedOn.message)
+      assert.equal(JSON.parse(await readFile(join(dataDir, 'inbox', 'turned-on'), 'utf8')).on, true)
+      const started = JSON.parse(await readFile(join(dataDir, 'inbox', 'inbox.json'), 'utf8')) as { pid: number }
+      assert.equal(await homeOf(started.pid), home, 'the Inbox Connect turned on has the throwaway HOME')
+      // The chat that started while it was off has the tools on its next look (Plannotator sends no list_changed).
+      assert.ok((await toolNames(early)).includes('send_message'))
+      child.stdin!.end()
+    }
+    child = chat()
     const mcp = mcpClient(child as Parameters<typeof mcpClient>[0])
-    const hello = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-build-e2e', version: '0' } })
+    const hello = await mcp.request('initialize', initialize)
     assert.match(String(hello.instructions), /In this Orca chat you are already connected/)
     mcp.notify('notifications/initialized')
     const sent = await mcp.request('tools/call', { name: 'send_message', arguments: { subject: 'Ship the importer?', body: 'Shall I ship the importer today?', agent_host: 'claude-code', agent_name: 'Claude' } })

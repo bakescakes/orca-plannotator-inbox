@@ -246,6 +246,13 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
 
     // ---------------------------------------------------------------------------------------
     // 2. A real native chat sends through the launcher, with no PLANNOTATOR_BIN.
+    // From 0.29.1 the Inbox is off, with no tools for any chat, until a person runs `plannotator inbox` once. The
+    // person does it here as the panel's Open Inbox (and Connect) does: the installed build's `inbox --open`, in Orca mode.
+    const installedBuild = (JSON.parse(await readFile(join(shared, 'plannotator', 'current.json'), 'utf8')) as { path: string }).path
+    const on = await run(installedBuild, ['inbox', '--open'], {
+      env: { ...plannotatorEnv, PLANNOTATOR_ORCA_MODE: '1', PLANNOTATOR_ORCA_CONFIG: join(bridgeDir, 'config.json') } as NodeJS.ProcessEnv
+    })
+    assert.equal(on.code, 0, on.stderr)
     const launched = await orca('agent', 'launch', '--agent', 'claude', '--worktree', `path:${project}`, '--surface', 'chat', '--prompt', 'Automated test: no action needed.')
     const outcome = launched.result?.outcome
     assert.ok(isRecord(outcome) && outcome.kind === 'structured' && typeof outcome.sessionId === 'string', JSON.stringify(launched).slice(0, 600))

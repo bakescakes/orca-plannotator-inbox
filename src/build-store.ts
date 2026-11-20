@@ -616,7 +616,8 @@ export class BuildStore {
 
 function execText(binary: string, args: string[], env: Env, cwd: string): Promise<{ ok: boolean; stdout: string; error: string | null }> {
   return new Promise((done) => {
-    execFile(binary, args, { env: env as NodeJS.ProcessEnv, timeout: 20_000, windowsHide: true, cwd }, (error, stdout) =>
+    // `inbox --open` on the run that turns the Inbox on also connects agents, for up to 25 s after its URL.
+    execFile(binary, args, { env: env as NodeJS.ProcessEnv, timeout: 30_000, windowsHide: true, cwd }, (error, stdout) =>
       done({ ok: !error, stdout: String(stdout ?? ''), error: error ? errorText(error) : null })
     )
   })

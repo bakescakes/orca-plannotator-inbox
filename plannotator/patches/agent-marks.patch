@@ -1,12 +1,12 @@
 diff --git a/packages/core/inbox-types.ts b/packages/core/inbox-types.ts
-index 7c50c4108..a042c606a 100644
+index c8e57b3fb..3398508bf 100644
 --- a/packages/core/inbox-types.ts
 +++ b/packages/core/inbox-types.ts
-@@ -451,2 +451,3 @@ export const INBOX_HOST_NAMES: Readonly<Record<string, string>> = {
+@@ -455,2 +455,3 @@ export const INBOX_HOST_NAMES: Readonly<Record<string, string>> = {
    hermes: "Hermes Agent",
 +  orca: "Orca",
    cloud: "Cloud agent",
-@@ -3927,4 +3928,9 @@ export function inboxSetFaceParts(face: InboxSetFace): { set: string; icon: stri
+@@ -4154,4 +4155,9 @@ export function inboxSetFaceParts(face: InboxSetFace): { set: string; icon: stri
  
 +/**
 + * Another host's own mark (`mark:<host>`): an agent that runs through a host of its own (an Orca chat, host `orca`)
@@ -18,30 +18,31 @@ index 7c50c4108..a042c606a 100644
 +  typeof value === "string" && ((INBOX_AGENT_FACES as readonly string[]).includes(value) || INBOX_OWN_FACE.test(value) || INBOX_SET_FACE.test(value) || INBOX_MARK_FACE.test(value));
  
 diff --git a/packages/inbox/agents/AgentMark.tsx b/packages/inbox/agents/AgentMark.tsx
-index ee08abefc..84254bdf5 100644
+index 764dfac87..02f667d66 100644
 --- a/packages/inbox/agents/AgentMark.tsx
 +++ b/packages/inbox/agents/AgentMark.tsx
-@@ -34,6 +34,8 @@ export function AgentMark({ id, host, name, agent, picks = 'all' }: { id: string
+@@ -50,3 +50,5 @@ export function AgentMark({
    const [plain, setPlain] = useState<HTMLElement | null>(null);
 -  const kept = useAgentFace(id);
 +  const kept = useAgentFace(id), markHost = (kept as string).startsWith('mark:') ? (kept as string).slice(5) : null;
 +  // A `mark:<host>` face is that host's own mark and rig, not a face over this one, and never the project's tile.
 +  if (markHost) host = markHost;
-   // Agent icons "From the project name" (Settings → Rows): no face picked draws the project's tile (projectFace.tsx).
+   // Started in Rex: its pane's status on the mark's corner (rexMark.tsx); any other agent: none.
+@@ -56,3 +58,3 @@ export function AgentMark({
    const projectDefault = useProjectDefault(id);
 -  const face = shownAgentFace(kept, projectDefault);
 +  const face: AgentFace = markHost ? 'agent' : shownAgentFace(kept, projectDefault);
    // The project's tile is a still in the mark's place; with nothing to draw, the agent's own mark, alive as ever.
 diff --git a/packages/inbox/icons.tsx b/packages/inbox/icons.tsx
-index 422dd2750..86052aeed 100644
+index 559f1d7d4..7a1cf905c 100644
 --- a/packages/inbox/icons.tsx
 +++ b/packages/inbox/icons.tsx
-@@ -32,2 +32,3 @@ export function HostMark({ host, big, agent }: { host: string | null | undefined
- export function FaceOfMark({ host, big, face, agent }: { host: string | null | undefined; big?: boolean; face: AgentFace; agent?: string | null }) {
-+  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big} />;
-   if (face === 'agent' || face === 'mark') return <UiHostMark host={host} big={big} />;
+@@ -42,2 +42,3 @@ export function HostMark({ host, big, agent }: { host: string | null | undefined
+ export function FaceOfMark({ host, big, face, agent, children }: { host: string | null | undefined; big?: boolean; face: AgentFace; agent?: string | null; children?: ReactNode }) {
++  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big}>{children}</UiHostMark>;
+   if (face === 'agent' || face === 'mark')
 diff --git a/packages/ui/components/inbox-thread/icons.tsx b/packages/ui/components/inbox-thread/icons.tsx
-index b1ba3f2f5..737b0f986 100644
+index 883b06c04..4748d5913 100644
 --- a/packages/ui/components/inbox-thread/icons.tsx
 +++ b/packages/ui/components/inbox-thread/icons.tsx
 @@ -274,2 +274,6 @@ export function TabGlyph({ harness }: { harness: string }) {

@@ -1,6 +1,6 @@
 // The worker as Orca runs it: `activate(orca)` over the test kit's host, with the machine replaced.
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -8,6 +8,7 @@ import { mockHost, mountWorker } from 'orca/testing'
 import * as main from '../src/worker'
 import { deactivate, readProjects, start, type Runtime } from '../src/worker'
 import type { UpdaterResult } from '../src/build-store'
+import { inboxTurnedOn } from '../src/inbox'
 import { launcherPath, updaterLauncherName } from '../src/shared'
 import { fakeInbox, fakeOrca, reply, tempDir, until } from './fakes'
 
@@ -24,6 +25,8 @@ async function machine(settings: Record<string, string | boolean> = {}, existing
   const inbox = fakeInbox()
   await inbox.writeRegistry(dataDir)
   const opened: string[] = []
+  /** What "Open Inbox" does besides being recorded: nothing, unless a test says. */
+  const onOpen: { run: ((dir: string) => Promise<void>) | null; answer: { ok: boolean; message: string } } = { run: null, answer: { ok: true, message: 'The Inbox is open.' } }
   const updaterRuns: string[][] = []
   const updater: { next: UpdaterResult | null } = { next: null }
   const runtime: Partial<Runtime> = {
@@ -36,7 +39,8 @@ async function machine(settings: Record<string, string | boolean> = {}, existing
     connect: { find: () => null },
     openInbox: async (dir) => {
       opened.push(dir)
-      return { ok: true, message: 'The Inbox is open.' }
+      await onOpen.run?.(dir)
+      return onOpen.answer
     },
     builds: {
       runUpdater: async (args) => {
@@ -47,7 +51,7 @@ async function machine(settings: Record<string, string | boolean> = {}, existing
   }
   const host = mockHost({ capabilities: CAPABILITIES, settings: { enabled: true, notifyBlocked: true, dataDir, orcaCliPath: '', ...settings } })
   const worker = await mountWorker({ default: (api) => start(api, runtime), deactivate }, { host, commands: ['inbox.open', 'inbox.status', 'agents.connect', 'agents.disconnect', 'inbox.restartOnBuild', 'build.check'] })
-  return { root, home, shared, dataDir, orca, inbox, host, worker, opened, updaterRuns, updater }
+  return { root, home, shared, dataDir, orca, inbox, host, worker, opened, onOpen, updaterRuns, updater }
 }
 
 test('on start it installs the launcher, and a registered chat gets its reply', async () => {
@@ -129,6 +133,63 @@ test('opening the Inbox uses the configured data folder', async () => {
     assert.deepEqual(await t.worker.request('inbox.open'), { ok: true, message: 'The Inbox is open.' })
     assert.deepEqual(t.opened, [t.dataDir])
     assert.equal(await t.worker.command('inbox.open'), 'The Inbox is open.')
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('whether Plannotator has the Inbox on is read by its own rule, never written', async () => {
+  const dir = await tempDir()
+  const mark = join(dir, 'inbox', 'turned-on')
+  assert.equal(await inboxTurnedOn(dir), false, 'never ran here: off')
+  await mkdir(join(dir, 'inbox'))
+  await writeFile(join(dir, 'inbox', 'inbox.json'), '{}')
+  assert.equal(await inboxTurnedOn(dir), true, 'an Inbox ran here before the mark: on')
+  await writeFile(mark, '{"on":false}')
+  assert.equal(await inboxTurnedOn(dir), false, 'the mark says off')
+  await writeFile(mark, '{"on":true,"by":"command","at":"2026-11-20T00:00:00.000Z"}\n')
+  await rm(join(dir, 'inbox', 'inbox.json'))
+  assert.equal(await inboxTurnedOn(dir), true, 'the mark says on')
+  await writeFile(mark, 'not json')
+  assert.equal(await inboxTurnedOn(dir), true, 'a mark that cannot be read keeps it on')
+  assert.equal(await readFile(mark, 'utf8'), 'not json', 'nothing is written')
+})
+
+test('Connect turns on an Inbox Plannotator has off, through Plannotator’s own command; Disconnect never does', async () => {
+  const t = await machine()
+  try {
+    // Plannotator never ran here: no mark, no inbox.json. Its own `inbox --open` (Open Inbox) writes both.
+    await rm(join(t.dataDir, 'inbox', 'inbox.json'))
+    t.onOpen.run = async (dir) => {
+      await writeFile(join(dir, 'inbox', 'turned-on'), '{"on":true,"by":"command"}\n')
+      await t.inbox.writeRegistry(dir)
+    }
+    await t.worker.request('agents.disconnect', {})
+    assert.deepEqual(t.opened, [], 'Disconnect does not turn the Inbox on')
+
+    const result = await t.worker.request('agents.connect', {})
+    assert.deepEqual(t.opened, [t.dataDir])
+    assert.equal(result.ok, true, result.message)
+    assert.match(result.message, /^The Inbox was off on this computer, so Plannotator turned it on\. The Inbox is open\. Connected Codex\./)
+    assert.doesNotMatch(result.message, /once the Inbox runs/, 'the other agents were connected through the Inbox it started')
+
+    // On now: Connect again opens nothing.
+    assert.equal((await t.worker.request('agents.connect', {})).ok, true)
+    assert.deepEqual(t.opened, [t.dataDir])
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('when Plannotator cannot turn the Inbox on, Connect still connects and says why', async () => {
+  const t = await machine()
+  try {
+    await rm(join(t.dataDir, 'inbox', 'inbox.json'))
+    t.onOpen.answer = { ok: false, message: 'Plannotator was not found. Install it from https://plannotator.ai, then run `plannotator inbox` once.' }
+    const result = await t.worker.request('agents.connect', {})
+    assert.equal(result.ok, false)
+    assert.match(result.message, /^The Inbox is off on this computer and was not turned on: Plannotator was not found\./)
+    assert.ok((await readFile(join(t.home, '.codex', 'config.toml'), 'utf8')).includes(JSON.stringify(launcherPath(t.shared))), 'Codex is connected all the same')
   } finally {
     await t.worker.deactivate()
   }
