@@ -128,7 +128,9 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
      * chat not here has none; `agentRead: false` is an Orca without the command.
      */
     entries: new Map<string, Record<string, unknown>[]>(),
-    agentRead: true
+    agentRead: true,
+    /** When set, each `agent read` answers only once what this returns settles: a slow (or never answering) read. */
+    readGate: null as null | ((session: string) => Promise<void>)
   }
   const ok = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ ok: true, result }) })
   const refuse = (code: string, data?: unknown) => ({ code: 1, stdout: JSON.stringify({ ok: false, error: { code, data } }) })
@@ -175,6 +177,7 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
     if (command === 'agent read') {
       if (!state.agentRead) return refuse('invalid_argument', { suggestions: ['list', 'show'] })
       const session = option(args, '--id').replace(/^orca_session_id:/, '')
+      if (state.readGate) await state.readGate(session)
       if (!state.sessions.has(session)) return refuse('agent_unknown')
       return ok({ orcaSessionId: session, kind: 'chat', agent: 'claude', source: 'chat', entries: state.entries.get(session) ?? [], limited: false })
     }
@@ -576,6 +579,8 @@ export function fakeLifecycleOrca() {
     listed: new Map<string, { state: string; agentType: string; workspaceId?: string; mainAgent?: { state: string }; stateStartedAt?: number }>(),
     /** What `agent read` answers for a chat: its newest entries. A chat not here has none. */
     entries: new Map<string, Record<string, unknown>[]>(),
+    /** When set, each `agent read` answers only once what this returns settles: a slow (or never answering) read. */
+    readGate: null as null | ((session: string) => Promise<void>),
     /** Chats made by `agent launch`, by operation id. */
     operations: new Map<string, string>(),
     created: 0,
@@ -614,6 +619,7 @@ export function fakeLifecycleOrca() {
     if (command === 'repo list') return ok({ repos: state.repos })
     if (command === 'agent read') {
       const session = (option(args, '--id') ?? '').replace(/^orca_session_id:/, '')
+      if (state.readGate) await state.readGate(session)
       return ok({ orcaSessionId: session, kind: 'chat', agent: 'codex', source: 'chat', entries: state.entries.get(session) ?? [], limited: false })
     }
     if (command === 'agent launch') {

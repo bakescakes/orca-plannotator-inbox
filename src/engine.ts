@@ -516,9 +516,11 @@ export class Engine {
       served.push({ ...candidate, roots, repoRoot })
     }
     const wanted = served.slice(0, MAX_ROUTES)
-    // What each chat waits on the person for: one read of its prompt per wait, never its words.
+    // What each chat waits on the person for: one read of its prompt per wait, never its words. Only
+    // what is known now: a read runs in the background and wakes the next look, so a slow one holds
+    // up no look, no poll and no reply.
     const waits = new Map<string, BlockedKind | null>()
-    await Promise.all([...new Set(wanted.map((candidate) => candidate.session))].map(async (session) => waits.set(session, await this.waitOf(orca, open.get(session)!))))
+    for (const session of new Set(wanted.map((candidate) => candidate.session))) waits.set(session, this.waitOf(orca, open.get(session)!))
     const keep = new Set(wanted.map((candidate) => candidate.raw))
     for (const [raw, route] of this.routes) {
       if (!keep.has(raw)) {
@@ -590,12 +592,13 @@ export class Engine {
   /**
    * What a chat waits on the person for: a prompt in the chat (a permission or a question, read from
    * the chat once per wait), or a question its own turn asked. Null when it waits on nothing, when only
-   * a child agent waits, and when the kind of prompt cannot be read: no kind rather than a guess.
+   * a child agent waits, and when the kind of prompt cannot be read (or is not read yet): no kind
+   * rather than a guess.
    */
-  private async waitOf(orca: OrcaCli, chat: NativeSession): Promise<BlockedKind | null> {
+  private waitOf(orca: OrcaCli, chat: NativeSession): BlockedKind | null {
     if (chat.waiting === 'lead-waiting') return 'question'
     if (chat.waiting !== 'blocked') return null
-    return this.prompts.kindOf(orca, chat.session, chat.stateStartedAt)
+    return this.prompts.knownKind(orca, chat.session, chat.stateStartedAt, () => this.wake.abort())
   }
 
   /** Tells the Inbox now what one chat waits on, without waiting for the answer. Its replies are not touched. */

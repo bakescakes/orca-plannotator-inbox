@@ -189,8 +189,8 @@ a checksum for each file.
   0.29.1 (orca.1)." and the panel says "moving it to the Orca build" while it does. It does this
   once for each start of the Inbox, at most three times a day, and after a failure not again for
   six hours (sooner when the build or your Plannotator changes); the panel then says why and keeps
-  **Restart Inbox**. The six-hourly look for a new build does the same when it finds the build is
-  already the newest.
+  **Restart Inbox**. **Check for a new build** and **Restart Inbox** move it at once, whatever these
+  limits say, and count toward them.
 - **Update.** Press **Update** in the Inbox, leave Plannotator's automatic updates on, or run
   `plannotator update` in a terminal: each one is Plannotator updating itself, with its own
   installer. From the Inbox, the Orca build hands the request to Plannotator's own

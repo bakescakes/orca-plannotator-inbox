@@ -545,14 +545,15 @@ export class Lifecycle {
   /**
    * What an owned chat waits on, as the Inbox's run line can word it: `permission` while it holds a
    * permission prompt; null otherwise, and for a question, which the run line would call a
-   * permission prompt. Read with the same prompt kinds reply delivery uses.
+   * permission prompt. From the same prompt kinds reply delivery uses, as far as they are known now:
+   * the catalog never waits on a read, which runs in the background for the next catalog.
    */
-  private async waitingOn(cli: LifecycleCli, inventory: LifecycleInventory, session: string): Promise<'permission' | null> {
+  private waitingOn(cli: LifecycleCli, inventory: LifecycleInventory, session: string): 'permission' | null {
     const listed = inventory.sessions.get(session)
     const prompts = this.deps.prompts
     if (!prompts || !cli.pendingPromptKind || listed?.waiting !== 'blocked') return null
     const reader: PromptReader = { pendingPromptKind: (chat) => cli.pendingPromptKind!(chat) }
-    return (await prompts.kindOf(reader, session, listed.stateStartedAt)) === 'permission' ? 'permission' : null
+    return prompts.knownKind(reader, session, listed.stateStartedAt) === 'permission' ? 'permission' : null
   }
 
   /** `GET /api/lifecycle/catalog`: where chats can start, the owned chats, and Orca's projects. */
@@ -566,7 +567,7 @@ export class Lifecycle {
       const stoppedAt = typeof row?.result?.stoppedAt === 'number' ? row.result.stoppedAt : 0
       const resumedAt = typeof row?.result?.resumeRequestedAt === 'number' ? row.result.resumeRequestedAt : 0
       const stopped = stoppedAt > resumedAt && owned.busy !== true
-      const waiting = stopped ? null : await this.waitingOn(cli, inventory, owned.session)
+      const waiting = stopped ? null : this.waitingOn(cli, inventory, owned.session)
       sessions[owned.session] = { busy: owned.busy, state: stopped ? 'stopped' : owned.state, stopped, workspaceId: owned.workspaceId, ...(waiting ? { waiting } : {}) }
     }
     const projects: Json[] = []

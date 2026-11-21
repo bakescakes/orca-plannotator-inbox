@@ -8,10 +8,20 @@ import { test } from 'node:test'
 import { Lifecycle, LifecycleError, SESSION_HELPER, encoded, helperNative, inboxSource, type DeliveryVerdict, type NativeRun, type OwnedSession } from '../src/lifecycle'
 import { OrcaCli, PromptKinds, parseLifecycleInventory } from '../src/orca-cli'
 import { runHelper } from '../src/navigation'
-import { fakeInbox, fakeLifecycleOrca, fakeNative, launchThread, memoryStore, personMessage, tempDir } from './fakes'
+import { fakeInbox, fakeLifecycleOrca, fakeNative, launchThread, memoryStore, personMessage, tempDir, until } from './fakes'
 
 const LAUNCH = { id: 'launch_1', agent: 'codex', folder: '/work/project' }
 const START = { launchId: 'launch_1', threadId: 'thr_launch', messageId: 'thr_launch', provider: 'codex', folder: '/work/project', ownerAction: true }
+
+/** Whether a catalog row has this key: a row the reading has reached. */
+const isRecordWith = (value: unknown, key: string): boolean => typeof value === 'object' && value !== null && key in value
+
+/** A blocked chat, as Orca lists one at a prompt. */
+const blockedRow = (stateStartedAt: number) => ({ state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt })
+const APPROVAL = [{ kind: 'approval', text: 'Allow it? (private words)', pending: true }]
+/** A catalog that answers within a second, or a failure saying it waited on a read. */
+const atOnce = <T>(work: Promise<T>): Promise<T> =>
+  Promise.race([work, new Promise<T>((_resolve, reject) => setTimeout(() => reject(new Error('the catalog waited on the read')), 1_000))])
 
 function setup(options: { projects?: string[] | null; launch?: Record<string, unknown> } = {}) {
   const orca = fakeLifecycleOrca()
@@ -111,6 +121,9 @@ test('the catalog says a launched chat waits on a permission, and nothing when i
   const row = async (): Promise<unknown> => ((await life.handle('catalog')).sessions as Record<string, unknown>).native_1
   t.orca.state.listed.set('native_1', { state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_000_000 })
   t.orca.state.entries.set('native_1', [{ kind: 'message', role: 'assistant', text: 'Next, the migration.' }, { kind: 'approval', text: 'Allow the migration? (private words)', pending: true }])
+  // The catalog that sees the wait first starts the read of the chat; a later one carries what it found.
+  await row()
+  await until(async () => isRecordWith(await row(), 'waiting'), 'a catalog that says the chat waits')
   assert.deepEqual(await row(), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1', waiting: 'permission' })
   assert.ok(!JSON.stringify(await life.handle('catalog')).includes('private words'), 'the prompt’s words go nowhere')
   // Working, or done, it waits on nothing: the row is what it always was.
@@ -129,11 +142,66 @@ test('a question is not offered as a permission', async () => {
   await life.handle('start', START)
   t.orca.state.listed.set('native_1', { state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_000_000 })
   t.orca.state.entries.set('native_1', [{ kind: 'question', text: 'Which branch? (private words)', pending: true }])
+  await life.handle('catalog')
+  await until(() => t.orca.state.calls.some((args) => args[0] === 'agent' && args[1] === 'read'), 'the chat read')
+  await new Promise((resolve) => setTimeout(resolve, 20))
   assert.deepEqual(((await life.handle('catalog')).sessions as Record<string, unknown>).native_1, { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
   // A question the chat's own turn asked (not a prompt in the chat) is not read and not offered either.
   t.orca.state.listed.set('native_1', { state: 'waiting', agentType: 'codex', mainAgent: { state: 'waiting' }, stateStartedAt: 1_700_000_060_000 })
   assert.deepEqual(((await life.handle('catalog')).sessions as Record<string, unknown>).native_1, { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
   assert.equal(t.orca.state.calls.filter((args) => args[0] === 'agent' && args[1] === 'read').length, 1)
+})
+
+test('the catalog never waits on a chat’s prompt read: it says what is known, and the next one has the rest', { timeout: 10_000 }, async () => {
+  const t = setup()
+  const life = new Lifecycle({ ...(t.life as unknown as { deps: ConstructorParameters<typeof Lifecycle>[0] }).deps, prompts: new PromptKinds(() => t.state.clock) })
+  await life.handle('start', START)
+  t.orca.state.listed.set('native_1', blockedRow(1_700_000_000_000))
+  t.orca.state.entries.set('native_1', APPROVAL)
+  // Orca does not answer the read: the Inbox's 4.5 s catalog deadline would pass long before its 12 s.
+  let answer = (): void => undefined
+  const answered = new Promise<void>((resolve) => (answer = resolve))
+  t.orca.state.readGate = () => answered
+  const row = async (): Promise<unknown> => ((await life.handle('catalog')).sessions as Record<string, unknown>).native_1
+  assert.deepEqual(await atOnce(row()), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' }, 'no word yet, and no wait for one')
+  assert.deepEqual(await atOnce(row()), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
+  answer()
+  await until(async () => isRecordWith(await row(), 'waiting'), 'the catalog after the read landed')
+  assert.deepEqual(await row(), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1', waiting: 'permission' })
+  assert.equal(t.orca.state.calls.filter((args) => args[0] === 'agent' && args[1] === 'read').length, 1, 'one read for the wait, however many catalogs asked')
+})
+
+test('several blocked chats are read side by side, behind the catalog, not one after another', { timeout: 10_000 }, async () => {
+  const t = setup()
+  const life = new Lifecycle({ ...(t.life as unknown as { deps: ConstructorParameters<typeof Lifecycle>[0] }).deps, prompts: new PromptKinds(() => t.state.clock) })
+  const chats: string[] = []
+  for (const n of [1, 2, 3]) {
+    const thread = `thr_launch_${n}`
+    t.inbox.state.details.set(thread, launchThread(thread, '/work/project', { ...LAUNCH, id: `launch_${n}` }))
+    chats.push(String((await life.handle('start', { ...START, launchId: `launch_${n}`, threadId: thread, messageId: thread })).session))
+  }
+  assert.equal(new Set(chats).size, 3)
+  for (const chat of chats) {
+    t.orca.state.listed.set(chat, blockedRow(1_700_000_000_000))
+    t.orca.state.entries.set(chat, APPROVAL)
+  }
+  // Each read is held until all three are under way at once.
+  let inFlight = 0
+  let most = 0
+  let release = (): void => undefined
+  const released = new Promise<void>((resolve) => (release = resolve))
+  t.orca.state.readGate = async () => {
+    inFlight += 1
+    most = Math.max(most, inFlight)
+    if (inFlight === 3) release()
+    await released
+    inFlight -= 1
+  }
+  const sessions = async (): Promise<Record<string, Record<string, unknown>>> => (await life.handle('catalog')).sessions as Record<string, Record<string, unknown>>
+  const first = await atOnce(sessions())
+  for (const chat of chats) assert.ok(!('waiting' in first[chat]!), 'the catalog answered before any read')
+  await until(async () => { const now = await sessions(); return chats.every((chat) => now[chat]!.waiting === 'permission') }, 'every chat’s word')
+  assert.equal(most, 3, 'the three reads ran at the same time')
 })
 
 test('the catalog has the shape the Inbox reads: workspaces, providers, sessions and projects', async () => {

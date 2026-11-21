@@ -797,7 +797,7 @@ test('--restart where Plannotator has the Inbox off says so, and starts nothing'
 
 const ifPlain = (b) => restartInbox({ shared: b.shared, env: b.env, home: b.home, ifPlain: true })
 
-test('a standard Inbox of the build’s release is moved onto it even when the build is already the newest', { skip: STAND_IN }, async () => {
+test('a standard Inbox of the build’s release is moved onto it by Check now even when the build is already the newest; a routine run leaves it to the worker', { skip: STAND_IN }, async () => {
   const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
   const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
   const b = box(server, { stock })
@@ -808,7 +808,13 @@ test('a standard Inbox of the build’s release is moved onto it even when the b
     const plain = await b.health()
     assert.equal(plain.self, stock)
 
-    const result = await b.run()
+    // A routine run: the worker moves it, within its limits (BuildStore.followRunning).
+    const routine = await b.run()
+    assert.deepEqual([routine.ok, routine.restarted, routine.detail], [true, false, 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use.'])
+    assert.equal((await b.health()).pid, plain.pid, 'not restarted')
+
+    // A person pressed Check now.
+    const result = await b.run({ again: true })
     assert.equal(result.ok, true, result.detail)
     assert.equal(result.installed, false)
     assert.equal(result.restarted, true)
@@ -913,14 +919,18 @@ test('a build that does not answer after the restart of a standard Inbox: back t
     const result = await ifPlain(b)
     assert.deepEqual([result.ok, result.restarted], [false, false])
     assert.equal(result.detail, 'The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.')
+    assert.equal(result.restartFailed, true)
     assert.equal((await b.health()).self, stock)
     assert.equal(b.current().build, 'orca.1', 'the build stays installed')
 
+    // A routine run tries nothing (the worker's limits hold it back); Check now tries at once and says so.
     const routine = await b.run()
-    assert.equal(routine.ok, true)
-    assert.equal(routine.restarted, false)
+    assert.deepEqual([routine.restarted, routine.restartFailed, routine.detail], [false, undefined, 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use.'])
+    const asked = await b.run({ again: true })
+    assert.equal(asked.ok, true)
+    assert.deepEqual([asked.restarted, asked.restartFailed], [false, true])
     assert.equal(
-      routine.detail,
+      asked.detail,
       'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use. The Inbox was running standard Plannotator. The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
     )
     assert.equal((await b.health()).self, stock)

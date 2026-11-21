@@ -21,7 +21,8 @@
 //   plannotator-update --restart --if-plain  only a running standard Inbox of the build's own release
 //                                            (never a stopped one, never one already on the build)
 //   plannotator-update --again               as the first, and a build that could not be used is fetched
-//                                            again now (a person asked), not after its wait
+//                                            again now (a person asked), not after its wait, and a
+//                                            standard Inbox of the build's release is moved onto it now
 //
 // What runs it: the Plannotator Inbox in Orca mode (its Update button and its automatic updates run
 // `config.upgradeCommand --version <x.y.z>` detached, and read `upgradeStateFile` for progress), and
@@ -980,6 +981,12 @@ export async function update(options) {
   /** The build chosen from the list, once it is. */
   let ref = null
   /**
+   * A standard Inbox of the build's release is moved onto it here only when a person asked (`--again`:
+   * Check now). Any other run leaves it to the worker, which moves it through its own limits (once for
+   * each start of the Inbox, three a day, a wait after a failure: BuildStore.followRunning).
+   */
+  const keepWhenAsked = () => (again ? keepOnBuild({ shared, env, home, record: before, installed: follow, fetchImpl }) : Promise.resolve({ restarted: false }))
+  /**
    * The Inbox runs the Plannotator installed here until its Orca build is in use. `reason`: why a
    * published build was not used; `tried`: that build, when fetching it again would end the same way;
    * `fault`: see UpdateError.
@@ -1042,10 +1049,10 @@ export async function update(options) {
     if (!ref && follow) {
       if (before && before.version === follow) {
         // Its build is in use and the list no longer names it: it stays, and so does the Inbox on it.
-        const kept = await keepOnBuild({ shared, env, home, record: before, installed: follow, fetchImpl })
+        const kept = await keepWhenAsked()
         const detail = `The Orca build of Plannotator ${before.version} (${before.build}) stays in use.${keptWords(kept)}`
         state('ready', detail)
-        return { ok: true, installed: false, restarted: kept.restarted, version: before.version, build: before.build, latest, detail }
+        return { ok: true, installed: false, ...keptFields(kept), version: before.version, build: before.build, latest, detail }
       }
       return await plain(null)
     }
@@ -1074,12 +1081,12 @@ export async function update(options) {
     }
     if (before && before.version === ref.plannotator && buildNumber(before.build) >= buildNumber(ref.build)) {
       // "Stays in use" must be true of what runs: a standard Inbox of this release moves onto the build.
-      const kept = await keepOnBuild({ shared, env, home, record: before, installed: follow, fetchImpl })
+      const kept = await keepWhenAsked()
       const detail = kept.restarted
         ? `The Orca build of Plannotator ${before.version} (${before.build}) is already the newest.${keptWords(kept)}`
         : `The Orca build of Plannotator ${before.version} (${before.build}) is already the newest, and it stays in use.${keptWords(kept)}`
       state('ready', detail)
-      return { ok: true, installed: false, restarted: kept.restarted, version: before.version, build: before.build, latest, detail }
+      return { ok: true, installed: false, ...keptFields(kept), version: before.version, build: before.build, latest, detail }
     }
     // This very build was fetched and could not be used: it is left alone for a while. A person who
     // asks (the Inbox's Update, the panel's Check now) has it tried again at once.
@@ -1307,6 +1314,11 @@ export async function keepOnBuild({ shared, env, home, record, installed, fetchI
   }
 }
 
+/** What `keepOnBuild` did, for the result line: `restarted`, and `restartFailed` when it tried and the build did not answer. */
+function keptFields(kept) {
+  return { restarted: kept.restarted, ...(kept.failed ? { restartFailed: true } : {}) }
+}
+
 /** What `keepOnBuild` did, as a sentence to add to another; nothing when it left the Inbox alone. */
 function keptWords(kept) {
   if (kept.restarted) return ' The Inbox was running standard Plannotator and was restarted on it.'
@@ -1338,7 +1350,7 @@ export async function restartInbox(options) {
           detail: `The Inbox started on standard Plannotator ${kept.from.version}${pid}; restarted it on the Orca build ${record.version} (${record.build}).`
         }
       }
-      if (kept.failed) return { ok: false, restarted: false, detail: kept.detail }
+      if (kept.failed) return { ok: false, restarted: false, restartFailed: true, detail: kept.detail }
       return { ok: true, restarted: false, detail: `The Inbox was left as it is: ${kept.why}.` }
     }
     const dataDir = inboxDataDir(shared, env, home)
@@ -1349,12 +1361,13 @@ export async function restartInbox(options) {
     // Plannotator's `inbox restart` refuses until a person has turned the Inbox on; say that, not "did not answer".
     if (!running && !inboxTurnedOn(dataDir)) return { ok: false, detail: 'The Inbox is off on this computer, so it was not restarted. Open Inbox turns it on.' }
     if (await restartOn(record.path, dataDir, env, orcaConfig, { oldPid: running?.pid ?? null, fetchImpl })) {
-      return { ok: true, version: record.version, build: record.build, detail: `The Inbox runs on the Orca build of Plannotator ${record.version}.` }
+      return { ok: true, restarted: true, version: record.version, build: record.build, detail: `The Inbox runs on the Orca build of Plannotator ${record.version}.` }
     }
     const stock = findStock(env, home)
     const back = stock ? await restartOn(stock, dataDir, env, null, { fetchImpl }) : null
     return {
       ok: false,
+      restartFailed: true,
       detail: back
         ? `The Orca build of Plannotator ${record.version} did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.`
         : `The Orca build of Plannotator ${record.version} did not answer within 30 seconds, and stock Plannotator did not start either; the Inbox starts again with an agent’s next message.`

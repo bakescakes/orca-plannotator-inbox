@@ -108,7 +108,8 @@ export class PromptKinds {
       if (entry.kind !== null && started !== null) return Promise.resolve(entry.kind)
       if (at - entry.at < PROMPT_READ_AGAIN_MS) return Promise.resolve(entry.kind)
     }
-    const fresh = { started, kind: null as PromptKind | null, at, asked: at, reading: null as Promise<PromptKind | null> | null }
+    // While the same wait is read again, what was known of it stands until the read settles.
+    const fresh = { started, kind: entry?.kind ?? null, at, asked: at, reading: null as Promise<PromptKind | null> | null }
     fresh.reading = reader
       .pendingPromptKind(session)
       .catch(() => null)
@@ -120,6 +121,20 @@ export class PromptKinds {
       })
     this.known.set(session, fresh)
     return fresh.reading
+  }
+
+  /**
+   * What is known of this wait's prompt now, without waiting on Orca: the kind once read, else null.
+   * A read that is due starts in the background, shared with every other asker as `kindOf` shares
+   * it, and `onRead` is called when it settles on a different answer, so the caller can look again.
+   * A slow or failed read only means no kind yet.
+   */
+  knownKind(reader: PromptReader, session: string, started: number | null, onRead?: () => void): PromptKind | null {
+    const reading = this.kindOf(reader, session, started)
+    const entry = this.known.get(session)
+    const kind = entry?.kind ?? null
+    if (entry?.reading && onRead) void reading.then((read) => (read !== kind ? onRead() : undefined))
+    return kind
   }
 }
 

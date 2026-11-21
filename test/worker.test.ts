@@ -402,6 +402,29 @@ test('a failed automatic restart shows its reason and keeps Restart; nothing is 
   }
 })
 
+test('a Check now whose restart of a standard Inbox fails is not followed by a second restart from the worker', { skip: process.platform === 'win32' ? 'POSIX file modes' : false }, async () => {
+  const t = await machine()
+  try {
+    await until(() => t.updaterRuns.length >= 1, 'the first look for an Orca build')
+    await installBuild(t.shared)
+    const failed =
+      'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use. The Inbox was running standard Plannotator. The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
+    t.updater.next = { ok: true, installed: false, restarted: false, restartFailed: true, version: '0.28.66', build: 'orca.1', detail: failed }
+    assert.deepEqual(await t.worker.request('build.check'), { ok: false, message: failed })
+    assert.deepEqual(t.updaterRuns.at(-1), ['--again'])
+    // The fall back started the Inbox again on standard Plannotator: many looks, and no restart of it.
+    t.inbox.state.serverSession = 'boot-2'
+    for (let i = 0; i < 6; i += 1) {
+      const status = await t.worker.request('status.get', { fresh: true })
+      assert.deepEqual([status.server, status.build?.lastError], ['stock', failed])
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+    assert.equal(moves(t.updaterRuns), 0)
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
 test('with the Orca build switched off, nothing is downloaded and the status says nothing about it', async () => {
   const t = await machine({ orcaBuild: false })
   try {
