@@ -14,7 +14,7 @@ import type { KeyValue } from './ledger'
 import type { OwnedSession } from './lifecycle'
 import { resolveDataDir, sharedDir, type Env } from './paths'
 import { startNavigation, type Navigation, type NavigationDeps } from './navigation'
-import { OrcaCli, findProfile, locateOrcaCli } from './orca-cli'
+import { OrcaCli, PromptKinds, findProfile, locateOrcaCli } from './orca-cli'
 import type { ActionResult, AgentLink, BuildInfo, OwnAgentId, ServerMode, Status } from './protocol'
 import { installShared, launcherPath } from './shared'
 import { reducedLine, waitingLine } from './build-words'
@@ -122,7 +122,7 @@ function summary(status: Status): string {
     const build = status.build
     lines.push(
       build.mode === 'orca-build'
-        ? `Orca build of Plannotator ${build.version} (${build.build})${status.server === 'stock' ? '; the running Inbox is still standard Plannotator' : ''}`
+        ? `Orca build of Plannotator ${build.version} (${build.build})${build.moving ? '; the Inbox started on standard Plannotator and is moving to it' : status.server === 'stock' ? '; the running Inbox is still standard Plannotator' : ''}`
         : 'Standard Plannotator (no Orca build installed)'
     )
     if (build.waiting) lines.push(waitingLine(build))
@@ -240,6 +240,8 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   // The bridge: what the Orca build of Plannotator calls to start, stop, resume and open Orca chats.
   let bridge: Bridge | null = null
   const owned = new Map<string, OwnedSession>()
+  /** The kinds of prompt chats wait on: one read of a chat per wait, whoever asks. */
+  const prompts = new PromptKinds()
 
   /** The running Inbox, read again on every call (a restart moves the port and the token). */
   const inboxNow = async (): Promise<InboxClient> =>
@@ -264,6 +266,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     sharedDir: runtime.sharedDir,
     log: (message) => orca.log(message),
     owned: () => [...owned.values()],
+    prompts,
     gate: (session, reply) => (bridge ? bridge.lifecycle.deliveryAllowed(session, reply) : Promise.resolve(true)),
     exclusive: (session, task) => (bridge ? bridge.lifecycle.exclusive(session, task) : task()),
     onStatus: (status) => {
@@ -294,6 +297,20 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     }
     if (JSON.stringify([build, server]) !== before) publish(whole(engine.status()))
   }
+  /**
+   * A standard Inbox while the Orca build of its release is in use: after a login Plannotator's own
+   * login item, or a plain `plannotator` command, starts the Inbox on standard Plannotator. It is
+   * restarted on the build by itself, the way Restart in the panel does it; the store keeps it to once
+   * for each such Inbox and backs off after a failure (`BuildStore.followRunning`).
+   */
+  const followPlain = async (): Promise<void> => {
+    const { dataDir, orcaBuild } = await settings()
+    if (!orcaBuild || build?.mode !== 'orca-build' || build.updating || build.waiting || server !== 'stock') return
+    const outcome = await builds.followRunning(resolveDataDir(dataDir, runtime.env, runtime.home), () => void lookAtBuild(true).catch(() => undefined))
+    if (!outcome.ran) return
+    await lookAtBuild(true)
+    void engine.refresh().catch(() => undefined)
+  }
   /** Each look: installs or updates the Orca build when that is due (at most every 6 hours). */
   const keepBuild = (): void => {
     void (async () => {
@@ -302,6 +319,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
       await lookAtBuild(false)
       await work
       await lookAtBuild(true)
+      await followPlain()
     })().catch(() => undefined)
   }
 
@@ -434,6 +452,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
             store,
             status: () => engine.status(),
             deliveryState: (session, launch) => engine.launchDeliveryState(session, launch),
+            prompts,
             register: (chat) => {
               owned.set(chat.session, chat)
               void engine.refresh().catch(() => undefined)

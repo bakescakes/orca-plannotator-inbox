@@ -419,7 +419,22 @@ export function readProof(session, status, worktrees, repos) {
     if (remote || !absolutePath(repo.path)) return null
     project = repo.path
   }
-  return { session, project, working: row.path, roots: [...new Set([project, row.path])] }
+  // A bot's home, as Orca marks it: every chat in it is that bot's. A workspace only nested under a
+  // bot carries `bot` without `botHome`, and its chats are ordinary chats.
+  const bot = row.botHome === true && typeof row.bot === 'string' ? row.bot.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+  return { session, project, working: row.path, roots: [...new Set([project, row.path])], ...(bot ? { bot } : {}) }
+}
+
+/**
+ * How a bot's chat is named in the Inbox: the bot, then the agent it runs on, `Name (Claude bot)`.
+ * A name the agent gave itself takes the agent's place unless it is only the bot's own name; a name
+ * already in this form is kept.
+ */
+export function botAuthor(bot, given, agent) {
+  if (given && given.startsWith(`${bot} (`) && given.endsWith(' bot)')) return given
+  const own = given && !given.toLowerCase().includes(bot.toLowerCase()) && !bot.toLowerCase().includes(given.toLowerCase()) ? given : null
+  const inner = own ?? agent
+  return inner ? `${bot} (${inner} bot)` : `${bot} (bot)`
 }
 
 /** Asks Orca, with the chat's own environment, who this caller is and where it works. */
@@ -743,7 +758,8 @@ function validSnapshot(snapshot, tool) {
  * otherwise the call goes out exactly as the agent wrote it, and Plannotator's own identity and
  * wake rules apply. On a tool that writes (it takes `agent_host`), the chat is the author even
  * when the agent named another host, because that is what Plannotator's guide tells it to do on a
- * plain stdio server; the agent's own `agent_name` is kept. A different `agent_session`, or a
+ * plain stdio server; the agent's own `agent_name` is kept, except in a bot's chat, which is named
+ * as the bot's (`botAuthor`). A different `agent_session`, or a
  * `project_path` outside the chat's own folders, is refused.
  */
 export function enrich(message, context) {
@@ -780,7 +796,12 @@ export function enrich(message, context) {
       const named = typeof args.agent_host === 'string' ? args.agent_host.trim() : ''
       const hasName = typeof args.agent_name === 'string' && args.agent_name.trim() !== ''
       const name = context.name ?? (named && named !== 'orca' ? named : null)
-      if (fields.includes('agent_name') && !hasName && name) filled.agent_name = name
+      const bot = typeof proof.bot === 'string' && proof.bot !== '' ? proof.bot : null
+      if (fields.includes('agent_name') && bot) {
+        // A bot's chat is named as the bot's, whatever the agent called itself.
+        const label = botAuthor(bot, hasName ? args.agent_name.trim() : null, name)
+        if (label !== args.agent_name) filled.agent_name = label
+      } else if (fields.includes('agent_name') && !hasName && name) filled.agent_name = name
     } else if (fields.includes('agent_session') && args.agent_session === undefined) {
       // A reading tool: "mine" means this chat, unless the agent asked about another session.
       filled.agent_session = proof.session

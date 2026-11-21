@@ -12,6 +12,7 @@ import {
   REFUSALS,
   agentName,
   annotate,
+  botAuthor,
   createProver,
   enrich,
   linkFooter,
@@ -99,6 +100,30 @@ test('an agent that names its own host, as Plannotator’s connect prompt tells 
   assert.equal(message.params.arguments.agent_name, 'Codex (work)', 'its own name is kept')
   assert.equal(message.params.arguments.idempotency_key, 'plannotator-inbox-connect-v1-codex')
   assert.deepEqual(message.params._meta, { progressToken: 7, [WORKING]: WORKTREE, [WAKE]: true })
+})
+
+test('a bot’s chat is named as the bot’s, with the agent it runs on; its marks still come from the chat', () => {
+  const BOT = { ...PROOF, bot: 'Lighthouse Keeper' }
+  const named = (args, overrides = {}) => {
+    const message = call('send_message', { body: 'Hi', ...args })
+    enrich(message, context({ proof: BOT, footer: () => null, ...overrides }))
+    return message.params.arguments
+  }
+  assert.equal(named({}).agent_name, 'Lighthouse Keeper (Codex bot)')
+  assert.equal(named({ agent_name: 'Claude' }).agent_name, 'Lighthouse Keeper (Claude bot)', 'the name the agent gave itself is the agent')
+  assert.equal(named({ agent_name: 'Lighthouse Keeper' }).agent_name, 'Lighthouse Keeper (Codex bot)', 'only the bot’s own name: the agent is added')
+  assert.equal(named({ agent_name: 'Lighthouse Keeper (Claude bot)' }).agent_name, 'Lighthouse Keeper (Claude bot)', 'already named so: kept')
+  assert.equal(named({}, { name: null }).agent_name, 'Lighthouse Keeper (bot)', 'an agent nothing names')
+  // Only the name changes: the chat is still the author, so its icon and mark are the chat's.
+  const args = named({ agent_host: 'claude-code' }, { name: null })
+  assert.equal(args.agent_name, 'Lighthouse Keeper (claude-code bot)')
+  assert.equal(args.agent_host, 'orca')
+  assert.equal(args.agent_session, SESSION)
+  // Any other chat keeps the agent's own name.
+  const plain = call('send_message', { body: 'Hi', agent_name: 'Claude' })
+  enrich(plain, context({ footer: () => null }))
+  assert.equal(plain.params.arguments.agent_name, 'Claude')
+  assert.equal(botAuthor('Ferry', 'ferry', 'Pi'), 'Ferry (Pi bot)')
 })
 
 test('a call that names another session is refused, not rewritten; both spellings of this chat are accepted', () => {
@@ -360,6 +385,17 @@ test('the proof needs this exact live session in one local workspace', () => {
   assert.equal(readProof(SESSION, statusOf(SESSION), ok({ worktrees: [row(WORKTREE, [SESSION])], truncated: true }), repoList()), null, 'a partial list')
   assert.equal(readProof(SESSION, statusOf(SESSION), listing([row(WORKTREE, [SESSION])]), ok({ repos: [{ id: 'repo-1', path: REPO, connectionId: 'ssh' }] })), null, 'a remote repository')
   assert.equal(readProof(SESSION, statusOf(SESSION), listing([row(WORKTREE, [SESSION])]), null), null, 'no repository list')
+  // A bot's home, as `worktree ps` lists it: a folder workspace whose repoId names a project group, not a repository.
+  const home = { repoId: 'folder-workspace:group1', repo: 'Bots', workspaceKind: 'folder-workspace', bot: ' Lighthouse   Keeper ', botHome: true }
+  assert.deepEqual(readProof(SESSION, statusOf(SESSION), listing([row('/bots/lighthouse', [SESSION], home)]), repoList()), {
+    session: SESSION,
+    project: '/bots/lighthouse',
+    working: '/bots/lighthouse',
+    roots: ['/bots/lighthouse'],
+    bot: 'Lighthouse Keeper'
+  })
+  const nested = readProof(SESSION, statusOf(SESSION), listing([row(WORKTREE, [SESSION], { bot: 'Lighthouse Keeper' })]), repoList())
+  assert.deepEqual(nested, PROOF, 'a workspace only nested under a bot is an ordinary chat’s')
 })
 
 test('a proof is kept, looked at again in the background, and tried again after a failure', async () => {

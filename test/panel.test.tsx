@@ -109,6 +109,26 @@ test('a blocked reply can be sent again', async () => {
   await view.unmount()
 })
 
+test('a bot’s chat is named as the bot’s, in the chat list and on a reply that needs a person', async () => {
+  const host = mockHost({
+    requests: {
+      'status.get': () => ({
+        ...READY,
+        sessions: [...READY.sessions, { session: 'bot_one', title: 'Morning digest', provider: 'claude', bot: 'Lighthouse Keeper (Claude bot)', listening: true, note: null }],
+        counts: { inFlight: 0, delivered: 12, blocked: 1 },
+        blocked: [{ key: 'k2', subject: 'Which feeds?', session: 'bot_one', error: 'Not confirmed.', updated: 1_700_000_000_000, bot: 'Lighthouse Keeper (Claude bot)' }]
+      })
+    }
+  })
+  const view = await mount(panel, { host })
+  const row = view.find({ type: 'ListItem', label: 'Morning digest' })
+  assert.equal(row?.props.description, 'Lighthouse Keeper (Claude bot)')
+  assert.equal(view.find({ type: 'ListItem', label: 'Fix the importer' })?.props.description, 'claude', 'any other chat keeps its agent')
+  assert.ok(view.find({ text: 'To Lighthouse Keeper (Claude bot)' }))
+  assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+
 test('says why when delivery is not possible', async () => {
   const host = mockHost({
     requests: {

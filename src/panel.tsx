@@ -164,11 +164,13 @@ function Build({ build, server }: { build: BuildInfo; server: ServerMode | undef
         {build.waiting ? <Text muted size="xs">{waitingLine(build)}</Text> : null}
         {inUse && build.reduced ? <Text muted size="xs">{reducedLine(build.reduced)}</Text> : null}
         {!build.updating && build.lastError ? <Callout tone="warning">{build.lastError}</Callout> : null}
-        {inUse && server === 'stock' ? (
+        {inUse && build.moving ? (
+          <Callout tone="neutral">The Inbox started on standard Plannotator; moving it to the Orca build…</Callout>
+        ) : inUse && server === 'stock' ? (
           <Callout tone="neutral">The Inbox that is running now is standard Plannotator. Restart it to use the Orca build; nothing saved is lost.</Callout>
         ) : null}
         <Row gap="xs" wrap>
-          {inUse && server === 'stock' ? (
+          {inUse && server === 'stock' && !build.moving ? (
             <Button icon="refresh" disabled={read(busy)} onPress={() => act(() => plugin.request('inbox.restartOnBuild'))}>
               Restart Inbox
             </Button>
@@ -213,11 +215,12 @@ export default function Panel() {
       {message ? <Callout tone={message.ok ? 'success' : 'warning'}>{message.message}</Callout> : null}
 
       {current.blocked.length > 0 ? (
-        <Card title="Needs you" description="Orca did not confirm these replies, so they were not sent a second time. They are still in the Inbox.">
+        <Card title="Needs you" description="Orca did not take or did not confirm these replies, and none was sent a second time. They are still in the Inbox.">
           <Stack gap="sm">
             {current.blocked.map((row) => (
               <Stack gap="xs">
                 <Text weight="medium" truncate>{row.subject ?? 'A reply'}</Text>
+                {row.bot ? <Text muted size="xs" truncate>To {row.bot}</Text> : null}
                 <Text muted size="xs">
                   {row.error ?? 'Not confirmed.'} <RelativeTime at={row.updated} muted />
                 </Text>
@@ -238,6 +241,7 @@ export default function Panel() {
             {(current.rejected ?? []).map((row) => (
               <Stack gap="xs">
                 <Text weight="medium" truncate>{row.subject ?? 'A reply'}</Text>
+                {row.bot ? <Text muted size="xs" truncate>To {row.bot}</Text> : null}
                 <Text muted size="xs">
                   {row.error ?? 'Not delivered.'} <RelativeTime at={row.updated} muted />
                 </Text>
@@ -256,7 +260,7 @@ export default function Panel() {
               <ListItem
                 icon="agent"
                 title={chat.title ?? chat.session}
-                description={[chat.provider, chat.listening ? null : 'not listening', chat.note].filter(Boolean).join(' · ') || undefined}
+                description={[chat.bot ?? chat.provider, chat.listening ? null : 'not listening', chat.note].filter(Boolean).join(' · ') || undefined}
               />
             ))}
           </List>

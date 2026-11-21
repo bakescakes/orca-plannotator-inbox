@@ -4,18 +4,22 @@
 import { execFile } from 'node:child_process'
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
-import { canonicalSession, isRecord } from './util'
+import { argvLimit } from './envelope'
+import { byteLength, canonicalSession, isRecord } from './util'
 
 const MAX_OUTPUT = 32 * 1024 * 1024
 /** How Orca names a native chat's pane: `structured-agent-session-<session id>:<uuid>`. */
 const CHAT_PANE = /^structured-agent-session-([A-Za-z0-9_-]{1,160}):[0-9a-fA-F-]{36}$/
 const MAIL_ADDRESS = /^(?:run|dispatch):[A-Za-z0-9_-]{1,160}$/
+/** How long an unreadable command schema is trusted to mean "no `--body-file`" before asking again. */
+const BODY_FILE_ASK_AGAIN_MS = 10 * 60_000
 
 export type ExecResult = { code: number; stdout: string }
+/** `input`, when given, is written to the program's standard input and closed. */
 export type Exec = (
   file: string,
   args: string[],
-  options: { env: Record<string, string | undefined>; timeoutMs: number }
+  options: { env: Record<string, string | undefined>; timeoutMs: number; input?: string }
 ) => Promise<ExecResult>
 
 /** One native Orca chat on this machine. */
@@ -25,6 +29,138 @@ export type NativeSession = {
   provider: string | null
   title: string | null
   workspacePath: string | null
+  /** The bot whose chat this is (it runs in that bot's home), or null for any other chat. */
+  bot: string | null
+  /** What the chat waits on the person for, as `worktree ps` says (`chatWait`); null when it does not wait. */
+  waiting: ChatWait
+  /** When the chat's current state began (Orca's clock, ms); null when Orca does not say. */
+  stateStartedAt: number | null
+}
+
+/**
+ * `blocked`: the chat itself shows a prompt it waits on (a permission or a question; `agent read`
+ * says which). `lead-waiting`: the chat's own turn asked the person something it does not wait on.
+ * A wait held only by a child agent is not the chat's and reads as null.
+ */
+export type ChatWait = 'blocked' | 'lead-waiting' | null
+/** The kind of prompt a chat waits on, in the Inbox's words. */
+export type PromptKind = 'permission' | 'question'
+
+/** What one `worktree ps` agent row says the chat waits on (see `ChatWait`). */
+export function chatWait(agent: Record<string, unknown>): ChatWait {
+  if (agent.state === 'blocked') return 'blocked'
+  if (agent.state === 'waiting' && isRecord(agent.mainAgent) && agent.mainAgent.state === 'waiting') return 'lead-waiting'
+  return null
+}
+
+function startedAt(agent: Record<string, unknown>): number | null {
+  const value = agent.stateStartedAt
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}
+
+/**
+ * The kind of prompt an `orca agent read` answer shows pending: a permission when any approval is,
+ * else a question when any question is, else null. Only each entry's `kind` and `pending` are read;
+ * the words of the conversation are never kept.
+ */
+export function promptKindOf(result: unknown): PromptKind | null {
+  if (!isRecord(result) || !Array.isArray(result.entries)) return null
+  let question = false
+  for (const entry of result.entries) {
+    if (!isRecord(entry) || entry.pending !== true) continue
+    if (entry.kind === 'approval') return 'permission'
+    if (entry.kind === 'question') question = true
+  }
+  return question ? 'question' : null
+}
+
+/** How long a read that found no pending prompt (or failed) stands before the chat is read again. */
+const PROMPT_READ_AGAIN_MS = 60_000
+/** A chat that has not been asked about for this long is forgotten. */
+const PROMPT_FORGET_MS = 10 * 60_000
+
+/** Reads the kind of prompt one chat waits on: null when none is pending or Orca cannot say. Never throws. */
+export type PromptReader = { pendingPromptKind(session: string): Promise<PromptKind | null> }
+
+/**
+ * The kind of prompt each blocked chat waits on, read once per wait and shared by everyone who asks
+ * (reply delivery and the Inbox's chat list), so a wait costs one `agent read`. A wait is told apart
+ * by the time Orca says the chat's state began. A kind once found stands for that wait; a read that
+ * found none, or failed, is tried again after a minute.
+ */
+export class PromptKinds {
+  private readonly now: () => number
+  private readonly known = new Map<string, { started: number | null; kind: PromptKind | null; at: number; asked: number; reading: Promise<PromptKind | null> | null }>()
+
+  constructor(now: () => number = Date.now) {
+    this.now = now
+  }
+
+  kindOf(reader: PromptReader, session: string, started: number | null): Promise<PromptKind | null> {
+    const at = this.now()
+    for (const [key, entry] of this.known) if (at - entry.asked > PROMPT_FORGET_MS) this.known.delete(key)
+    let entry = this.known.get(session)
+    if (entry && entry.started !== started) entry = undefined
+    if (entry) {
+      entry.asked = at
+      if (entry.reading) return entry.reading
+      // A wait Orca gives no start time for cannot be told from the next one: it is read again too.
+      if (entry.kind !== null && started !== null) return Promise.resolve(entry.kind)
+      if (at - entry.at < PROMPT_READ_AGAIN_MS) return Promise.resolve(entry.kind)
+    }
+    // While the same wait is read again, what was known of it stands until the read settles.
+    const fresh = { started, kind: entry?.kind ?? null, at, asked: at, reading: null as Promise<PromptKind | null> | null }
+    fresh.reading = reader
+      .pendingPromptKind(session)
+      .catch(() => null)
+      .then((kind) => {
+        fresh.kind = kind
+        fresh.at = this.now()
+        fresh.reading = null
+        return kind
+      })
+    this.known.set(session, fresh)
+    return fresh.reading
+  }
+
+  /**
+   * What is known of this wait's prompt now, without waiting on Orca: the kind once read, else null.
+   * A read that is due starts in the background, shared with every other asker as `kindOf` shares
+   * it, and `onRead` is called when it settles on a different answer, so the caller can look again.
+   * A slow or failed read only means no kind yet.
+   */
+  knownKind(reader: PromptReader, session: string, started: number | null, onRead?: () => void): PromptKind | null {
+    const reading = this.kindOf(reader, session, started)
+    const entry = this.known.get(session)
+    const kind = entry?.kind ?? null
+    if (entry?.reading && onRead) void reading.then((read) => (read !== kind ? onRead() : undefined))
+    return kind
+  }
+}
+
+/**
+ * The bot a `worktree ps` row is the home of, or null. Orca marks a bot's home with `botHome` and
+ * the bot's name, and every chat in that home is the bot's; a workspace merely nested under a bot
+ * carries `bot` without `botHome`, and its chats are ordinary chats.
+ */
+export function homeBot(tree: Record<string, unknown>): string | null {
+  if (tree.botHome !== true || typeof tree.bot !== 'string') return null
+  const name = tree.bot.replace(/\s+/g, ' ').trim().slice(0, 120)
+  return name === '' ? null : name
+}
+
+/**
+ * The payload Orca puts on mail that reaches a bot's chat in place of the sender's own: a JSON
+ * object with a `botRequest` view the receiving bot reads beside the message.
+ */
+export function isBotRequestPayload(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.startsWith('{')) return false
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return isRecord(parsed) && isRecord(parsed.botRequest)
+  } catch {
+    return false
+  }
 }
 export type MailMessage = Record<string, unknown> & { id: string; to_handle: string }
 export type SendInput = { session: string; subject: string; body: string; payload: string }
@@ -33,12 +169,23 @@ export type SendInput = { session: string; subject: string; body: string; payloa
 export class OrcaRefused extends Error {
   readonly code: string
   readonly notSent: boolean
-  constructor(code: string, notSent: boolean) {
+  /** Orca's own words for the error, when it gave any. */
+  readonly detail: string | null
+  /** The flags the command takes, when Orca refused a flag it does not know. */
+  readonly validFlags: readonly string[] | null
+  constructor(code: string, notSent: boolean, detail: string | null = null, validFlags: readonly string[] | null = null) {
     super(`Orca refused: ${code}`)
     this.code = code
     this.notSent = notSent
+    this.detail = detail
+    this.validFlags = validFlags
   }
 }
+/**
+ * A reply this Orca's CLI cannot carry: it has no `--body-file`, and the reply is longer than a
+ * command line may be. Nothing was sent.
+ */
+export class OrcaTooLong extends Error {}
 /** The CLI could not be started at all, so nothing was sent. */
 export class OrcaNotRun extends Error {}
 /** The CLI ran but its answer is not one this plugin understands. */
@@ -47,7 +194,7 @@ export class OrcaContractError extends Error {}
 export const defaultExec: Exec = (file, args, options) =>
   new Promise((resolvePromise, reject) => {
     try {
-      execFile(
+      const child = execFile(
         file,
         args,
         { env: options.env as NodeJS.ProcessEnv, timeout: options.timeoutMs, maxBuffer: MAX_OUTPUT, cwd: '/', windowsHide: true },
@@ -58,6 +205,11 @@ export const defaultExec: Exec = (file, args, options) =>
           resolvePromise({ code, stdout: String(stdout ?? '') })
         }
       )
+      if (options.input !== undefined && child.stdin) {
+        // A CLI that stops before reading all of it (it refused an argument) closes the pipe early.
+        child.stdin.on('error', () => undefined)
+        child.stdin.end(options.input, 'utf8')
+      }
     } catch {
       // Refused before anything started (Windows does this for a `.cmd`), so nothing was sent.
       reject(new OrcaNotRun('The Orca CLI cannot be run.'))
@@ -165,7 +317,10 @@ export function parseInventory(result: unknown): Map<string, NativeSession> {
         busy: agent.state === 'working',
         provider: typeof agent.agentType === 'string' ? agent.agentType : null,
         title: typeof title === 'string' ? title.replace(/\s+/g, ' ').trim().slice(0, 120) : null,
-        workspacePath: typeof tree.path === 'string' ? tree.path : null
+        workspacePath: typeof tree.path === 'string' ? tree.path : null,
+        bot: homeBot(tree),
+        waiting: chatWait(agent),
+        stateStartedAt: startedAt(agent)
       })
     }
   }
@@ -186,6 +341,10 @@ export type NavigationTarget = {
   /** The selector `orca worktree activate --worktree` takes for exactly this workspace. */
   selector: string
   folder: boolean
+  /** The bot whose chat this is, or null (see `homeBot`). */
+  bot?: string | null
+  /** The chat's name as Orca lists it, when it has one. */
+  title?: string | null
 }
 
 export function parseNavigationTargets(result: unknown): NavigationTarget[] {
@@ -200,12 +359,21 @@ export function parseNavigationTargets(result: unknown): NavigationTarget[] {
     if (tree.hostId !== undefined && tree.hostId !== null && tree.hostId !== 'local') continue
     if (typeof tree.worktreeId !== 'string' || tree.worktreeId === '' || tree.worktreeId.length > 4096) continue
     const folder = tree.workspaceKind === 'folder-workspace' || tree.worktreeId.startsWith('folder:')
+    const bot = homeBot(tree)
     for (const agent of tree.agents) {
       if (!isRecord(agent) || typeof agent.paneKey !== 'string') continue
       const match = CHAT_PANE.exec(agent.paneKey)
       const session = match ? canonicalSession(match[1]) : null
       if (!session) continue
-      targets.push({ session, worktreeId: tree.worktreeId, selector: `id:${tree.worktreeId}`, folder })
+      const title = [agent.conversationName, agent.taskTitle].find((value) => typeof value === 'string' && value.trim() !== '')
+      targets.push({
+        session,
+        worktreeId: tree.worktreeId,
+        selector: `id:${tree.worktreeId}`,
+        folder,
+        bot,
+        title: typeof title === 'string' ? title.replace(/\s+/g, ' ').trim().slice(0, 120) : null
+      })
     }
   }
   return targets
@@ -241,15 +409,41 @@ export function parseMail(value: unknown): MailMessage | null {
   return value as MailMessage
 }
 
+/**
+ * Orca's argument check refusing `--body-file` as a flag it does not know. That check runs before
+ * the CLI connects to the app, so nothing was sent.
+ */
+function isUnknownBodyFile(error: unknown): boolean {
+  if (!(error instanceof OrcaRefused) || error.code !== 'invalid_argument') return false
+  if (error.detail !== null && /unknown flag --body-file\b/i.test(error.detail)) return true
+  return error.validFlags !== null && error.validFlags.length > 0 && !error.validFlags.includes('body-file')
+}
+
+/** Whether a mail fits on one command line on this platform (see `src/envelope.ts`). */
+function fitsCommandLine(input: SendInput): boolean {
+  return byteLength(input.body) + byteLength(input.payload) + byteLength(input.subject) <= argvLimit(process.platform)
+}
+
 export class OrcaCli {
   private readonly command: string[]
   private readonly exec: Exec
   private readonly env: Record<string, string | undefined>
+  private readonly now: () => number
+  /** Whether `orchestration send` takes `--body-file`; `final` once Orca has said so clearly. */
+  private bodyFile: { value: boolean; final: boolean; until: number } | null = null
   readonly sender: string
 
-  constructor(options: { command: string[]; exec?: Exec; env?: Record<string, string | undefined>; sender?: string; profile?: string | null }) {
+  constructor(options: {
+    command: string[]
+    exec?: Exec
+    env?: Record<string, string | undefined>
+    sender?: string
+    profile?: string | null
+    now?: () => number
+  }) {
     this.command = options.command
     this.exec = options.exec ?? defaultExec
+    this.now = options.now ?? Date.now
     this.sender = options.sender ?? 'plannotator-inbox'
     // The plugin speaks as itself: never with an agent's identity or a remote selection.
     const env: Record<string, string | undefined> = {}
@@ -263,11 +457,12 @@ export class OrcaCli {
     this.env = env
   }
 
-  async call(args: string[], timeoutMs = 25_000): Promise<Record<string, unknown>> {
+  async call(args: string[], timeoutMs = 25_000, input?: string): Promise<Record<string, unknown>> {
     const [file, ...prefix] = this.command
     const { code, stdout } = await this.exec(file!, [...prefix, ...args, '--environment', 'local', '--json'], {
       env: this.env,
-      timeoutMs
+      timeoutMs,
+      ...(input === undefined ? {} : { input })
     })
     let parsed: unknown
     try {
@@ -279,9 +474,40 @@ export class OrcaCli {
     if (code !== 0 || parsed.ok !== true) {
       const error = isRecord(parsed.error) ? parsed.error : {}
       const data = isRecord(error.data) ? error.data : {}
-      throw new OrcaRefused(typeof error.code === 'string' ? error.code : 'command_failed', data.requestSent === false)
+      const validFlags = Array.isArray(data.validFlags) ? data.validFlags.filter((flag): flag is string => typeof flag === 'string') : null
+      throw new OrcaRefused(
+        typeof error.code === 'string' ? error.code : 'command_failed',
+        data.requestSent === false,
+        typeof error.message === 'string' ? error.message.slice(0, 500) : null,
+        validFlags
+      )
     }
     return isRecord(parsed.result) ? parsed.result : {}
+  }
+
+  /**
+   * Whether this CLI's `orchestration send` takes `--body-file` (Orca 1.4.265 and later), read
+   * from its own command schema (`orca agent-context`, a local read that needs no running app).
+   * A clear answer is kept for the life of this object; an unreadable one is asked again later.
+   */
+  async takesBodyFile(): Promise<boolean> {
+    const known = this.bodyFile
+    if (known && (known.final || this.now() < known.until)) return known.value
+    const [file, ...prefix] = this.command
+    let value: boolean | null = null
+    try {
+      const { stdout } = await this.exec(file!, [...prefix, 'agent-context', '--json'], { env: this.env, timeoutMs: 15_000 })
+      const schema: unknown = JSON.parse(stdout)
+      if (isRecord(schema) && Array.isArray(schema.commands)) {
+        const send = schema.commands.find((entry) => isRecord(entry) && entry.command === 'orchestration send')
+        if (isRecord(send) && Array.isArray(send.flags)) value = send.flags.includes('body-file')
+      }
+    } catch {
+      value = null
+    }
+    // A clear answer stays; while the schema cannot be read, the command line is used.
+    this.bodyFile = value === null ? { value: false, final: false, until: this.now() + BODY_FILE_ASK_AGAIN_MS } : { value, final: true, until: 0 }
+    return this.bodyFile.value
   }
 
   async version(): Promise<string | null> {
@@ -293,6 +519,20 @@ export class OrcaCli {
 
   async inventory(): Promise<Map<string, NativeSession>> {
     return parseInventory(await this.call(['worktree', 'ps', '--limit', '1000']))
+  }
+
+  /**
+   * The kind of prompt one chat waits on (`orca agent read`, its newest entries): a permission, a
+   * question, or null when none is pending, the read fails, or this Orca has no `agent read`. The
+   * answer holds the conversation's words; only each entry's kind and whether it is pending are
+   * read from it, and nothing of it is kept or logged.
+   */
+  async pendingPromptKind(session: string): Promise<PromptKind | null> {
+    try {
+      return promptKindOf(await this.call(['agent', 'read', '--id', `orca_session_id:${session}`, '--limit', '10'], 12_000))
+    } catch {
+      return null
+    }
   }
 
   /** The local native chats with the workspace each one is in, for "Open in Orca" links. */
@@ -322,19 +562,31 @@ export class OrcaCli {
     return parseRepoList(await this.call(['repo', 'list'], 12_000))
   }
 
-  /** Queues one mail for a chat. `requestId` makes a repeat replay the first result. */
+  /**
+   * Queues one mail for a chat. `requestId` makes a repeat replay the first result.
+   *
+   * The body goes through standard input (`--body-file -`) where this Orca takes it, so a long
+   * reply is never cut by the system's limit on a command line and never shows in the process
+   * list. An Orca without `--body-file` refuses the flag while reading its arguments, before it
+   * reaches the app, so nothing was sent: the same request goes again with `--body`, and this
+   * object remembers that Orca's answer.
+   */
   async send(input: SendInput, requestId: string): Promise<MailMessage> {
-    const result = await this.call([
-      'orchestration', 'send',
-      '--from', this.sender,
-      '--to', `orca_session_id:${input.session}`,
-      '--type', 'status',
-      '--subject', input.subject,
-      '--body', input.body,
-      '--payload', input.payload,
-      '--retry-request', requestId,
-      '--full'
-    ])
+    const head = ['orchestration', 'send', '--from', this.sender, '--to', `orca_session_id:${input.session}`, '--type', 'status', '--subject', input.subject]
+    const tail = ['--payload', input.payload, '--retry-request', requestId, '--full']
+    if (await this.takesBodyFile()) {
+      try {
+        const result = await this.call([...head, '--body-file', '-', ...tail], 25_000, input.body)
+        return this.checkedMessage(result.message, input)
+      } catch (error) {
+        if (!isUnknownBodyFile(error)) throw error
+        this.bodyFile = { value: false, final: true, until: 0 }
+      }
+    }
+    if (!fitsCommandLine(input)) {
+      throw new OrcaTooLong('This reply is too long for this Orca’s command line, and this Orca cannot take it another way, so nothing was sent. Update Orca, then press Send again.')
+    }
+    const result = await this.call([...head, '--body', input.body, ...tail])
     return this.checkedMessage(result.message, input)
   }
 
@@ -353,7 +605,11 @@ export class OrcaCli {
     return result.messages.map(parseMail).filter((message): message is MailMessage => message !== null)
   }
 
-  /** A receipt counts only when it is this exact mail: same sender, body, payload and a chat address. */
+  /**
+   * A receipt counts only when it is this exact mail: same sender, body, payload and a chat address.
+   * Mail to a bot's chat is the one exception Orca makes: it keeps the sender, address and body but
+   * replaces the payload with its own record of the request (`isBotRequestPayload`).
+   */
   checkedMessage(value: unknown, input: SendInput): MailMessage {
     const message = parseMail(value)
     const address = message?.to_handle ?? ''
@@ -362,7 +618,7 @@ export class OrcaCli {
       !message ||
       !addressed ||
       message.from_handle !== this.sender ||
-      message.payload !== input.payload ||
+      (message.payload !== input.payload && !isBotRequestPayload(message.payload)) ||
       message.body !== input.body
     ) {
       throw new OrcaContractError('Orca returned a receipt that does not match the mail that was sent.')
@@ -416,6 +672,10 @@ export type LifecycleSession = {
   busy: boolean
   /** Orca's own word for what the chat is doing (`working`, `idle`, …), when it gives one. */
   state: string | null
+  /** What the chat waits on the person for (see `ChatWait`). */
+  waiting: ChatWait
+  /** When the chat's current state began (Orca's clock, ms); null when Orca does not say. */
+  stateStartedAt: number | null
 }
 export type LifecycleInventory = {
   workspaces: LifecycleWorkspace[]
@@ -467,10 +727,14 @@ export function parseLifecycleInventory(ps: unknown, repoList: unknown): Lifecyc
         workspaceId: tree.worktreeId,
         agentType: typeof agent.agentType === 'string' ? agent.agentType : null,
         busy: agent.state === 'working',
-        state: typeof agent.state === 'string' ? agent.state.slice(0, 40) : null
+        state: typeof agent.state === 'string' ? agent.state.slice(0, 40) : null,
+        waiting: chatWait(agent),
+        stateStartedAt: startedAt(agent)
       })
     }
     if (tree.isArchived === true) continue
+    // A bot's home is the bot's: a chat started there would be the bot's chat, which the Inbox does not start.
+    if (homeBot(tree) !== null) continue
     const project = typeof tree.repoId === 'string' ? roots.get(tree.repoId) : undefined
     if (!project) continue
     const address = isRecord(tree.address) ? tree.address : null

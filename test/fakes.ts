@@ -2,6 +2,8 @@
 // Orca's CLI (argv in, one JSON document out) and the Plannotator Inbox (loopback HTTP).
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { InboxCommand } from '../src/inbox'
@@ -23,6 +25,48 @@ export async function tempDir(prefix = 'orca-plannotator-'): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix))
 }
 
+/**
+ * The chat's agent in the in-app tests: a `claude` on the throwaway PATH that notes the variables Orca
+ * gave the chat into `chatEnvDir`, then runs the real program with its own empty settings folder and a
+ * made-up key. Orca closes a chat whose Claude says it is not signed in, so the agent has a key, but
+ * not anyone's: its model address is `modelUrl` (see `refusingModel`), so its turns fail at once and
+ * nothing leaves this computer.
+ */
+export function chatAgentScript(input: { claude: string; chatEnvDir: string; configDir: string; modelUrl: string; variables: readonly string[] }): string {
+  const quoted = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
+  return [
+    '#!/bin/sh',
+    'if [ -n "${ORCA_AGENT_SESSION_ID:-}" ]; then',
+    `  target=${quoted(input.chatEnvDir)}/"$ORCA_AGENT_SESSION_ID"`,
+    `  for name in ${input.variables.join(' ')}; do eval "value=\\\${$name-}"; printf '%s=%s\\n' "$name" "$value"; done > "$target.$$.tmp" && mv "$target.$$.tmp" "$target"`,
+    'fi',
+    `CLAUDE_CONFIG_DIR=${quoted(input.configDir)} ANTHROPIC_API_KEY=${quoted(FAKE_MODEL_KEY)} ANTHROPIC_BASE_URL=${quoted(input.modelUrl)} \\`,
+    `  DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 exec ${quoted(input.claude)} "$@"`,
+    ''
+  ].join('\n')
+}
+
+/** The made-up key `chatAgentScript` gives the chat's agent; `refusingModel` turns it away. */
+export const FAKE_MODEL_KEY = 'not-a-real-key-orca-plannotator-test'
+
+/** A model address on 127.0.0.1 that answers every request as an unknown key, so the agent does not retry. */
+export async function refusingModel(): Promise<{ url: string; requests: () => number; close: () => Promise<void> }> {
+  let requests = 0
+  const server = createServer((request, response) => {
+    requests += 1
+    request.resume()
+    response.writeHead(401, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests: () => requests,
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()) })
+  }
+}
+
 export async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!(await check())) {
@@ -38,8 +82,18 @@ export type SendFault =
   | 'answer-lost' // the mail is queued but the answer never arrives
   | 'dropped' // nothing is queued and the answer never arrives
 
-export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean } = {}) {
+/**
+ * `bodyFile`: whether this Orca's `orchestration send` takes `--body-file` (1.4.265 and later; the
+ * default). Without it, its command schema lacks the flag and its argument check refuses it, as an
+ * older Orca does.
+ */
+export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean; bodyFile?: boolean } = {}) {
   const state = {
+    bodyFile: options.bodyFile ?? true,
+    /** What each send read from standard input (undefined: nothing was written to it). */
+    stdin: [] as (string | undefined)[],
+    /** How many times the command schema (`agent-context`) was read. */
+    schemaReads: 0,
     sessions: new Set(options.sessions ?? []),
     busy: new Set<string>(),
     mail: [] as Mail[],
@@ -55,12 +109,39 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
     worktreePath: '/work/project',
     repoId: 'repo_1' as string | null,
     repos: [{ id: 'repo_1', path: '/work/project' }] as { id: string; path: string }[],
-    reposDown: false
+    reposDown: false,
+    /**
+     * Chats that are a bot's, by session, with the bot's name. As Orca does, `worktree ps` lists them
+     * in the bot's home (a folder workspace marked `botHome`), and mail to one keeps its sender,
+     * address and body but carries Orca's own record of the request as its payload.
+     */
+    bots: new Map<string, string>(),
+    /** Orca refuses every send with this error, having stored nothing (as for a closed chat or a paused bot). */
+    refusal: null as null | { code: string; message: string },
+    /**
+     * A chat's own status row, by session, in place of `working`/`idle`: `state`, the lead's `mainAgent`
+     * and when the state began (`stateStartedAt`), as Orca 1.4.266 lists them.
+     */
+    rows: new Map<string, { state: string; mainAgent?: { state: string }; stateStartedAt?: number }>(),
+    /**
+     * What `agent read` answers for a chat: its newest entries, with the words a real chat would hold. A
+     * chat not here has none; `agentRead: false` is an Orca without the command.
+     */
+    entries: new Map<string, Record<string, unknown>[]>(),
+    agentRead: true,
+    /** When set, each `agent read` answers only once what this returns settles: a slow (or never answering) read. */
+    readGate: null as null | ((session: string) => Promise<void>)
   }
   const ok = (result: unknown) => ({ code: 0, stdout: JSON.stringify({ ok: true, result }) })
   const refuse = (code: string, data?: unknown) => ({ code: 1, stdout: JSON.stringify({ ok: false, error: { code, data } }) })
   const option = (args: string[], name: string): string => args[args.indexOf(name) + 1] ?? ''
   const exec: Exec = async (_file, argv, execOptions) => {
+    if (argv[0] === 'agent-context') {
+      // A local read of the command schema: no `--environment`, and no `{ ok, result }` wrapper.
+      state.schemaReads += 1
+      const flags = ['help', 'json', 'environment', 'to', 'from', 'subject', 'body', ...(state.bodyFile ? ['body-file'] : []), 'type', 'payload', 'retry-request']
+      return { code: 0, stdout: JSON.stringify({ schemaVersion: 1, commandCount: 1, commands: [{ command: 'orchestration send', path: ['orchestration', 'send'], flags }] }) }
+    }
     const args = argv.slice(0, -3) // `--environment local --json`
     state.calls.push(args)
     state.envs.push(execOptions.env)
@@ -74,28 +155,67 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
             : `chat:${session}`,
         state: state.busy.has(session) ? 'working' : 'idle',
         agentType: 'claude',
-        conversationName: `Chat ${index + 1}`
+        conversationName: `Chat ${index + 1}`,
+        ...state.rows.get(session)
       }))
-      const local = { path: state.worktreePath, hostId: null, agents, ...(state.repoId ? { repoId: state.repoId } : {}) }
-      return ok({ worktrees: [local, { path: '/remote', hostId: 'ssh-1', agents: [] }], truncated: false })
+      const plain = agents.filter((_agent, index) => !state.bots.has([...state.sessions][index]!))
+      const local = { path: state.worktreePath, hostId: null, agents: plain, ...(state.repoId ? { repoId: state.repoId } : {}) }
+      // Each bot's home, recorded from a real `worktree ps`: its repoId names a project group, not a repository.
+      const homes = [...new Set(state.bots.values())].map((bot, index) => ({
+        path: `/bots/home-${index + 1}`,
+        worktreeId: `folder:home-${index + 1}`,
+        workspaceKind: 'folder-workspace',
+        repo: 'Bots',
+        repoId: 'folder-workspace:group-1',
+        hostId: 'local',
+        bot,
+        botHome: true,
+        agents: agents.filter((_agent, at) => state.bots.get([...state.sessions][at]!) === bot)
+      }))
+      return ok({ worktrees: [local, ...homes, { path: '/remote', hostId: 'ssh-1', agents: [] }], truncated: false })
+    }
+    if (command === 'agent read') {
+      if (!state.agentRead) return refuse('invalid_argument', { suggestions: ['list', 'show'] })
+      const session = option(args, '--id').replace(/^orca_session_id:/, '')
+      if (state.readGate) await state.readGate(session)
+      if (!state.sessions.has(session)) return refuse('agent_unknown')
+      return ok({ orcaSessionId: session, kind: 'chat', agent: 'claude', source: 'chat', entries: state.entries.get(session) ?? [], limited: false })
     }
     if (command === 'repo list') {
       if (state.reposDown) return refuse('runtime_unavailable')
       return ok({ repos: state.repos })
     }
     if (command === 'orchestration send') {
+      if (args.includes('--body-file') && !state.bodyFile) {
+        // An older Orca's argument check, before it connects to the app: nothing is sent.
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { code: 'invalid_argument', message: 'Unknown flag --body-file for command: orchestration send', data: { validFlags: ['body', 'from', 'subject', 'to'], suggestions: ['body'] } }
+          })
+        }
+      }
+      state.stdin.push(execOptions.input)
+      const body = args.includes('--body-file') ? (option(args, '--body-file') === '-' ? (execOptions.input ?? '') : `<file ${option(args, '--body-file')}>`) : option(args, '--body')
       const request = option(args, '--retry-request')
       if (state.sendFault === 'not-sent') return refuse('consumer_fenced', { requestSent: false })
       if (state.sendFault === 'dropped') return { code: 1, stdout: '' }
+      if (state.refusal) return { code: 1, stdout: JSON.stringify({ ok: false, error: state.refusal }) }
       let message = state.requests.get(request)
       if (!message) {
+        const to = option(args, '--to')
+        const bot = state.bots.get(to.replace(/^orca_session_id:/, ''))
+        const id = `mail_${state.mail.length + 1}`
         message = {
-          id: `mail_${state.mail.length + 1}`,
+          id,
           from_handle: option(args, '--from'),
-          to_handle: option(args, '--to'),
+          to_handle: to,
           subject: option(args, '--subject'),
-          body: option(args, '--body'),
-          payload: option(args, '--payload'),
+          body,
+          payload: bot
+            ? JSON.stringify({ botRequest: { from: 'your owner', for: 'your owner', kind: 'status: for your information; there is no job to take and nothing to answer', next: `Use it in your own work if it bears on it (${id}).` } })
+            : option(args, '--payload'),
           delivered_at: state.deliverAtOnce ? '2026-01-01T00:00:00Z' : null
         }
         state.mail.push(message)
@@ -183,11 +303,17 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
   const state = {
     token: 'token-1',
     up: true,
+    /** The health answer's `serverSession`: a new one is a new start of the Inbox. */
+    serverSession: 'boot-1',
     queue: new Map<string, unknown[]>(),
     acknowledged: [] as { session: string; id: string }[],
     polls: [] as Record<string, unknown>[],
     threads: { projects: [] as unknown[], sections: [] as unknown[] },
     ackStatus: 200,
+    /** Every `state` event (`POST /api/inbox/bridge/event` with `type: "state"`), as sent. */
+    events: [] as Record<string, unknown>[],
+    /** How long an empty poll is held open (a real one up to 25 s); short by default to keep tests fast. */
+    holdMs: 15,
     /**
      * `GET /api/inbox/threads/<id>`: an answer set here is served as it is; otherwise the thread is
      * made from every `reply()` in it, each a person's reply (written now) to an agent question by
@@ -230,7 +356,7 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
     const path = new URL(String(input)).pathname
     const headers = (init?.headers ?? {}) as Record<string, string>
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {}
-    if (path === '/api/inbox/health') return json(200, { ok: true, app: 'plannotator-inbox', version: '0.28.66', serverSession: 'boot-1' })
+    if (path === '/api/inbox/health') return json(200, { ok: true, app: 'plannotator-inbox', version: '0.28.66', serverSession: state.serverSession })
     if (path === '/api/inbox/threads') return json(200, state.threads)
     const method = init?.method ?? 'GET'
     const agentRoute = ['/api/inbox/orca', '/api/inbox/agents', '/api/inbox/control/orca-agents', '/api/inbox/control/connect'].includes(path)
@@ -255,7 +381,7 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
       if (waiting.length === 0) {
         // A real poll is held open; a short hold keeps the tests fast and still yields.
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 15)
+          const timer = setTimeout(resolve, state.holdMs)
           init?.signal?.addEventListener('abort', () => {
             clearTimeout(timer)
             resolve()
@@ -282,6 +408,10 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
       return json(200, { v: 1, agents: state.orcaAgents, changed, problems: [], ...(state.orcaAnswer?.(body) ?? {}) })
     }
     if (path === '/api/inbox/control/connect' && method === 'POST') return json(200, { connect: state.stockReport })
+    if (path === '/api/inbox/bridge/event' && body.type === 'state') {
+      state.events.push(body)
+      return json(200, { ok: true })
+    }
     if (path === '/api/inbox/bridge/event') {
       if (state.ackStatus !== 200) return json(state.ackStatus, { code: 'message_not_found' })
       const session = String(body.session)
@@ -445,8 +575,12 @@ export function fakeLifecycleOrca() {
     workspaceId: 'wt1',
     selector: 'id:wt1',
     repos: [{ id: 'repo_1', path: '/work/project', displayName: 'Project' }] as Record<string, unknown>[],
-    /** Chats Orca lists with activity: session → { state, agentType, workspaceId }. */
-    listed: new Map<string, { state: string; agentType: string; workspaceId?: string }>(),
+    /** Chats Orca lists with activity: session → { state, agentType, workspaceId, mainAgent, stateStartedAt }. */
+    listed: new Map<string, { state: string; agentType: string; workspaceId?: string; mainAgent?: { state: string }; stateStartedAt?: number }>(),
+    /** What `agent read` answers for a chat: its newest entries. A chat not here has none. */
+    entries: new Map<string, Record<string, unknown>[]>(),
+    /** When set, each `agent read` answers only once what this returns settles: a slow (or never answering) read. */
+    readGate: null as null | ((session: string) => Promise<void>),
     /** Chats made by `agent launch`, by operation id. */
     operations: new Map<string, string>(),
     created: 0,
@@ -468,7 +602,9 @@ export function fakeLifecycleOrca() {
           .map(([session, chat], index) => ({
             paneKey: `structured-agent-session-${session}:00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
             state: chat.state,
-            agentType: chat.agentType
+            agentType: chat.agentType,
+            ...(chat.mainAgent ? { mainAgent: chat.mainAgent } : {}),
+            ...(chat.stateStartedAt ? { stateStartedAt: chat.stateStartedAt } : {})
           }))
       return ok({
         truncated: state.truncated,
@@ -481,6 +617,11 @@ export function fakeLifecycleOrca() {
       })
     }
     if (command === 'repo list') return ok({ repos: state.repos })
+    if (command === 'agent read') {
+      const session = (option(args, '--id') ?? '').replace(/^orca_session_id:/, '')
+      if (state.readGate) await state.readGate(session)
+      return ok({ orcaSessionId: session, kind: 'chat', agent: 'codex', source: 'chat', entries: state.entries.get(session) ?? [], limited: false })
+    }
     if (command === 'agent launch') {
       const operation = option(args, '--retry-launch') ?? ''
       if (state.launchFault === 'refused') return { code: 1, stdout: JSON.stringify({ ok: false, error: { code: 'invalid_argument' } }) }

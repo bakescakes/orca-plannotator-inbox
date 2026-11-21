@@ -1,8 +1,8 @@
 // The whole thing inside a real Orca: a second, windowless Orca with its own throwaway profile and
 // home installs this plugin the way a user would, opens a real native chat, and the installed
 // worker delivers a real Plannotator reply into it. Nothing here is a stand-in except the agent's
-// side of the conversation, which this test plays through the launcher (the chat's own agent is
-// not signed in inside a throwaway home, and does not need to be). The launcher only acts for a chat
+// side of the conversation, which this test plays through the launcher (the chat's own agent has no
+// one's account, and its model is a local stand-in that turns every turn away). The launcher only acts for a chat
 // Orca itself vouches for, so it is run with the variables Orca really gave that chat's agent: the
 // `claude` on the throwaway PATH notes them down before it runs the real one.
 //
@@ -22,7 +22,8 @@ import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
-import { mcpClient, tempDir, until } from './fakes'
+import { chatAgentScript, mcpClient, refusingModel, tempDir, until } from './fakes'
+import { processesIn, stopProcessesIn } from './own-processes'
 
 const text = (name: string): string => (process.env[name] ?? '').trim()
 const CLI = text('ORCA_INAPP_CLI')
@@ -54,23 +55,15 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
   await mkdir(bin, { recursive: true })
   await mkdir(project, { recursive: true })
   await mkdir(copy, { recursive: true })
-  // The chat's agent, as Orca starts it: note the chat's Orca variables, then be the real program.
+  // The chat's agent, as Orca starts it: note the chat's Orca variables, then be the real program, with
+  // no one's account and a model on this computer that turns every turn away (fakes.ts says why).
   const chatEnvDir = join(root, 'chat-env')
   await mkdir(chatEnvDir, { recursive: true })
   const quoted = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
+  const model = await refusingModel()
   await writeFile(
     join(bin, 'claude'),
-    [
-      '#!/bin/sh',
-      'if [ -n "${ORCA_AGENT_SESSION_ID:-}" ]; then',
-      `  target=${quoted(chatEnvDir)}/"$ORCA_AGENT_SESSION_ID"`,
-      `  for name in ${CHAT_VARIABLES.join(' ')}; do eval "value=\\\${$name-}"; printf '%s=%s\\n' "$name" "$value"; done > "$target.$$.tmp" && mv "$target.$$.tmp" "$target"`,
-      'fi',
-      // Its own empty settings folder: the chat's agent is signed out here on every computer, so this
-      // test never talks to a model with someone's account, and runs the same everywhere.
-      `CLAUDE_CONFIG_DIR=${quoted(join(root, 'claude-config'))} exec ${quoted(await realpath(CLAUDE!))} "$@"`,
-      ''
-    ].join('\n')
+    chatAgentScript({ claude: await realpath(CLAUDE!), chatEnvDir, configDir: join(root, 'claude-config'), modelUrl: model.url, variables: CHAT_VARIABLES })
   )
   await chmod(join(bin, 'claude'), 0o755)
   // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
@@ -250,6 +243,9 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       serve.stderr?.destroy()
       agent?.stdout?.destroy()
       agent?.stderr?.destroy()
+      // The second Orca, its helpers and its crash reporter, which stopping the CLI leaves running: exactly
+      // the processes started for this throwaway profile, never another Orca.
+      await stopProcessesIn(root)
       // Stopping says so, so an agent is not told replies arrive while nothing delivers.
       const last = existsSync(join(shared, 'state.json')) ? JSON.parse(await readFile(join(shared, 'state.json'), 'utf8')) : null
       if (last && serve.signalCode !== 'SIGKILL') assert.equal(last.delivering, false, 'the worker says it stopped delivering')
@@ -258,7 +254,34 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
 
   const updating = CLI_BEFORE !== '' || BINARY_BEFORE !== ''
   const passed: string[] = []
-  if (updating) passed.push(await stage(CLI_BEFORE || CLI, BINARY_BEFORE || BINARY, true))
-  passed.push(await stage(CLI, BINARY, !updating))
+  try {
+    if (updating) passed.push(await stage(CLI_BEFORE || CLI, BINARY_BEFORE || BINARY, true))
+    passed.push(await stage(CLI, BINARY, !updating))
+  } finally {
+    await model.close()
+  }
   process.stderr.write(`in-app passed: ${passed.join(' → then, same profile and Inbox data, ')}\n`)
+})
+
+test('cleanup stops exactly the processes started in the test’s own throwaway folder', { skip: process.platform === 'win32' ? 'POSIX ps' : false }, async () => {
+  const mine = await realpath(await tempDir('orca-plannotator-own-'))
+  const other = await realpath(await tempDir('orca-plannotator-other-'))
+  const idle = 'setTimeout(() => {}, 600000)'
+  // As an app started for a profile names it: `--user-data-dir=<folder>/profile`.
+  const left = spawn(process.execPath, ['-e', idle, '--', `--user-data-dir=${join(mine, 'profile')}`], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+  // A folder whose name only starts the same, and another test's folder: not this test's.
+  const kept = spawn(process.execPath, ['-e', idle, '--', `--user-data-dir=${mine}-sibling/profile`, join(other, 'profile')], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } })
+  const exited = new Promise<void>((resolve) => left.once('exit', () => resolve()))
+  try {
+    await until(async () => (await processesIn(mine)).includes(left.pid!), 'the process to be listed')
+    assert.deepEqual(await processesIn(mine), [left.pid])
+    assert.deepEqual(await stopProcessesIn(mine), [left.pid])
+    await exited
+    assert.equal(kept.exitCode, null, 'a process of another folder runs on')
+    assert.deepEqual(await processesIn(other), [kept.pid])
+    await assert.rejects(processesIn(process.env.HOME ?? '/'), /not a throwaway folder/)
+  } finally {
+    left.kill('SIGKILL')
+    kept.kill('SIGKILL')
+  }
 })

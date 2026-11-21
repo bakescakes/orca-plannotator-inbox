@@ -1,10 +1,10 @@
 // What the worker sees of the Orca build of Plannotator: its record, status, when the updater runs,
 // and which Plannotator "Open Inbox" starts.
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { BuildStore, CHECK_EVERY_MS, FEATURE_WORDS, WAITING_CHECK_MS, installUpdater, readCurrentBuild, reducedOf, storePaths, type UpdaterResult } from '../src/build-store'
+import { BuildStore, CHECK_EVERY_MS, FEATURE_WORDS, PLAIN_RESTART_WAIT_MS, WAITING_CHECK_MS, installUpdater, readCurrentBuild, reducedOf, storePaths, type UpdaterResult } from '../src/build-store'
 import { upgradeCommand } from '../src/shared'
 import { tempDir } from './fakes'
 
@@ -57,7 +57,7 @@ test('the updater and its launcher are installed beside the MCP launcher', async
 test('status: stock without a valid build, the build when one is recorded, and the newest failure', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
   const b = await box()
   const store = new BuildStore({ sharedDir: b.shared, env: {}, home: b.root })
-  assert.deepEqual(await store.status(), { mode: 'stock', version: null, build: null, latestKnown: null, lastError: null, updating: false, phase: null, detail: null, waiting: null, reduced: null })
+  assert.deepEqual(await store.status(), { mode: 'stock', version: null, build: null, latestKnown: null, lastError: null, updating: false, phase: null, detail: null, waiting: null, reduced: null, moving: false })
   await b.install()
   assert.deepEqual(await readCurrentBuild(b.shared), { v: 1, version: '0.28.66', build: 'orca.1', path: b.binary, sha256: 'e'.repeat(64), size: (await stat(b.binary)).size, installedAt: 5 })
   const status = await store.status()
@@ -363,4 +363,235 @@ test('restarting the Inbox reports the updater’s own sentence', async () => {
   const store = new BuildStore({ sharedDir: b.shared, env: {}, home: b.root, runUpdater: async (args) => (seen.push(args), { ok: true, detail: 'The Inbox runs on the Orca build of Plannotator 0.28.66.' }) })
   assert.deepEqual(await store.restartInbox(), { ok: true, message: 'The Inbox runs on the Orca build of Plannotator 0.28.66.' })
   assert.deepEqual(seen, [['--restart']])
+})
+
+// --- A standard Inbox while the build is in use (after a login) -----------------------------------
+
+const MOVE = ['--restart', '--if-plain']
+const MOVED = 'The Inbox started on standard Plannotator 0.28.66 (pid 7); restarted it on the Orca build 0.28.66 (orca.1).'
+
+/**
+ * Everything the move of a standard Inbox needs: the build in use, Orca's bridge config, a worker that
+ * delivers for the data folder, and a running Inbox that answers as `inbox.mode` with `inbox.session`.
+ */
+async function plainBox() {
+  const b = await box()
+  let now = 1_000_000_000_000
+  const inbox: { mode: 'stock' | 'orca' | 'stopped'; session: string } = { mode: 'stock', session: 'boot-1' }
+  const runs: string[][] = []
+  const logs: string[] = []
+  const updater: { answer: UpdaterResult; during: (() => Promise<void>) | null } = { answer: { ok: true, restarted: true, detail: MOVED }, during: null }
+  const stock = join(b.root, 'bin', 'plannotator')
+  await mkdir(join(stock, '..'), { recursive: true })
+  await writeFile(stock, '#!/bin/sh\necho plannotator 0.28.66\n', { mode: 0o755 })
+  await b.install()
+  await privateJson(storePaths(b.shared).config, { canonicalDataDir: b.data })
+  await privateJson(join(b.data, 'inbox', 'inbox.json'), { port: 4321, token: 't', version: '0.28.66' })
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname
+    if (inbox.mode === 'stopped') throw new TypeError('fetch failed')
+    if (path === '/api/inbox/orca') return inbox.mode === 'orca' ? new Response('{"version":1,"mode":"orca"}') : new Response('{"code":"not_found"}', { status: 404 })
+    if (path === '/api/inbox/health') return new Response(JSON.stringify({ ok: true, version: '0.28.66', serverSession: inbox.session, pid: 7 }))
+    throw new TypeError('fetch failed')
+  }) as typeof fetch
+  const make = (): BuildStore =>
+    new BuildStore({
+      sharedDir: b.shared,
+      env: { PATH: join(b.root, 'bin') },
+      home: b.root,
+      now: () => now,
+      fetch: fetchImpl,
+      log: (message) => void logs.push(message),
+      runUpdater: async (args) => {
+        runs.push(args)
+        await updater.during?.()
+        return updater.answer
+      }
+    })
+  /** The worker's heartbeat, fresh as of now. */
+  const deliver = (): Promise<void> => writeFile(storePaths(b.shared).heartbeat, JSON.stringify({ v: 1, pid: 1, at: now, dataDir: b.data, delivering: true }))
+  /** A minute later, the worker delivering, one look. */
+  const look = async (store: BuildStore) => {
+    now += 60_000
+    await deliver()
+    return store.followRunning(b.data)
+  }
+  const moves = (): number => runs.filter((args) => args.join(' ') === MOVE.join(' ')).length
+  return { ...b, inbox, runs, logs, updater, stock, make, deliver, look, moves, at: () => now, advance: (ms: number) => void (now += ms) }
+}
+
+test('a standard Inbox found while its release’s build is in use is restarted once, and a new one after the next login again', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const t = await plainBox()
+  const store = t.make()
+  const seen: { moving: boolean; updating: boolean }[] = []
+  let started = 0
+  t.updater.during = async () => void seen.push(await store.status().then(({ moving, updating }) => ({ moving, updating })))
+  await t.deliver()
+  const first = await store.followRunning(t.data, () => void (started += 1))
+  assert.deepEqual([first.ran, first.result?.detail], [true, MOVED])
+  assert.deepEqual(t.runs, [MOVE])
+  assert.deepEqual([started, seen], [1, [{ moving: true, updating: false }]], 'the panel says it is moving, not updating')
+  assert.equal((await store.status()).moving, false)
+  assert.deepEqual(t.logs, [MOVED])
+
+  // The same Inbox on every look after (say the move did not take): never again, not even after a routine look or a worker restart.
+  for (let i = 0; i < 3; i += 1) assert.equal((await t.look(store)).ran, false)
+  t.advance(CHECK_EVERY_MS)
+  t.updater.answer = { ok: true, installed: false, version: '0.28.66', build: 'orca.1', detail: 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use.' }
+  await store.ensure()
+  t.updater.answer = { ok: true, restarted: true, detail: MOVED }
+  assert.equal((await t.look(store)).ran, false)
+  assert.equal((await t.look(t.make())).ran, false)
+  assert.equal(t.moves(), 1)
+
+  // The next login: another start of a standard Inbox.
+  t.inbox.session = 'boot-2'
+  assert.equal((await t.look(store)).ran, true)
+  assert.equal(t.moves(), 2)
+
+  // Bounded: at most three a day.
+  t.inbox.session = 'boot-3'
+  assert.equal((await t.look(store)).ran, true)
+  t.inbox.session = 'boot-4'
+  assert.equal((await t.look(store)).ran, false, 'three in a day')
+  t.advance(24 * 60 * 60 * 1000)
+  assert.equal((await t.look(store)).ran, true)
+  assert.equal(t.moves(), 4)
+
+  // An answer that left the Inbox alone (the updater found it of another release) is no failure and counts as no try.
+  t.updater.answer = { ok: true, restarted: false, detail: 'The Inbox was left as it is: it runs Plannotator 0.28.65, not 0.28.66, the release of the Orca build.' }
+  t.inbox.session = 'boot-5'
+  assert.equal((await t.look(store)).ran, true)
+  assert.equal((await store.status()).lastError, null)
+  assert.deepEqual(JSON.parse(await readFile(storePaths(t.shared).check, 'utf8')).plainRestart.tries.length, 1, 'only the try of the last day')
+})
+
+test('a failed automatic restart waits before trying again, and says why', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const t = await plainBox()
+  const store = t.make()
+  const failed = 'The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
+  t.updater.answer = { ok: false, detail: failed }
+  assert.equal((await t.look(store)).ran, true)
+  const status = await store.status()
+  assert.deepEqual([status.lastError, status.mode], [failed, 'orca-build'], 'the panel shows it, with Restart')
+  assert.deepEqual(t.logs, [failed])
+
+  // The fall back to stock Plannotator started the Inbox again: another session, and still no second try for six hours.
+  t.inbox.session = 'boot-2'
+  assert.equal((await t.look(store)).ran, false)
+  t.advance(PLAIN_RESTART_WAIT_MS - 3 * 60_000)
+  assert.equal((await t.look(store)).ran, false)
+  t.advance(60_000)
+  assert.equal((await t.look(store)).ran, true)
+  assert.equal(t.moves(), 2)
+
+  // A Plannotator that changed ends the wait at once.
+  t.inbox.session = 'boot-3'
+  assert.equal((await t.look(store)).ran, false)
+  await writeFile(t.stock, '#!/bin/sh\necho plannotator 0.28.66\n# reinstalled\n', { mode: 0o755 })
+  assert.equal((await t.look(store)).ran, true)
+
+  // Three tries in a day are the most, failed or not. A day later, a move that works clears the failure it showed.
+  t.updater.answer = { ok: true, restarted: true, detail: MOVED }
+  t.inbox.session = 'boot-4'
+  t.advance(PLAIN_RESTART_WAIT_MS)
+  assert.equal((await t.look(store)).ran, false)
+  t.advance(24 * 60 * 60 * 1000)
+  assert.equal((await t.look(store)).ran, true)
+  assert.equal((await store.status()).lastError, null)
+})
+
+test('nothing is restarted while waiting for a newer release, while updating, before the worker delivers, or without a standard Inbox', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const t = await plainBox()
+  const store = t.make()
+  const nothing = async (why: string): Promise<void> => assert.equal((await t.look(store)).ran, false, why)
+
+  // Waiting for a release with no Orca build yet.
+  const waiting = join(storePaths(t.shared).store, 'waiting.json')
+  await privateJson(waiting, { v: 1, version: '0.28.67', since: t.at(), checkedAt: t.at() })
+  await nothing('waiting for a newer release')
+  await rm(waiting)
+
+  // An updater at work elsewhere (the Inbox's own Update button).
+  await privateJson(storePaths(t.shared).lock, { pid: process.pid, at: t.at() + 60_000 })
+  await nothing('updating')
+  await rm(storePaths(t.shared).lock)
+
+  // The worker does not deliver: an old heartbeat, or none for this Inbox.
+  t.advance(60_000)
+  await writeFile(storePaths(t.shared).heartbeat, JSON.stringify({ v: 1, pid: 1, at: t.at() - 10 * 60_000, dataDir: t.data, delivering: true }))
+  assert.equal((await store.followRunning(t.data)).ran, false, 'before the worker delivers')
+  await writeFile(storePaths(t.shared).heartbeat, JSON.stringify({ v: 1, pid: 1, at: t.at(), dataDir: t.data, delivering: false }))
+  assert.equal((await store.followRunning(t.data)).ran, false, 'not delivering')
+
+  // No bridge config, so Plannotator's Orca mode cannot be set up.
+  const config = await readFile(storePaths(t.shared).config, 'utf8')
+  await rm(storePaths(t.shared).config)
+  await nothing('no bridge config')
+  await privateJson(storePaths(t.shared).config, JSON.parse(config))
+
+  // The Inbox is on the build, or not running.
+  t.inbox.mode = 'orca'
+  await nothing('already on the build')
+  t.inbox.mode = 'stopped'
+  await nothing('stopped')
+  t.inbox.mode = 'stock'
+
+  // No build in use.
+  const current = await readFile(storePaths(t.shared).current, 'utf8')
+  await rm(storePaths(t.shared).current)
+  await nothing('no build')
+  await privateJson(storePaths(t.shared).current, JSON.parse(current))
+  assert.deepEqual(t.runs, [])
+
+  // With all of it in place, it is.
+  assert.equal((await t.look(store)).ran, true)
+})
+
+test('a restart a person asked for that fails holds the worker’s own move back, and shows why', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const t = await plainBox()
+  const store = t.make()
+  const failed =
+    'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use. The Inbox was running standard Plannotator. The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
+  t.updater.answer = { ok: true, installed: false, restarted: false, restartFailed: true, version: '0.28.66', build: 'orca.1', detail: failed }
+  await t.deliver()
+  const checked = await store.ensure({ force: true })
+  assert.deepEqual(t.runs, [['--again']], 'Check now acts at once')
+  assert.equal(checked.lastError, failed, 'the panel shows it, with Restart')
+  assert.ok(t.logs.includes(`Orca build of Plannotator: ${failed}`))
+
+  // The fall back to stock Plannotator started the Inbox again: the worker does not restart it again at once.
+  t.inbox.session = 'boot-2'
+  assert.equal((await t.look(store)).ran, false)
+  t.advance(PLAIN_RESTART_WAIT_MS)
+  t.updater.answer = { ok: true, restarted: true, detail: MOVED }
+  assert.equal((await t.look(store)).ran, true, 'after the wait')
+  assert.equal((await store.status()).lastError, null)
+})
+
+test('restarts a person asked for count toward the three a day of the worker’s own moves', { skip: POSIX ? false : 'POSIX file modes' }, async () => {
+  const t = await plainBox()
+  const store = t.make()
+  await t.deliver()
+  // Check now, twice, moved a standard Inbox; then Restart did.
+  t.updater.answer = { ok: true, installed: false, restarted: true, version: '0.28.66', build: 'orca.1', detail: 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest. The Inbox was running standard Plannotator and was restarted on it.' }
+  await store.ensure({ force: true })
+  t.advance(60_000)
+  await store.ensure({ force: true })
+  t.updater.answer = { ok: true, restarted: true, version: '0.28.66', build: 'orca.1', detail: 'The Inbox runs on the Orca build of Plannotator 0.28.66.' }
+  assert.equal((await store.restartInbox()).ok, true, 'a person’s Restart is never held back')
+  assert.deepEqual(t.runs, [['--again'], ['--again'], ['--restart']])
+
+  // Three in a day: the next standard Inbox waits for tomorrow.
+  t.updater.answer = { ok: true, restarted: true, detail: MOVED }
+  t.inbox.session = 'boot-2'
+  assert.equal((await t.look(store)).ran, false)
+  t.advance(24 * 60 * 60 * 1000)
+  assert.equal((await t.look(store)).ran, true)
+
+  // A routine look that moved nothing (or a new build installed and restarted on) is no such try.
+  t.updater.answer = { ok: true, installed: true, restarted: true, version: '0.28.66', build: 'orca.2', detail: 'The Orca build of Plannotator 0.28.66 (orca.2) is in use, and the Inbox was restarted on it.' }
+  t.advance(CHECK_EVERY_MS)
+  await store.ensure()
+  assert.equal(JSON.parse(await readFile(storePaths(t.shared).check, 'utf8')).plainRestart.tries.length, 1)
 })

@@ -23,7 +23,7 @@ import { isInside } from './engine'
 import { InboxClient, type InboxDeps } from './inbox'
 import type { KeyValue } from './ledger'
 import { callHelper, helperReveal, openChat, type HelperAnswer, type HelperOptions, type NavigationCli, type Reveal } from './navigation'
-import { OrcaRefused, type ChatLaunch, type LifecycleInventory, type LifecycleWorkspace } from './orca-cli'
+import { OrcaRefused, type ChatLaunch, type LifecycleInventory, type LifecycleWorkspace, type PromptKinds, type PromptReader } from './orca-cli'
 import { ID, KeyedQueue, canonicalSession, errorText, isRecord, type Json } from './util'
 
 /** Plannotator's provider id → Orca's agent id and the name the Inbox shows. */
@@ -107,7 +107,7 @@ export type DeliveryState = (
 export type LifecycleCli = NavigationCli & {
   lifecycleInventory(): Promise<LifecycleInventory>
   launchChat(launch: ChatLaunch, timeoutMs?: number): Promise<Record<string, unknown>>
-}
+} & Partial<PromptReader>
 
 export type NativeAction = 'support' | 'session-proof' | 'prepare-stop' | 'stop' | 'continue'
 /** Runs one operation of bin/session.cjs. Must never throw; failures are ok:false answers. */
@@ -177,6 +177,11 @@ export type LifecycleDeps = {
   deliveryState: DeliveryState
   /** Told about each owned chat when it is created, replayed, resumed or delivered to. */
   register?: (owned: OwnedSession) => void | Promise<void>
+  /**
+   * The kinds of prompt chats wait on, shared with reply delivery so a wait costs one `agent read`.
+   * Without it the catalog says nothing about waits.
+   */
+  prompts?: PromptKinds
   native?: NativeRun
   reveal?: Reveal
   log: (message: string) => void
@@ -537,6 +542,20 @@ export class Lifecycle {
     return { ok: true, version: 1, launches: recent }
   }
 
+  /**
+   * What an owned chat waits on, as the Inbox's run line can word it: `permission` while it holds a
+   * permission prompt; null otherwise, and for a question, which the run line would call a
+   * permission prompt. From the same prompt kinds reply delivery uses, as far as they are known now:
+   * the catalog never waits on a read, which runs in the background for the next catalog.
+   */
+  private waitingOn(cli: LifecycleCli, inventory: LifecycleInventory, session: string): 'permission' | null {
+    const listed = inventory.sessions.get(session)
+    const prompts = this.deps.prompts
+    if (!prompts || !cli.pendingPromptKind || listed?.waiting !== 'blocked') return null
+    const reader: PromptReader = { pendingPromptKind: (chat) => cli.pendingPromptKind!(chat) }
+    return prompts.knownKind(reader, session, listed.stateStartedAt) === 'permission' ? 'permission' : null
+  }
+
   /** `GET /api/lifecycle/catalog`: where chats can start, the owned chats, and Orca's projects. */
   async catalog(): Promise<Record<string, Json>> {
     const cli = await this.cli()
@@ -548,7 +567,8 @@ export class Lifecycle {
       const stoppedAt = typeof row?.result?.stoppedAt === 'number' ? row.result.stoppedAt : 0
       const resumedAt = typeof row?.result?.resumeRequestedAt === 'number' ? row.result.resumeRequestedAt : 0
       const stopped = stoppedAt > resumedAt && owned.busy !== true
-      sessions[owned.session] = { busy: owned.busy, state: stopped ? 'stopped' : owned.state, stopped, workspaceId: owned.workspaceId }
+      const waiting = stopped ? null : this.waitingOn(cli, inventory, owned.session)
+      sessions[owned.session] = { busy: owned.busy, state: stopped ? 'stopped' : owned.state, stopped, workspaceId: owned.workspaceId, ...(waiting ? { waiting } : {}) }
     }
     const projects: Json[] = []
     const seen = new Set<string>()

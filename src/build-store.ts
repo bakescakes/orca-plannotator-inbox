@@ -40,6 +40,11 @@ const VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/
 const BUILD = /^orca\.\d{1,6}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const MAX_BINARY = 400 * 1024 * 1024
+/** A standard Inbox is moved onto the build by itself at most this many times a day, */
+export const PLAIN_RESTARTS_A_DAY = 3
+/** and after a move that failed, not again for this long, unless the build or the Plannotator installed here changed. */
+export const PLAIN_RESTART_WAIT_MS = 6 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
 
 /** `features` and `omitted`: a reduced build's manifest says what it serves and which Orca changes it leaves out. */
 export type BuildRecord = {
@@ -73,6 +78,10 @@ export type UpdaterResult = {
   waiting?: { version: string } | null
   /** The Inbox runs the Plannotator installed here until that build is in use. */
   plain?: boolean
+  /** The running Inbox was restarted on the build. */
+  restarted?: boolean
+  /** A restart on the build was tried and the build did not answer (the Inbox runs stock Plannotator again). */
+  restartFailed?: boolean
   detail: string
 }
 
@@ -94,6 +103,8 @@ export type BuildStatus = {
   waiting: Waiting | null
   /** The build in use leaves out some Orca changes. */
   reduced: Reduced | null
+  /** A standard Inbox is being restarted on the build by itself (after a login, say). */
+  moving: boolean
 }
 
 /** What each feature an Orca build can serve gives a person, in words for the panel. */
@@ -114,9 +125,51 @@ export function reducedOf(record: Pick<BuildRecord, 'features' | 'omitted'> | nu
   return { lacks, omitted: [...omitted] }
 }
 
+/**
+ * The last time a standard Inbox was moved onto the build by itself. `serverSession`: that Inbox's own
+ * id from its health answer (each start of an Inbox has another); `at`: the last try; `failures` in a
+ * row; `tries`: the tries of the last day; `build` and `stock`: the build in use and the Plannotator
+ * installed here then (a change to either ends the wait after a failure).
+ */
+export type PlainRestart = { serverSession: string; at: number; failures: number; tries: number[]; build: string; stock: string }
 /** `stock`: the Plannotator installed here as the last look saw it (`stockSignature`, "" when none was found); null before the first look. */
-type Check = { v: 1; lastAttempt: number; failures: number; lastError: string | null; lastErrorAt: number; latestKnown: BuildRef | null; stock: string | null }
+type Check = {
+  v: 1
+  lastAttempt: number
+  failures: number
+  lastError: string | null
+  lastErrorAt: number
+  latestKnown: BuildRef | null
+  stock: string | null
+  plainRestart?: PlainRestart | null
+}
 const NO_CHECK: Check = { v: 1, lastAttempt: 0, failures: 0, lastError: null, lastErrorAt: 0, latestKnown: null, stock: null }
+
+function readPlainRestart(value: unknown): PlainRestart | null {
+  if (!isRecord(value) || typeof value.serverSession !== 'string' || value.serverSession === '' || value.serverSession.length > 200) return null
+  const number = (item: unknown): number => (typeof item === 'number' && Number.isFinite(item) ? item : 0)
+  return {
+    serverSession: value.serverSession,
+    at: number(value.at),
+    failures: Math.max(0, Math.min(100, Math.floor(number(value.failures)))),
+    tries: Array.isArray(value.tries) ? value.tries.filter((item): item is number => typeof item === 'number' && Number.isFinite(item)).slice(-PLAIN_RESTARTS_A_DAY) : [],
+    build: typeof value.build === 'string' ? value.build.slice(0, 100) : '',
+    stock: typeof value.stock === 'string' ? value.stock.slice(0, 5000) : ''
+  }
+}
+
+/**
+ * Whether the standard Inbox `serverSession` may be moved onto the build now: once for each one, at
+ * most three times a day, and not for six hours after a move that failed unless the build in use or
+ * the Plannotator installed here changed since.
+ */
+export function plainRestartAllowed(memory: PlainRestart | null | undefined, serverSession: string, now: number, build: string, stock: string): boolean {
+  if (!memory) return true
+  if (memory.serverSession === serverSession) return false
+  if (memory.tries.filter((at) => now - at < DAY_MS).length >= PLAIN_RESTARTS_A_DAY) return false
+  if (memory.failures > 0 && now - memory.at < PLAIN_RESTART_WAIT_MS && memory.build === build && memory.stock === stock) return false
+  return true
+}
 
 /**
  * The Plannotator installed here, as its file's place, size and time: it changes when Plannotator
@@ -393,6 +446,10 @@ export class BuildStore {
   private running: Promise<BuildStatus> | null = null
   /** Updater runs this store started that have not ended. */
   private updaterRuns = 0
+  /** The move of a standard Inbox onto the build in flight, if any. */
+  private following: Promise<{ ran: boolean; result?: UpdaterResult }> | null = null
+  /** While that move's updater runs (it holds the update lock, so it is not "updating"). */
+  private moving = 0
 
   constructor(deps: BuildStoreDeps) {
     this.deps = deps
@@ -415,7 +472,8 @@ export class BuildStore {
         lastError: typeof parsed.lastError === 'string' ? parsed.lastError.slice(0, 500) : null,
         lastErrorAt: number(parsed.lastErrorAt),
         latestKnown: readRef(parsed.latestKnown),
-        stock: typeof parsed.stock === 'string' ? parsed.stock.slice(0, 5000) : null
+        stock: typeof parsed.stock === 'string' ? parsed.stock.slice(0, 5000) : null,
+        plainRestart: readPlainRestart(parsed.plainRestart)
       }
     } catch {
       return NO_CHECK
@@ -448,12 +506,14 @@ export class BuildStore {
       build: record?.build ?? null,
       latestKnown: check.latestKnown,
       lastError,
-      // An updater at work, here or elsewhere: a look that starts none is not an update.
-      updating: this.updaterRuns > 0 || held,
+      // An updater at work, here or elsewhere: a look that starts none is not an update. The lock the
+      // move of a standard Inbox holds is not one either.
+      updating: this.updaterRuns > 0 || (held && this.moving === 0),
       phase: state?.phase ?? null,
       detail: state?.detail ?? null,
       waiting,
-      reduced: reducedOf(record)
+      reduced: reducedOf(record),
+      moving: this.moving > 0
     }
   }
 
@@ -472,6 +532,8 @@ export class BuildStore {
       const inFlight = this.running
       return options.force ? inFlight.then(() => this.ensure(options), () => this.ensure(options)) : inFlight
     }
+    // The move of a standard Inbox writes check.json too: one after the other.
+    if (this.following) return this.following.then(() => this.ensure(options), () => this.ensure(options))
     const work = (async (): Promise<BuildStatus> => {
       const check = await this.readCheck()
       const now = this.now()
@@ -498,10 +560,17 @@ export class BuildStore {
       if (result.busy) {
         await this.writeCheck({ ...check, lastAttempt: now, latestKnown, stock: seen }).catch(() => undefined)
       } else if (result.ok) {
-        await this.writeCheck({ v: 1, lastAttempt: now, failures: 0, lastError: null, lastErrorAt: 0, latestKnown, stock }).catch(() => undefined)
+        if (result.restarted) this.deps.log?.(`Orca build of Plannotator: ${result.detail}`)
+        await this.writeCheck({ v: 1, lastAttempt: now, failures: 0, lastError: null, lastErrorAt: 0, latestKnown, stock, plainRestart: check.plainRestart }).catch(() => undefined)
+        // A standard Inbox the run moved onto the build in use (only when a person asked): it counts
+        // toward the same limits as the worker's own moves, and a failure shows the same way.
+        if (!result.installed && !result.plain && (result.restarted || result.restartFailed)) {
+          if (result.restartFailed) this.deps.log?.(`Orca build of Plannotator: ${result.detail}`)
+          await this.noteRestart({ moved: result.restarted === true, failed: result.restartFailed === true, detail: result.detail }, null, now)
+        }
       } else {
         this.deps.log?.(`Orca build of Plannotator: ${result.detail}`)
-        await this.writeCheck({ v: 1, lastAttempt: now, failures: check.failures + 1, lastError: result.detail, lastErrorAt: this.now(), latestKnown, stock }).catch(() => undefined)
+        await this.writeCheck({ v: 1, lastAttempt: now, failures: check.failures + 1, lastError: result.detail, lastErrorAt: this.now(), latestKnown, stock, plainRestart: check.plainRestart }).catch(() => undefined)
       }
       return this.status()
     })()
@@ -512,15 +581,15 @@ export class BuildStore {
     return work
   }
 
-  /** One updater run, counted while it lasts; a run that cannot start is an outcome, not an error. */
-  private async runUpdater(args: string[]): Promise<UpdaterResult> {
-    this.updaterRuns += 1
+  /** One updater run, counted while it lasts (as "updating" unless `counted` is false); a run that cannot start is an outcome, not an error. */
+  private async runUpdater(args: string[], counted = true): Promise<UpdaterResult> {
+    if (counted) this.updaterRuns += 1
     try {
       return await (this.deps.runUpdater ?? this.defaultRunner())(args)
     } catch (error) {
       return { ok: false, detail: `The updater could not run (${errorText(error)}).` }
     } finally {
-      this.updaterRuns -= 1
+      if (counted) this.updaterRuns -= 1
     }
   }
 
@@ -549,25 +618,90 @@ export class BuildStore {
 
   /** Whether the Inbox of `dataDir` runs, and in Orca mode (`GET /api/inbox/orca` answers with mode "orca"). */
   async serverMode(dataDir: string): Promise<ServerMode> {
+    return (await this.server(dataDir)).mode
+  }
+
+  /**
+   * The same, and for a standard Inbox which run of it this is: its `serverSession` (a new one on each
+   * start), or its pid when it does not say.
+   */
+  private async server(dataDir: string): Promise<{ mode: ServerMode; session: string | null }> {
     const fetchImpl = this.deps.fetch ?? fetch
+    const stopped = { mode: 'stopped' as const, session: null }
     let port: number
     try {
       const registry = await new InboxClient(dataDir, { fetch: fetchImpl }).registry()
-      if (!registry) return 'stopped'
+      if (!registry) return stopped
       port = registry.port
     } catch {
-      return 'stopped'
+      return stopped
     }
     try {
       const response = await fetchImpl(`http://127.0.0.1:${port}/api/inbox/orca`, { redirect: 'error', signal: AbortSignal.timeout(4000), headers: { accept: 'application/json' } })
       const body: unknown = await response.json().catch(() => null)
-      if (response.ok && isRecord(body) && body.mode === 'orca') return 'orca'
+      if (response.ok && isRecord(body) && body.mode === 'orca') return { mode: 'orca', session: null }
       const health = await fetchImpl(`http://127.0.0.1:${port}/api/inbox/health`, { redirect: 'error', signal: AbortSignal.timeout(4000) })
-      await health.body?.cancel().catch(() => undefined)
-      return health.ok ? 'stock' : 'stopped'
+      if (!health.ok) {
+        await health.body?.cancel().catch(() => undefined)
+        return stopped
+      }
+      const said: unknown = await health.json().catch(() => null)
+      const session = isRecord(said) && typeof said.serverSession === 'string' && said.serverSession !== '' ? said.serverSession.slice(0, 200) : null
+      const pid = isRecord(said) && Number.isInteger(said.pid) ? String(said.pid) : null
+      return { mode: 'stock', session: session ?? (pid !== null ? `pid:${pid}` : null) }
     } catch {
-      return 'stopped'
+      return stopped
     }
+  }
+
+  /**
+   * A standard Inbox while the Orca build of its release is in use (after a login, Plannotator's own
+   * login item or a plain `plannotator` command starts the Inbox on standard Plannotator): restarts it
+   * on the build, as Restart in the panel does, through the updater's `--restart --if-plain`, which
+   * checks again that it is a running standard Inbox of the build's own release and that the
+   * Plannotator installed here is not newer. Only while the build is in use and ready, nothing is
+   * updating or waiting for a newer release, Orca's bridge config is in place and the worker delivers
+   * for `dataDir`. Once for each standard Inbox, at most three times a day, and after a failure not
+   * again for six hours unless the build or the Plannotator installed here changed. `onStart`: the
+   * restart begins (the status says `moving` until it ends). `ran`: the updater was asked.
+   */
+  followRunning(dataDir: string, onStart?: () => void): Promise<{ ran: boolean; result?: UpdaterResult }> {
+    if (this.following) return this.following
+    // A look in flight writes check.json too; the next look comes soon enough.
+    if (this.running) return Promise.resolve({ ran: false })
+    const work = (async (): Promise<{ ran: boolean; result?: UpdaterResult }> => {
+      const { sharedDir } = this.deps
+      const none = { ran: false }
+      const now = this.now()
+      const [record, state] = await Promise.all([readCurrentBuild(sharedDir, this.deps.platform), readUpgradeState(sharedDir)])
+      if (!record || this.updaterRuns > 0 || (await lockHeld(sharedDir, now))) return none
+      if ((await readWaiting(sharedDir, record.version, state)) !== null) return none
+      if (!(await orcaConfigReady(sharedDir)) || !(await deliveringFor(sharedDir, dataDir, now))) return none
+      const running = await this.server(dataDir)
+      if (running.mode !== 'stock' || running.session === null) return none
+      const check = await this.readCheck()
+      const build = `${record.version}-${record.build}`
+      const stock = (await stockSignature(this.deps.env, this.deps.home, this.deps.platform).catch(() => null)) ?? ''
+      if (!plainRestartAllowed(check.plainRestart, running.session, now, build, stock)) return none
+      let result: UpdaterResult
+      this.moving += 1
+      try {
+        onStart?.()
+        result = await this.runUpdater(['--restart', '--if-plain'], false)
+      } finally {
+        this.moving -= 1
+      }
+      // Another run held the lock: nothing was tried.
+      if (result.busy) return none
+      this.deps.log?.(result.detail)
+      await this.noteRestart({ moved: result.restarted === true, failed: !result.ok, detail: result.detail }, running.session, now, { build, stock })
+      return { ran: true, result }
+    })()
+    this.following = work
+    void work.finally(() => {
+      if (this.following === work) this.following = null
+    }).catch(() => undefined)
+    return work
   }
 
   /**
@@ -609,8 +743,49 @@ export class BuildStore {
    * so nothing saved is lost and agents reconnect by themselves.
    */
   async restartInbox(): Promise<ActionResult> {
+    // A look or a move in flight writes check.json too: after it. A person's restart is never held back.
+    await Promise.all([this.running, this.following].map((work) => work?.catch(() => undefined)))
     const result = await this.runUpdater(['--restart'])
+    // It counts toward the limits of the automatic moves: a failure here holds those back for a while.
+    if (result.restarted || result.restartFailed) await this.noteRestart({ moved: result.restarted === true, failed: result.restartFailed === true, detail: result.detail }, null, this.now())
     return { ok: result.ok, message: result.detail }
+  }
+
+  /**
+   * The one record of restarts of a standard Inbox onto the build, whoever asked: the worker's own moves
+   * (`followRunning`), a person's Check now and Restart. `session`: the standard Inbox it was for, when
+   * known. Every try counts toward the three a day; a failure starts the wait and is shown (`lastError`)
+   * until a look or a move ends well. `seen`: the build and the Plannotator installed here, when known.
+   */
+  private async noteRestart(outcome: { moved: boolean; failed: boolean; detail: string }, session: string | null, now: number, seen?: { build: string; stock: string }): Promise<void> {
+    const record = seen ? null : await readCurrentBuild(this.deps.sharedDir, this.deps.platform)
+    const build = seen?.build ?? (record ? `${record.version}-${record.build}` : '')
+    const stock = seen?.stock ?? ((await stockSignature(this.deps.env, this.deps.home, this.deps.platform).catch(() => null)) ?? '')
+    const latest = await this.readCheck()
+    const memory = latest.plainRestart ?? null
+    const tried = outcome.moved || outcome.failed
+    const recent = (memory?.tries ?? []).filter((at) => now - at < DAY_MS)
+    const next: Check = {
+      ...latest,
+      plainRestart: {
+        serverSession: session ?? memory?.serverSession ?? 'unknown',
+        at: tried ? now : (memory?.at ?? 0),
+        failures: outcome.failed ? (memory?.failures ?? 0) + 1 : outcome.moved ? 0 : (memory?.failures ?? 0),
+        tries: (tried ? [...recent, now] : recent).slice(-PLAIN_RESTARTS_A_DAY),
+        build,
+        stock
+      }
+    }
+    if (outcome.failed) {
+      // Shown in the panel, with Restart, until a look or a move ends well.
+      next.lastError = outcome.detail
+      next.lastErrorAt = this.now()
+    } else if (outcome.moved && latest.failures === 0 && latest.lastError !== null) {
+      // The failure shown was a move like this one, not an update.
+      next.lastError = null
+      next.lastErrorAt = 0
+    }
+    await this.writeCheck(next).catch(() => undefined)
   }
 }
 

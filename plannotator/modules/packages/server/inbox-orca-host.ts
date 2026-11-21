@@ -53,7 +53,11 @@ interface NativeRow {
   state: string;
   workspaceId: string;
   stopped?: boolean;
+  /** The chat holds a permission prompt in Orca (a newer plugin); absent otherwise. Any other value is ignored. */
+  waiting?: string;
 }
+/** A row that says its chat holds a permission prompt: the run line's "waiting on a permission prompt". */
+const permissionOf = (row: NativeRow | undefined): "permission" | null => (row?.waiting === "permission" ? "permission" : null);
 interface Catalog {
   ok: boolean;
   workspaces: { folder: string; project: string; selector: string }[];
@@ -199,7 +203,8 @@ export function createOrcaLaunchHosts(context: LaunchHostContext): LaunchHost[] 
           }
           return (ref) => {
             const row = data.sessions[ref];
-            return row ? { status: row.busy === true ? "running" : row.busy === false ? "idle" : null, state: row.state, waitingFor: null } : "absent";
+            const waits = permissionOf(row);
+            return row ? { status: waits ? "waiting" : row.busy === true ? "running" : row.busy === false ? "idle" : null, state: row.state, waitingFor: waits } : "absent";
           };
         } catch {
           sessionSnapshot = null;
@@ -211,7 +216,10 @@ export function createOrcaLaunchHosts(context: LaunchHostContext): LaunchHost[] 
         const live = context.bridge.runStateOf(session);
         // Upstream caches sessions for ten seconds and ignores busy:null polls. Keep "unknown" for the consumed
         // snapshot's lifetime; a refresh or failure replaces it. Presence still comes only from the live bridge.
-        return live && sessionSnapshot?.[session]?.busy === null ? { ...live, busy: null, busySince: null } : live;
+        if (live && sessionSnapshot?.[session]?.busy === null) return { ...live, busy: null, busySince: null };
+        // A chat at a permission prompt polls busy:false (its turn waits, it does not work); the run line reads an idle
+        // session as blocked on nothing, so while the same snapshot says it waits, it reads as in its turn.
+        return live && live.busy !== true && permissionOf(sessionSnapshot?.[session]) ? { ...live, busy: true } : live;
       },
       async resume(launch) {
         const result = await request("resume", await ownedLaunch(launch));

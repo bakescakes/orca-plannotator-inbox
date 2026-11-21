@@ -38,7 +38,8 @@ In Orca mode:
     Plannotator's own helpers, so their safety checks still apply.
 - **Launch hosts.** Claude Code, Codex, OpenCode and Pi start, stop, resume and open as Orca chats through the
   plugin's bridge. Their run line says "Open in Orca". A Stop or Open that Orca refuses shows Orca's reason on
-  the run line, and the chat does not read as stopped.
+  the run line, and the chat does not read as stopped. A chat whose catalog row says `"waiting": "permission"`
+  (it holds a permission prompt in Orca) reads "waiting on a permission prompt"; any other value is ignored.
 - **Updates.**
   - Update now, the sidebar button and Settings → About run the Orca build updater (`upgradeCommand` with
     `--version x.y.z`).

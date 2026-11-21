@@ -29,6 +29,8 @@ export default defineCheck({
   ready: { storage: { 'preview.status': ready } },
   // The Orca build is installed but the running Inbox is still standard Plannotator.
   restart: { storage: { 'preview.status': { ...ready, server: 'stock' } } },
+  // After a login the Inbox started on standard Plannotator, and the worker is moving it to the build.
+  moving: { storage: { 'preview.status': { ...ready, server: 'stock', build: { ...ready.build, moving: true } } } },
   // An update did not work: the reason is shown, and the build in use stays.
   updateFailed: {
     storage: {

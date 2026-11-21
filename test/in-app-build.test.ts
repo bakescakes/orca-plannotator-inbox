@@ -12,13 +12,14 @@
 //     project's workspace, the Inbox lists it as started under host `orca`, the message that started
 //     it reaches the new chat's mailbox once, and asking again starts no second chat.
 //  4. Open: the run line's Open answers ok.
-//  5. Stop and Resume, as far as a chat whose agent is not signed in allows (see the step).
+//  5. Stop and Resume, as far as a chat whose agent's turns all fail allows (see the step).
 //  6. The started chat's icon: `mark:claude-code` under the id the Inbox lists that agent by.
 //
 // Runs only when ORCA_INAPP_CLI names the `orca` CLI inside the Orca.app to start,
 // ORCA_BUILD_E2E_BIN an Orca build of Plannotator for this computer, and `claude` is installed (Orca
 // needs an agent program to open a chat). It never touches the default Orca profile, the real Inbox
-// or any agent's settings, and the chat's agent is not signed in.
+// or any agent's settings; the chat's agent has no one's account, and its model is a local
+// stand-in that turns every turn away.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -27,7 +28,8 @@ import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
-import { mcpClient, tempDir, until } from './fakes'
+import { chatAgentScript, mcpClient, refusingModel, tempDir, until } from './fakes'
+import { stopProcessesIn } from './own-processes'
 // @ts-expect-error a plain module without types, shared with the updater's own tests
 import { releaseServer } from './release-fakes.mjs'
 
@@ -86,18 +88,12 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
   const chatEnvDir = join(root, 'chat-env')
   await mkdir(chatEnvDir, { recursive: true })
   const quoted = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
-  // The chat's agent, as Orca starts it: note the chat's Orca variables, then be the real program.
+  // The chat's agent, as Orca starts it: note the chat's Orca variables, then be the real program, with
+  // no one's account and a model on this computer that turns every turn away (fakes.ts says why).
+  const model = await refusingModel()
   await writeFile(
     join(bin, 'claude'),
-    [
-      '#!/bin/sh',
-      'if [ -n "${ORCA_AGENT_SESSION_ID:-}" ]; then',
-      `  target=${quoted(chatEnvDir)}/"$ORCA_AGENT_SESSION_ID"`,
-      `  for name in ${CHAT_VARIABLES.join(' ')}; do eval "value=\\\${$name-}"; printf '%s=%s\\n' "$name" "$value"; done > "$target.$$.tmp" && mv "$target.$$.tmp" "$target"`,
-      'fi',
-      `exec ${quoted(await realpath(CLAUDE!))} "$@"`,
-      ''
-    ].join('\n')
+    chatAgentScript({ claude: await realpath(CLAUDE!), chatEnvDir, configDir: join(root, 'claude-config'), modelUrl: model.url, variables: CHAT_VARIABLES })
   )
   await chmod(join(bin, 'claude'), 0o755)
   // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
@@ -407,7 +403,7 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     note(`4: Open answered ok (${openLine})`)
 
     // ---------------------------------------------------------------------------------------
-    // 5. Stop and Resume. The starting message gave the chat a turn (its agent, not signed in,
+    // 5. Stop and Resume. The starting message gave the chat a turn (its agent, turned away by its model,
     //    fails it), and Orca accepts a Stop for it: the bridge sends Orca's own Stop and the chat
     //    holds replies. A repeated Stop is accepted as well. The person's reply after the Stop
     //    resumes it: the Inbox calls Resume, and the reply reaches the chat, once.
@@ -483,6 +479,10 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     serve.stderr?.destroy()
     agent?.stdout?.destroy()
     agent?.stderr?.destroy()
+    // The second Orca, its helpers and its crash reporter, which stopping the CLI leaves running: exactly
+    // the processes started for this throwaway profile, never another Orca.
+    await stopProcessesIn(root)
     await releases.close()
+    await model.close()
   }
 })

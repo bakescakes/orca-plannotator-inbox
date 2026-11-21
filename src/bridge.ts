@@ -31,6 +31,7 @@ import type { InboxDeps } from './inbox'
 import type { KeyValue } from './ledger'
 import { Lifecycle, LifecycleError, inboxSource, type DeliveryState, type LifecycleCli, type NativeRun, type OwnedSession, type SourceReader } from './lifecycle'
 import type { Reveal } from './navigation'
+import type { PromptKinds } from './orca-cli'
 import { canonicalSession, errorText, isRecord, type Json } from './util'
 
 export const BRIDGE_DIR = 'bridge'
@@ -263,6 +264,8 @@ export type BridgeDeps = {
   deliveryState: DeliveryState
   /** Told about each chat a launch owns, when it is created or resumed. */
   register?: (owned: OwnedSession) => void | Promise<void>
+  /** The kinds of prompt chats wait on, shared with reply delivery (one `agent read` per wait). */
+  prompts?: PromptKinds
   log: (message: string) => void
   // Test seams.
   now?: () => number
@@ -386,6 +389,7 @@ export async function startBridge(deps: BridgeDeps): Promise<Bridge> {
     projects: () => projects,
     deliveryState: deps.deliveryState,
     register: deps.register,
+    prompts: deps.prompts,
     native: deps.native,
     reveal: deps.reveal,
     log: deps.log,

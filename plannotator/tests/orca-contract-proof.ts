@@ -164,6 +164,29 @@ try{
   nativeSessions.native_empty={busy:true,state:"working",workspaceId:"inert-workspace"};
   bridgeLive={busy:true,busySince:realNow(),polls:4};states=await host.sessions();
   check(inboxRunOf(evidence(states!("native_empty"),host.live!("native_empty")) as any)?.state==="working","A refreshed native working snapshot stayed unknown");
+  // A chat at a permission prompt (a newer plugin's catalog row): the run line says it waits on it, whether the chat
+  // polls busy or not (a turn stopped at a prompt polls busy:false).
+  for(const [step,polled] of [[1,false],[2,true]] as const){
+    Date.now=()=>realNow()+80000+step*5000;
+    bridgeLive={busy:polled,busySince:polled?realNow():null,polls:4+step};
+    nativeSessions.native_empty={busy:false,state:"waiting",workspaceId:"inert-workspace",waiting:"permission"};
+    states=await host.sessions();
+    const row=states!("native_empty") as any,live=host.live!("native_empty");
+    check(row!=="absent"&&row.status==="waiting"&&row.waitingFor==="permission","A native permission prompt did not reach the run line");
+    check(live?.busy===true,"A native chat at a permission prompt read as idle");
+    check(inboxRunOf(evidence(row,live) as any)?.state==="waiting_terminal","A native chat at a permission prompt did not show as waiting");
+  }
+  // Anything else (a question, an unknown word, an older plugin's row without it) reads exactly as before.
+  for(const [step,waiting] of [[3,"question"],[4,"bogus"],[5,undefined]] as const){
+    Date.now=()=>realNow()+80000+step*5000;
+    bridgeLive={busy:false,busySince:null,polls:10+step};
+    nativeSessions.native_empty={busy:false,state:"waiting",workspaceId:"inert-workspace",...(waiting?{waiting}:{})};
+    states=await host.sessions();
+    const row=states!("native_empty") as any,live=host.live!("native_empty");
+    check(row!=="absent"&&row.status==="idle"&&row.waitingFor===null,"A native row without a permission prompt changed its host state");
+    check(live?.busy===false,"A native row without a permission prompt changed the live state");
+    check(inboxRunOf(evidence(row,live) as any)===null,"An idle native chat without a permission prompt showed a line");
+  }
   bridgeLive=null;
   check(host.live!("native_empty")===null,"Native unknown invented a live bridge connection");
   console.log(JSON.stringify({ok:true,checks,localHealth:localResponse.status,ownerTailnetHealth:remoteResponse.status,

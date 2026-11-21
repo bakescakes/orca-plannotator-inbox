@@ -15,6 +15,7 @@ import {
   loadLinkKey,
   NAVIGATION_FILE,
   NavigationKeyError,
+  botNotOpenedText,
   openChat,
   parseToken,
   REVEAL_HELPER,
@@ -413,13 +414,53 @@ test('a chat Orca no longer lists says so, and nothing is opened', async () => {
 
 const ROW: NavigationTarget = { session: SESSION, worktreeId: 'repo::/project', selector: 'id:repo::/project', folder: false }
 
-test('a chat listed twice, or in a folder workspace, is not opened', async () => {
-  for (const rows of [[ROW, { ...ROW, worktreeId: 'repo::/other', selector: 'id:repo::/other' }], [{ ...ROW, folder: true }]]) {
-    const orca = fakeCli(rows)
-    const revealer = fakeReveal()
-    assert.equal(await openChat(SESSION, { cli: () => orca.cli, reveal: revealer.reveal, log: () => undefined }), 'unsupported')
-    assert.deepEqual(revealer.calls, [])
+test('a chat listed twice is not opened', async () => {
+  const orca = fakeCli([ROW, { ...ROW, worktreeId: 'repo::/other', selector: 'id:repo::/other' }])
+  const revealer = fakeReveal()
+  assert.equal(await openChat(SESSION, { cli: () => orca.cli, reveal: revealer.reveal, log: () => undefined }), 'unsupported')
+  assert.deepEqual(revealer.calls, [])
+  assert.deepEqual(orca.state.activated, [])
+})
+
+const FOLDER: NavigationTarget = { session: SESSION, worktreeId: 'folder:f1', selector: 'id:folder:f1', folder: true, bot: null, title: 'Notes' }
+const BOT: NavigationTarget = { ...FOLDER, worktreeId: 'folder:home1', selector: 'id:folder:home1', bot: 'Lighthouse Keeper', title: 'Tide tables' }
+
+test('a chat in a folder workspace, a bot’s home included, opens by bringing the chat itself forward', async () => {
+  for (const row of [FOLDER, BOT]) {
+    const orca = fakeCli([row])
+    const revealer = fakeReveal((session) => ({ ok: true, sessionId: session, workspaceId: row.worktreeId }))
+    assert.equal(await openChat(SESSION, { cli: () => orca.cli, reveal: revealer.reveal, log: () => undefined }), 'chat')
+    assert.deepEqual(revealer.calls, [SESSION])
+    // Orca refuses to open a folder workspace by its id, so nothing else is asked of it.
     assert.deepEqual(orca.state.activated, [])
+  }
+})
+
+test('a chat in a folder workspace Orca cannot bring forward is not opened, and a bot’s says which bot and chat', async () => {
+  for (const answer of [
+    (): RevealResult => ({ ok: false, reason: 'Orca lacks agent-session.structured.reveal.v1' }),
+    (): RevealResult => ({ ok: true, sessionId: SESSION, workspaceId: 'folder:elsewhere' })
+  ]) {
+    for (const [row, expected] of [[FOLDER, 'unsupported'], [BOT, 'bot']] as const) {
+      const orca = fakeCli([row])
+      const logs: string[] = []
+      assert.equal(await openChat(SESSION, { cli: () => orca.cli, reveal: fakeReveal(answer).reveal, log: (line) => logs.push(line) }), expected)
+      assert.deepEqual(orca.state.activated, [])
+      if (row.bot) assert.ok(logs.some((line) => line.includes('the bot Lighthouse Keeper’s chat')), logs.join('\n'))
+    }
+  }
+  assert.equal(botNotOpenedText(BOT), 'Orca could not bring “Tide tables”, a chat of the bot Lighthouse Keeper, forward from this link, so nothing was opened. Open Lighthouse Keeper in Orca to find it.')
+  assert.equal(botNotOpenedText({ bot: 'Lighthouse Keeper', title: 'Lighthouse Keeper' }), 'Orca could not bring this chat of the bot Lighthouse Keeper forward from this link, so nothing was opened. Open Lighthouse Keeper in Orca to find it.')
+
+  const t = await listener({ reveal: async () => ({ ok: false, reason: 'no' }) })
+  try {
+    t.orca.state.rows = [{ ...BOT, title: 'Tide <tables>' }]
+    const reply = await fetchLocal(t.nav.port, t.path, { headers: CLICK })
+    assert.equal(reply.status, 409)
+    assert.match(reply.body, /Orca could not bring “Tide &#60;tables&#62;”, a chat of the bot Lighthouse Keeper, forward from this link/)
+    assert.deepEqual(t.orca.state.activated, [])
+  } finally {
+    await t.nav.stop()
   }
 })
 
@@ -437,7 +478,7 @@ test('when the chat tab cannot be brought forward, its workspace is opened inste
     const outcome = await openChat(SESSION, { cli: () => orca.cli, reveal: fakeReveal(answer).reveal, log: (line) => logs.push(line) })
     assert.equal(outcome, 'workspace')
     assert.deepEqual(orca.state.activated, ['id:repo::/project'])
-    assert.ok(logs.some((line) => line.includes('could not bring the chat tab forward')))
+    assert.ok(logs.some((line) => line.includes('could not bring the chat forward')))
   }
   const t = await listener({ reveal: async () => ({ ok: false, reason: 'no' }) })
   try {
@@ -488,16 +529,21 @@ test('worktree ps rows become navigation targets with an exact selector', () => 
     truncated: false,
     worktrees: [
       { worktreeId: 'repo::/project', workspaceKind: 'git', hostId: null, agents: [{ paneKey: pane('a') }, { paneKey: 'terminal:1' }] },
-      { worktreeId: 'folder:f1', workspaceKind: 'folder-workspace', agents: [{ paneKey: pane('b') }] },
+      { worktreeId: 'folder:f1', workspaceKind: 'folder-workspace', agents: [{ paneKey: pane('b'), conversationName: '  Field   notes ' }] },
+      // A bot's home (recorded from `worktree ps`), and a workspace that is only nested under a bot.
+      { worktreeId: 'folder:home1', workspaceKind: 'folder-workspace', repo: 'Bots', repoId: 'folder-workspace:group1', bot: 'Lighthouse Keeper', botHome: true, hostId: 'local', agents: [{ paneKey: pane('e'), conversationName: 'Lighthouse Keeper' }] },
+      { worktreeId: 'repo::/taken', workspaceKind: 'git', bot: 'Lighthouse Keeper', agents: [{ paneKey: pane('f'), taskTitle: 'Tidy up' }] },
       { worktreeId: 'repo::/remote', hostId: 'ssh-1', agents: [{ paneKey: pane('c') }] },
       { worktreeId: 'repo::/two', hostId: 'local', agents: [{ paneKey: pane('a', 1) }] },
       { agents: [{ paneKey: pane('d') }] }
     ]
   })
   assert.deepEqual(targets, [
-    { session: 'a', worktreeId: 'repo::/project', selector: 'id:repo::/project', folder: false },
-    { session: 'b', worktreeId: 'folder:f1', selector: 'id:folder:f1', folder: true },
-    { session: 'a', worktreeId: 'repo::/two', selector: 'id:repo::/two', folder: false }
+    { session: 'a', worktreeId: 'repo::/project', selector: 'id:repo::/project', folder: false, bot: null, title: null },
+    { session: 'b', worktreeId: 'folder:f1', selector: 'id:folder:f1', folder: true, bot: null, title: 'Field notes' },
+    { session: 'e', worktreeId: 'folder:home1', selector: 'id:folder:home1', folder: true, bot: 'Lighthouse Keeper', title: 'Lighthouse Keeper' },
+    { session: 'f', worktreeId: 'repo::/taken', selector: 'id:repo::/taken', folder: false, bot: null, title: 'Tidy up' },
+    { session: 'a', worktreeId: 'repo::/two', selector: 'id:repo::/two', folder: false, bot: null, title: null }
   ])
   assert.throws(() => parseNavigationTargets({ worktrees: [], truncated: true }))
   assert.throws(() => parseNavigationTargets({}))
