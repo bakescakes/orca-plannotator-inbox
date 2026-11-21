@@ -4,8 +4,9 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { Engine, type EngineDeps, type EngineSettings, type EngineStatus } from '../src/engine'
 import { Lifecycle, inboxSource, type NativeRun } from '../src/lifecycle'
-import { OrcaCli } from '../src/orca-cli'
+import { OrcaCli, PromptKinds } from '../src/orca-cli'
 import { fakeInbox, fakeLifecycleOrca, fakeNative, fakeOrca, launchThread, memoryStore, personMessage, reply, tempDir, threadAnswer, until } from './fakes'
+import { isRecord } from '../src/util'
 
 const SESSION = 'claude_1b491d4a_6f38'
 
@@ -63,6 +64,45 @@ test('a reply for a registered open chat is delivered and acknowledged', async (
     await t.engine.stop()
   }
   assert.equal((await t.heartbeat()).delivering, false, 'stopping says so')
+})
+
+test('a bot’s chat is listened for and named as the bot’s; chosen projects count its home like any folder', async () => {
+  const logs: string[] = []
+  const t = await setup({ register: [], deps: () => ({ log: (line: string) => logs.push(line) }) })
+  t.orca.state.bots.set(SESSION, 'Lighthouse Keeper')
+  // As the launcher registers a chat in a bot's home: the home is its project.
+  await writeFile(join(t.shared, 'sessions', `${SESSION}.json`), JSON.stringify({ v: 1, session: SESSION, raw: SESSION, projectPath: '/bots/home-1', dataDir: t.dataDir, at: Date.now() }))
+  t.inbox.state.root = '/bots/home-1'
+  t.inbox.state.queue.set(SESSION, [reply('msg_1')])
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.acknowledged.length === 1, 'the acknowledgement')
+    const status = await t.engine.refresh()
+    assert.deepEqual(
+      status.sessions.map((chat) => [chat.session, chat.title, chat.bot]),
+      [[SESSION, 'Chat 1', 'Lighthouse Keeper (Claude bot)']]
+    )
+    assert.ok(logs.includes('listening for replies to a bot’s chat: Lighthouse Keeper (Claude bot)'), logs.join('\n'))
+    assert.equal(t.orca.state.mail[0]?.to_handle, `orca_session_id:${SESSION}`)
+
+    // A reply that needs a person says which bot it is for.
+    t.orca.state.refusal = { code: 'bots_disabled', message: 'Bots are off on this computer.' }
+    t.inbox.state.queue.set(SESSION, [reply('msg_2')])
+    await until(async () => (await t.engine.refresh()).blocked.length === 1, 'the refusal to be held')
+    const held = (await t.engine.refresh()).blocked[0]!
+    assert.equal(held.bot, 'Lighthouse Keeper (Claude bot)')
+    assert.match(held.error ?? '', /bots are switched off in Orca/)
+
+    // A bot's home is not inside a chosen project folder unless it is listed, as for any chat.
+    t.settings.projects = ['/work/project']
+    const limited = await t.engine.refresh()
+    assert.deepEqual(limited.sessions, [])
+    assert.match(limited.detail ?? '', /1 chat\(s\) outside the chosen projects/)
+    t.settings.projects = ['/work/project', '/bots']
+    assert.deepEqual((await t.engine.refresh()).sessions.map((chat) => chat.bot), ['Lighthouse Keeper (Claude bot)'])
+  } finally {
+    await t.engine.stop()
+  }
 })
 
 test('a chat that is not open in Orca is not polled, so the Inbox does not show it as connected', async () => {
@@ -371,6 +411,226 @@ test('the Orca build’s delivery check never reports a later reply delivered on
     // reply the worker has not seen, so the launch message's receipt says nothing about it.
     assert.equal(t.engine.launchDeliveryState(SESSION, { ...launch, replyId: null }), 'queued', 'held in the Inbox for the courier, which listens for this chat')
     assert.equal(t.engine.launchDeliveryState('claude_not_listened', { ...launch, replyId: null }), 'unknown', 'a chat no one listens for')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// Telling the Inbox when a chat waits on the person (Plannotator 0.29.1 `blocked`)
+
+/** A chat at a prompt, as Orca 1.4.266 lists it. */
+const BLOCKED = { state: 'blocked', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_000_000 }
+/** Words a real chat's prompt holds; they must never leave the plugin's parse of `agent read`. */
+const PROMPT_WORDS = 'Allow running the migration on the live database? (private words)'
+const PERMISSION = [
+  { kind: 'message', role: 'assistant', text: 'Next I will run the migration.' },
+  { kind: 'approval', text: PROMPT_WORDS, pending: true }
+]
+const QUESTION = [{ kind: 'question', text: PROMPT_WORDS, pending: true }]
+const promptReads = (orca: ReturnType<typeof fakeOrca>) => orca.state.calls.filter((args) => args[0] === 'agent' && args[1] === 'read')
+
+test('a chat waiting on a permission says so on every poll', async () => {
+  const logs: string[] = []
+  const t = await setup({ deps: () => ({ log: (line: string) => logs.push(line) }) })
+  t.orca.state.rows.set(SESSION, BLOCKED)
+  t.orca.state.entries.set(SESSION, PERMISSION)
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.length >= 3, 'three polls')
+    const polls = t.inbox.state.polls.slice(0, 3)
+    for (const poll of polls) {
+      assert.deepEqual(poll.blocked, { kind: 'permission' })
+      assert.equal(poll.busy, false, 'the chat’s busy flag is what it was')
+    }
+    assert.equal(typeof polls[0]!.blocked_at, 'number')
+    assert.equal(new Set(polls.map((poll) => poll.blocked_at)).size, 1, 'the same word keeps the time it was decided')
+    assert.equal(t.inbox.state.events.length, 0, 'nothing changed, so no event')
+    assert.ok(!JSON.stringify([t.inbox.state.polls, logs, await t.engine.refresh()]).includes('private words'), 'the prompt’s words go nowhere')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('a cleared prompt is withdrawn at once with a state event', async () => {
+  const t = await setup()
+  t.orca.state.rows.set(SESSION, BLOCKED)
+  t.orca.state.entries.set(SESSION, QUESTION)
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.some((poll) => isRecord(poll.blocked)), 'a poll that says the chat waits')
+    const said = t.inbox.state.polls.find((poll) => isRecord(poll.blocked))!
+    assert.deepEqual(said.blocked, { kind: 'question' })
+    // The person answers in Orca.
+    t.orca.state.rows.delete(SESSION)
+    await t.engine.refresh()
+    await until(() => t.inbox.state.events.length === 1, 'the state event')
+    const event = t.inbox.state.events[0]!
+    assert.equal(event.host, 'orca')
+    assert.equal(event.session, SESSION)
+    assert.equal(event.type, 'state')
+    assert.ok(!('blocked' in event), 'no word: the Inbox drops it')
+    assert.ok(!('busy' in event), 'the event leaves the chat’s busy flag alone')
+    assert.ok((event.blocked_at as number) > (said.blocked_at as number), 'newer than every poll that said it')
+    const after = t.inbox.state.polls.length
+    await until(() => t.inbox.state.polls.length >= after + 3, 'later polls')
+    // One poll may have been built just before the look; every one after it says nothing.
+    for (const poll of t.inbox.state.polls.slice(after + 1)) {
+      assert.ok(!('blocked' in poll))
+      assert.equal(poll.blocked_at, event.blocked_at)
+    }
+    await t.engine.refresh()
+    assert.equal(t.inbox.state.events.length, 1, 'said once')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('a long wait is said again before the Inbox forgets it', async () => {
+  let clock = Date.now()
+  const t = await setup({ deps: () => ({ now: () => clock }) })
+  // Held as a real Inbox holds a poll: nothing arrives, so only the look can say it again.
+  t.inbox.state.holdMs = 60_000
+  t.orca.state.rows.set(SESSION, BLOCKED)
+  t.orca.state.entries.set(SESSION, PERMISSION)
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.length === 1, 'the first poll')
+    const poll = t.inbox.state.polls[0]!
+    assert.deepEqual(poll.blocked, { kind: 'permission' })
+    clock += 19_000
+    await t.engine.refresh()
+    assert.equal(t.inbox.state.events.length, 0, 'said 19 s ago: not yet')
+    clock += 1_000
+    await t.engine.refresh()
+    await until(() => t.inbox.state.events.length === 1, 'the word said again')
+    assert.deepEqual(t.inbox.state.events[0]!.blocked, { kind: 'permission' })
+    assert.equal(t.inbox.state.events[0]!.blocked_at, poll.blocked_at, 'the same word, so the same time')
+    clock += 10_000
+    await t.engine.refresh()
+    assert.equal(t.inbox.state.events.length, 1)
+    clock += 10_000
+    await t.engine.refresh()
+    await until(() => t.inbox.state.events.length === 2, 'said again 20 s later')
+    assert.equal(t.inbox.state.polls.length, 1, 'the held poll was left alone')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('a chat’s prompt is read once per wait, not every look', async () => {
+  const t = await setup()
+  t.orca.state.rows.set(SESSION, BLOCKED)
+  t.orca.state.entries.set(SESSION, PERMISSION)
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.some((poll) => isRecord(poll.blocked)), 'a poll that says the chat waits')
+    for (let i = 0; i < 3; i++) await t.engine.refresh()
+    assert.equal(promptReads(t.orca).length, 1)
+    assert.deepEqual(promptReads(t.orca)[0], ['agent', 'read', '--id', `orca_session_id:${SESSION}`, '--limit', '10'])
+    // The chat went on, then stopped at another prompt: a new wait, read again.
+    t.orca.state.rows.set(SESSION, { ...BLOCKED, stateStartedAt: BLOCKED.stateStartedAt + 60_000 })
+    t.orca.state.entries.set(SESSION, QUESTION)
+    await t.engine.refresh()
+    await until(() => t.inbox.state.events.length === 1, 'the new word')
+    assert.deepEqual(t.inbox.state.events[0]!.blocked, { kind: 'question' })
+    await t.engine.refresh()
+    assert.equal(promptReads(t.orca).length, 2)
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('an Orca that cannot read a chat sends no kind rather than a guess', async () => {
+  for (const scenario of ['no agent read', 'nothing pending', 'a child waits'] as const) {
+    const t = await setup()
+    t.orca.state.rows.set(SESSION, scenario === 'a child waits' ? { state: 'waiting', mainAgent: { state: 'working' }, stateStartedAt: 1 } : BLOCKED)
+    t.orca.state.entries.set(SESSION, scenario === 'nothing pending' ? [{ kind: 'approval', text: PROMPT_WORDS, pending: false }] : PERMISSION)
+    t.orca.state.agentRead = scenario !== 'no agent read'
+    t.engine.start()
+    try {
+      await until(() => t.inbox.state.polls.length >= 2, 'two polls')
+      await t.engine.refresh()
+      for (const poll of t.inbox.state.polls) assert.ok(!('blocked' in poll), scenario)
+      assert.equal(t.inbox.state.events.length, 0, scenario)
+      assert.equal(promptReads(t.orca).length, scenario === 'a child waits' ? 0 : 1, scenario)
+    } finally {
+      await t.engine.stop()
+    }
+  }
+  // A question the chat's own turn asked and does not wait on is said without reading the chat.
+  const t = await setup()
+  t.orca.state.rows.set(SESSION, { state: 'waiting', mainAgent: { state: 'waiting' }, stateStartedAt: 1 })
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.some((poll) => isRecord(poll.blocked)), 'a poll that says the chat waits')
+    assert.deepEqual(t.inbox.state.polls.find((poll) => isRecord(poll.blocked))!.blocked, { kind: 'question' })
+    assert.equal(promptReads(t.orca).length, 0)
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('a reply to a chat waiting on a prompt is still sent and stays on the way', async () => {
+  const t = await setup()
+  // Orca holds a chat's mail while a prompt is up.
+  t.orca.state.deliverAtOnce = false
+  t.orca.state.rows.set(SESSION, BLOCKED)
+  t.orca.state.entries.set(SESSION, PERMISSION)
+  t.inbox.state.queue.set(SESSION, [reply('msg_1')])
+  t.engine.start()
+  try {
+    await until(() => t.orca.sends().length === 1, 'the reply sent to Orca')
+    await until(() => t.engine.deliveryState(SESSION, 'msg_1') === 'queued', 'Orca took it')
+    assert.equal(t.inbox.state.acknowledged.length, 0, 'not delivered until the chat takes it')
+    assert.ok(t.inbox.state.polls.every((poll) => poll.busy === false))
+    assert.deepEqual(t.inbox.state.polls.at(-1)!.blocked, { kind: 'permission' })
+    // The person answers in Orca; the chat takes its mail, and only then is the Inbox told.
+    t.orca.state.rows.delete(SESSION)
+    t.orca.deliverAll()
+    await until(() => t.inbox.state.acknowledged.length === 1, 'the acknowledgement', 15_000)
+    assert.equal(t.orca.sends().length, 1, 'sent once')
+  } finally {
+    await t.engine.stop()
+  }
+})
+
+test('a blocked episode costs one read of the chat, shared by delivery and the catalog', async () => {
+  // As the worker wires them: the engine and the bridge's catalog share one set of prompt kinds.
+  const prompts = new PromptKinds()
+  const lifeOrca = fakeLifecycleOrca()
+  const native = fakeNative(lifeOrca)
+  const lifeInbox = fakeInbox()
+  lifeInbox.state.details.set('thr_launch', launchThread('thr_launch', '/work/project', { id: 'launch_1', agent: 'codex', folder: '/work/project' }))
+  let ids = 0
+  const life = new Lifecycle({
+    store: memoryStore(),
+    cli: () => new OrcaCli({ command: ['orca'], exec: lifeOrca.exec, env: {} }),
+    source: () => inboxSource('/data', { fetch: lifeInbox.fetch, readRegistry: lifeInbox.readRegistry }),
+    projects: () => [],
+    deliveryState: () => 'unknown',
+    prompts,
+    native: native.run as NativeRun,
+    reveal: async (session) => ({ ok: true, sessionId: session, workspaceId: 'wt1' }),
+    log: () => undefined,
+    randomUUID: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, '0')}`
+  })
+  const started = await life.handle('start', { launchId: 'launch_1', threadId: 'thr_launch', messageId: 'thr_launch', provider: 'codex', folder: '/work/project', ownerAction: true })
+  const chat = String(started.session)
+  // Both stand-ins list the same chat at the same prompt, as the one real Orca would.
+  lifeOrca.state.listed.set(chat, { ...BLOCKED, agentType: 'codex' })
+  lifeOrca.state.entries.set(chat, PERMISSION)
+  const t = await setup({ sessions: [chat], register: [chat], deps: () => ({ prompts }) })
+  t.orca.state.rows.set(chat, BLOCKED)
+  t.orca.state.entries.set(chat, PERMISSION)
+  const reads = () => promptReads(t.orca).length + lifeOrca.state.calls.filter((args) => args[0] === 'agent' && args[1] === 'read').length
+  t.engine.start()
+  try {
+    await until(() => t.inbox.state.polls.some((poll) => isRecord(poll.blocked)), 'a poll that says the chat waits')
+    assert.equal(((await life.handle('catalog')).sessions as Record<string, Record<string, unknown>>)[chat]!.waiting, 'permission')
+    await t.engine.refresh()
+    assert.equal(((await life.handle('catalog')).sessions as Record<string, Record<string, unknown>>)[chat]!.waiting, 'permission')
+    assert.equal(reads(), 1)
   } finally {
     await t.engine.stop()
   }

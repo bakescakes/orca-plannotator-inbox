@@ -14,8 +14,9 @@
 //   user navigation (Sec-Fetch-User ?1, Sec-Fetch-Mode navigate). Link previews, prefetches and
 //   scripts get a page with one button, which POSTs back to the same origin.
 // - A link names a chat, never a path or a tab instance, and is checked against Orca's current
-//   list of chats on every click. A chat that is gone, listed twice, or in a folder workspace is
-//   not opened, and nothing is created or replaced in its place.
+//   list of chats on every click. A chat that is gone or listed twice is not opened, and nothing
+//   is created or replaced in its place. A chat in a folder workspace (a bot's home is one) opens
+//   only by bringing that chat itself forward: Orca does not open a folder workspace by its id.
 // - Nothing from the request is written into a page unescaped, and signed links are never logged.
 import { spawn } from 'node:child_process'
 import { createHmac, randomBytes as cryptoRandomBytes, timingSafeEqual } from 'node:crypto'
@@ -215,7 +216,8 @@ export type OpenOutcome =
   | 'chat' // the exact chat tab is in front
   | 'workspace' // its workspace is in front; Orca could not bring the chat tab forward
   | 'gone' // Orca does not list this chat
-  | 'unsupported' // listed twice, or in a folder workspace: not opened
+  | 'unsupported' // listed twice, or in a folder workspace Orca could not bring the chat forward in: not opened
+  | 'bot' // a bot's chat Orca could not bring forward: not opened
   | 'moved' // the chat changed workspace (or vanished) while it was being opened
   | 'failed' // Orca could not be asked
 
@@ -235,42 +237,53 @@ function only(targets: NavigationTarget[], session: string): NavigationTarget[] 
  * only when the chat is still exactly where it was.
  */
 export async function openChat(session: string, deps: OpenDeps): Promise<OpenOutcome> {
+  return (await openChatTarget(session, deps)).outcome
+}
+
+/** `openChat`, with the chat as Orca listed it (null when it was not listed once), for the page that says what happened. */
+export async function openChatTarget(session: string, deps: OpenDeps): Promise<{ outcome: OpenOutcome; target: NavigationTarget | null }> {
+  const outcome = (value: OpenOutcome, target: NavigationTarget | null = null) => ({ outcome: value, target })
   let cli: NavigationCli | null
   try {
     cli = await deps.cli()
   } catch (error) {
     deps.log(`navigation: Orca's CLI is not available (${errorText(error)})`)
-    return 'failed'
+    return outcome('failed')
   }
   if (!cli) {
     deps.log('navigation: Orca’s CLI was not found')
-    return 'failed'
+    return outcome('failed')
   }
   let found: NavigationTarget[]
   try {
     found = only(await cli.navigationTargets(), session)
   } catch (error) {
     deps.log(`navigation: could not list Orca's chats (${errorText(error)})`)
-    return 'failed'
+    return outcome('failed')
   }
-  if (found.length === 0) return 'gone'
+  if (found.length === 0) return outcome('gone')
   if (found.length > 1) {
     deps.log('navigation: a chat is listed more than once, so it was not opened')
-    return 'unsupported'
+    return outcome('unsupported')
   }
   const target = found[0]!
-  if (target.folder) {
-    deps.log('navigation: the chat is in a folder workspace, which cannot be opened from a link')
-    return 'unsupported'
-  }
+  const which = target.bot ? `the bot ${target.bot}’s chat` : 'the chat'
 
   let revealed = false
   try {
     const result = await deps.reveal(session, cli)
     if (result.ok && result.sessionId === session && result.workspaceId === target.worktreeId) revealed = true
-    else deps.log(`navigation: Orca could not bring the chat tab forward (${result.ok ? 'it answered for another chat or workspace' : result.reason})`)
+    else deps.log(`navigation: Orca could not bring ${which} forward (${result.ok ? 'it answered for another chat or workspace' : result.reason})`)
   } catch (error) {
-    deps.log(`navigation: Orca could not bring the chat tab forward (${errorText(error)})`)
+    deps.log(`navigation: Orca could not bring ${which} forward (${errorText(error)})`)
+  }
+
+  // A folder workspace, a bot's home among them, opens only with the chat itself: `worktree
+  // activate` refuses it. Orca checked the chat and its workspace as it brought it forward.
+  if (target.folder) {
+    if (revealed) return outcome('chat', target)
+    deps.log(`navigation: ${which} is in a folder workspace, which Orca opens from a link only by bringing the chat forward, so nothing was opened`)
+    return outcome(target.bot ? 'bot' : 'unsupported', target)
   }
 
   // Look again before opening anything, so a chat that moved or was replaced is never guessed at.
@@ -279,23 +292,23 @@ export async function openChat(session: string, deps: OpenDeps): Promise<OpenOut
     again = only(await cli.navigationTargets(), session)
   } catch (error) {
     deps.log(`navigation: could not list Orca's chats again (${errorText(error)})`)
-    return revealed ? 'chat' : 'failed'
+    return outcome(revealed ? 'chat' : 'failed', target)
   }
   if (again.length !== 1 || again[0]!.worktreeId !== target.worktreeId || again[0]!.folder) {
     deps.log('navigation: the chat changed while it was being opened; nothing else was opened')
-    return again.length === 0 && !revealed ? 'gone' : 'moved'
+    return outcome(again.length === 0 && !revealed ? 'gone' : 'moved', target)
   }
   try {
     const opened = await cli.activateWorktree(target.selector)
     if (opened !== null && opened !== target.worktreeId) {
       deps.log('navigation: Orca opened a different workspace than the chat’s')
-      return revealed ? 'chat' : 'failed'
+      return outcome(revealed ? 'chat' : 'failed', target)
     }
   } catch (error) {
     deps.log(`navigation: Orca could not open the workspace (${errorText(error)})`)
-    return revealed ? 'chat' : 'failed'
+    return outcome(revealed ? 'chat' : 'failed', target)
   }
-  return revealed ? 'chat' : 'workspace'
+  return outcome(revealed ? 'chat' : 'workspace', target)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -493,6 +506,13 @@ function message(title: string, text: string): string {
   return page(title, `<p>${escapeHtml(text)}</p>`)
 }
 
+/** The page for a bot's chat Orca could not bring forward: names the bot and the chat, and where to find it. */
+export function botNotOpenedText(target: Pick<NavigationTarget, 'bot' | 'title'>): string {
+  const bot = target.bot ?? 'the bot'
+  const chat = target.title && target.title !== target.bot ? `“${target.title}”, a chat of the bot ${bot},` : `this chat of the bot ${bot}`
+  return `Orca could not bring ${chat} forward from this link, so nothing was opened. Open ${bot} in Orca to find it.`
+}
+
 /** What a preview or a plain fetch of a link gets: one button that opens the chat. */
 export function confirmPage(token: string): string {
   return page(
@@ -506,6 +526,7 @@ const OUTCOMES: Record<OpenOutcome | 'busy' | 'slow', [number, string, string]> 
   workspace: [200, 'Opened in Orca', 'Opened the workspace; Orca could not bring the chat itself forward.'],
   gone: [404, 'Chat not open', 'This chat is no longer open in Orca.'],
   unsupported: [409, 'Not opened', 'Orca cannot open this chat from a link.'],
+  bot: [409, 'Not opened', 'Orca could not bring this bot’s chat forward from a link.'],
   moved: [409, 'Not opened', 'This chat changed while Orca was opening it, so nothing else was opened.'],
   failed: [503, 'Not opened', 'Orca could not be reached to open this chat. Try again in a moment.'],
   busy: [409, 'Not opened', 'Orca is already opening a chat. Try again in a moment.'],
@@ -625,16 +646,20 @@ export async function startNavigation(deps: NavigationDeps): Promise<Navigation>
   const openClaim = async (response: ServerResponse, claim: LinkClaim): Promise<void> => {
     if (opening) return answer(response, 'busy')
     opening = true
-    const work = openChat(claim.session, { cli: deps.cli, reveal, log: deps.log })
+    const work = openChatTarget(claim.session, { cli: deps.cli, reveal, log: deps.log })
     // The lock is held until Orca has really finished, even when the page gives up waiting.
     void work.finally(() => (opening = false)).catch(() => undefined)
     let timer: NodeJS.Timeout | undefined
-    const outcome = await Promise.race([
-      work.catch((): OpenOutcome => 'failed'),
-      new Promise<'slow'>((resolve) => (timer = setTimeout(() => resolve('slow'), OPEN_DEADLINE_MS)))
+    const opened = await Promise.race([
+      work.catch(() => ({ outcome: 'failed' as const, target: null })),
+      new Promise<{ outcome: 'slow'; target: null }>((resolve) => (timer = setTimeout(() => resolve({ outcome: 'slow', target: null }), OPEN_DEADLINE_MS)))
     ])
     clearTimeout(timer)
-    answer(response, outcome)
+    if (opened.outcome === 'bot' && opened.target) {
+      const [status, title] = OUTCOMES.bot
+      return send(response, status, message(title, botNotOpenedText(opened.target)))
+    }
+    answer(response, opened.outcome)
   }
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {

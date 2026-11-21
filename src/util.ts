@@ -19,6 +19,18 @@ export function canonicalSession(value: unknown): string | null {
   return SESSION.test(bare) ? bare : null
 }
 
+/** How an Orca agent id (`agentType`) is shown to a person; the id itself when it is not one of these. */
+const AGENT_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', opencode2: 'OpenCode', gemini: 'Gemini', antigravity: 'Antigravity', pi: 'Pi' }
+
+/**
+ * A bot's chat as a person reads it, the same way the Inbox names it: `Name (Claude bot)`, or
+ * `Name (bot)` when the agent is not known.
+ */
+export function botLabel(bot: string, agentType: string | null): string {
+  const agent = agentType === null ? null : Object.hasOwn(AGENT_NAMES, agentType) ? AGENT_NAMES[agentType]! : agentType
+  return agent ? `${bot} (${agent} bot)` : `${bot} (bot)`
+}
+
 export function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }

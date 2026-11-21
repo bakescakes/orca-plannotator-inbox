@@ -13,7 +13,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { EnvelopeError, buildEnvelope } from './envelope'
 import { InboxRefused, InboxUnavailable, type InboxClient, type InboxCommand, type ThreadSource } from './inbox'
 import { Ledger, type Delivery } from './ledger'
-import { OrcaContractError, OrcaNotRun, OrcaRefused, type MailMessage, type OrcaCli } from './orca-cli'
+import { OrcaContractError, OrcaNotRun, OrcaRefused, OrcaTooLong, isBotRequestPayload, type MailMessage, type OrcaCli } from './orca-cli'
 import { KeyedQueue, canonicalSession, errorText, isRecord } from './util'
 
 export type Outcome = 'acknowledged' | 'queued' | 'deferred' | 'blocked' | 'rejected' | 'ignored'
@@ -38,6 +38,29 @@ export const REFUSED = {
   project: 'This reply’s thread belongs to a different project than this chat, so it was not delivered.',
   recipient: 'Nothing in this reply’s thread shows it is meant for this chat, so it was not delivered.'
 } as const
+
+/** Orca refused these exact arguments before sending anything, in its own words where it gave them. */
+export function refusedText(error: OrcaRefused): string {
+  const words = (error.detail ?? '').replace(/\s+/g, ' ').trim().slice(0, 300)
+  return `Orca refused this reply and nothing was sent${words ? `: ${words.replace(/\.$/, '')}` : ` (${error.code})`}. It is still in the Inbox.`
+}
+
+/**
+ * Refusals Orca passes through under their own code and documents as having no effect: the chat a
+ * reply is addressed to is not there to take it, or it is a bot's chat while bots are switched off.
+ * Nothing was stored, so the reply waits for a person instead of being read back as "not known".
+ */
+const NO_EFFECT: Record<string, string> = {
+  session_caller_not_live: 'This chat has ended in Orca (it was closed), so the reply was not sent. It is still in the Inbox.',
+  session_caller_unknown: 'Orca has no such chat on this computer, so the reply was not sent. It is still in the Inbox.',
+  bots_disabled: 'This chat is a bot’s, and bots are switched off in Orca, so the reply was not sent. Switch bots on in Orca, then press Send again.'
+}
+
+/** Orca's words for a refusal that had no effect, or null when the refusal is not one of those. */
+export function noEffectText(error: OrcaRefused): string | null {
+  if (Object.hasOwn(NO_EFFECT, error.code)) return NO_EFFECT[error.code]!
+  return error.code.startsWith('session_caller_') ? refusedText(error) : null
+}
 
 /** A path with links resolved; the path itself when it cannot be (it does not exist here). */
 export async function realOrSelf(path: string): Promise<string> {
@@ -154,7 +177,9 @@ export class Courier {
       }
       verified = true
       try {
-        const envelope = buildEnvelope(inbox.key, route.session, command)
+        // A long reply fits in one mail only where this Orca takes the body through standard input.
+        const carrier = (await this.orca.takesBodyFile()) ? 'stdin' : 'argv'
+        const envelope = buildEnvelope(inbox.key, route.session, command, process.platform, carrier)
         row = await this.ledger.create(key, fields, envelope)
       } catch (error) {
         if (!(error instanceof EnvelopeError)) throw error
@@ -199,6 +224,21 @@ export class Courier {
         const message = await this.orca.send(envelope, row.request)
         row = await this.ledger.update(key, { state: 'accepted', message: message.id, mailbox: message.to_handle })
       } catch (error) {
+        // Nothing was sent, and the same request would be refused again: a person decides, instead
+        // of a retry every few seconds that can never work. Send again reuses the same words.
+        if (error instanceof OrcaTooLong) {
+          await this.ledger.update(key, { state: 'blocked', error: error.message })
+          return 'blocked'
+        }
+        if (error instanceof OrcaRefused && error.notSent && error.code === 'invalid_argument') {
+          await this.ledger.update(key, { state: 'blocked', error: refusedText(error) })
+          return 'blocked'
+        }
+        const refused = error instanceof OrcaRefused ? noEffectText(error) : null
+        if (refused !== null) {
+          await this.ledger.update(key, { state: 'blocked', error: refused })
+          return 'blocked'
+        }
         if (error instanceof OrcaNotRun || (error instanceof OrcaRefused && error.notSent)) {
           await this.ledger.update(key, { state: 'prepared', error: 'Orca did not take the reply yet; it will be tried again.' })
           return 'deferred'
@@ -245,9 +285,12 @@ export class Courier {
       }
       throw error
     }
-    // No receipt: look for this exact mail in the chat's own mailbox, without consuming anything.
+    // No receipt: look for this exact mail in the chat's own mailbox, without consuming anything. In a
+    // bot's chat Orca keeps its own payload in place of this one, so there the exact body decides.
     const mail = (await this.orca.mailbox(`orca_session_id:${envelope.session}`)).filter(
-      (message) => message.from_handle === this.orca.sender && message.payload === envelope.payload
+      (message) =>
+        message.from_handle === this.orca.sender &&
+        (message.payload === envelope.payload || (isBotRequestPayload(message.payload) && message.body === envelope.body))
     )
     if (mail.length === 1) return this.ledger.update(key, { state: 'accepted', message: mail[0]!.id, mailbox: mail[0]!.to_handle })
     return this.ledger.update(key, { state: 'blocked', error: AMBIGUOUS })

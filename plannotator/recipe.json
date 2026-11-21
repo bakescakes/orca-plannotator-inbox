@@ -89,7 +89,7 @@
     {
       "file": "modules/packages/server/inbox-orca-host.ts",
       "target": "packages/server/inbox-orca-host.ts",
-      "sha256": "0bb7c162dfbf1f5efb5cfb0a7cc136df9421a7818a49ff33daf6b28c2c6d4e61"
+      "sha256": "ada75edd3164dfad8dde7f6896bef41a6c1d9761de2b4171e91a1d2bc6574e20"
     },
     {
       "file": "modules/packages/server/inbox-orca-surface.ts",
@@ -116,7 +116,7 @@
     {
       "file": "tests/orca-contract-proof.ts",
       "target": "tests/orca-contract-proof.ts",
-      "sha256": "972e6971b897b95ea1793e4e4b2e61aa5ea88a6eda7c430c2e69a73b19376ae3",
+      "sha256": "e481d9ba68a58c678d15b95801636062b0dc97569d986a3e3096cd29bc61c1ba",
       "run": [
         "{bun}",
         "tests/orca-contract-proof.ts"

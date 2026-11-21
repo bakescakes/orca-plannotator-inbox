@@ -315,6 +315,93 @@ test('the Orca build: the updater is installed, runs once at start, and its stat
   }
 })
 
+/** Puts an Orca build of Plannotator 0.28.66 in use in `shared`, as the updater records it. */
+async function installBuild(shared: string): Promise<void> {
+  const binary = join(shared, 'plannotator', 'versions', '0.28.66-orca.1', process.platform === 'win32' ? 'plannotator.exe' : 'plannotator')
+  await mkdir(join(binary, '..'), { recursive: true, mode: 0o700 })
+  await writeFile(binary, '#!/bin/sh\necho plannotator 0.28.66\n', { mode: 0o755 })
+  await chmod(binary, 0o755)
+  const current = join(shared, 'plannotator', 'current.json')
+  await writeFile(current, JSON.stringify({ v: 1, version: '0.28.66', build: 'orca.1', path: binary, sha256: 'e'.repeat(64), size: (await stat(binary)).size, installedAt: 5 }), { mode: 0o600 })
+  await chmod(current, 0o600)
+}
+
+const MOVE = ['--restart', '--if-plain']
+const moves = (runs: string[][]): number => runs.filter((args) => args.join(' ') === MOVE.join(' ')).length
+
+test('a standard Inbox while its release’s build is in use is restarted on it once, and logged; a new one after a login again', { skip: process.platform === 'win32' ? 'POSIX file modes' : false }, async () => {
+  const t = await machine()
+  try {
+    await until(() => t.updaterRuns.length >= 1, 'the first look for an Orca build')
+    await installBuild(t.shared)
+    const moved = 'The Inbox started on standard Plannotator 0.28.66 (pid 812); restarted it on the Orca build 0.28.66 (orca.1).'
+    t.updater.next = { ok: true, restarted: true, detail: moved }
+    // The Inbox answers as standard Plannotator (no Orca route): after a login, its own login item started it.
+    const before = await t.worker.request('status.get', { fresh: true })
+    assert.deepEqual([before.build?.mode, before.server], ['orca-build', 'stock'])
+    await until(() => moves(t.updaterRuns) === 1, 'the restart on the build')
+    assert.ok(t.worker.logs.includes(moved), t.worker.logs.join('\n'))
+
+    // Say it did not take: the same Inbox is never restarted again, however many looks follow.
+    for (let i = 0; i < 5; i += 1) {
+      await t.worker.request('status.get', { fresh: true })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+    assert.equal(moves(t.updaterRuns), 1)
+
+    // The next login: a new start of a standard Inbox.
+    t.inbox.state.serverSession = 'boot-2'
+    await until(() => moves(t.updaterRuns) === 2, 'the restart of the new standard Inbox')
+
+    // On the build now: nothing more.
+    t.inbox.state.features = ['agents']
+    t.inbox.state.serverSession = 'boot-3'
+    const after = await t.worker.request('status.get', { fresh: true })
+    assert.equal(after.server, 'orca')
+    for (let i = 0; i < 3; i += 1) await t.worker.request('status.get', { fresh: true })
+    assert.equal(moves(t.updaterRuns), 2)
+    assert.deepEqual(t.worker.refusals, [])
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('a failed automatic restart shows its reason and keeps Restart; nothing is restarted with the Orca build off', { skip: process.platform === 'win32' ? 'POSIX file modes' : false }, async () => {
+  const t = await machine()
+  try {
+    await until(() => t.updaterRuns.length >= 1, 'the first look for an Orca build')
+    await installBuild(t.shared)
+    const failed = 'The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
+    t.updater.next = { ok: false, detail: failed }
+    await t.worker.request('status.get', { fresh: true })
+    await until(() => moves(t.updaterRuns) === 1, 'the restart on the build')
+    await until(async () => (await t.worker.request('status.get', { fresh: true })).build?.lastError === failed, 'the reason in the panel')
+    // The fall back started the Inbox again; within the wait after a failure it is not tried again.
+    t.inbox.state.serverSession = 'boot-2'
+    for (let i = 0; i < 5; i += 1) {
+      await t.worker.request('status.get', { fresh: true })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+    assert.equal(moves(t.updaterRuns), 1)
+    const status = await t.worker.request('status.get', {})
+    assert.deepEqual([status.server, status.build?.moving], ['stock', false], 'Restart stays offered')
+  } finally {
+    await t.worker.deactivate()
+  }
+
+  const off = await machine({ orcaBuild: false })
+  try {
+    await installBuild(off.shared)
+    for (let i = 0; i < 5; i += 1) {
+      await off.worker.request('status.get', { fresh: true })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+    assert.deepEqual(off.updaterRuns, [])
+  } finally {
+    await off.worker.deactivate()
+  }
+})
+
 test('with the Orca build switched off, nothing is downloaded and the status says nothing about it', async () => {
   const t = await machine({ orcaBuild: false })
   try {

@@ -101,8 +101,10 @@ test('only GitHub, or a loopback test server, is a source; arguments are checked
   assert.equal(source({ ORCA_PLANNOTATOR_RELEASES: 'http://127.0.0.1:9/x/' }).base, 'http://127.0.0.1:9/x')
   assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'https://example.com/' }), /127\.0\.0\.1/)
   assert.throws(() => source({ ORCA_PLANNOTATOR_RELEASES: 'http://localhost:9/' }), /127\.0\.0\.1/)
-  assert.deepEqual(parseArgs(['--version', '0.28.66']), { version: '0.28.66', restart: false, again: false, sharedDir: null })
+  assert.deepEqual(parseArgs(['--version', '0.28.66']), { version: '0.28.66', restart: false, ifPlain: false, again: false, sharedDir: null })
   assert.equal(parseArgs(['--again']).again, true)
+  assert.deepEqual([parseArgs(['--restart', '--if-plain']).restart, parseArgs(['--restart', '--if-plain']).ifPlain], [true, true])
+  assert.throws(() => parseArgs(['--if-plain']), /goes with --restart/)
   assert.throws(() => parseArgs(['--version', '0.28']), /--version takes/)
   assert.throws(() => parseArgs(['--version', '0.28.66', '--restart']), /does not go/)
   assert.throws(() => parseArgs(['--nope']), /Unknown option/)
@@ -787,6 +789,143 @@ test('--restart where Plannotator has the Inbox off says so, and starts nothing'
     assert.deepEqual([result.ok, result.detail], [false, 'The Inbox is off on this computer, so it was not restarted. Open Inbox turns it on.'])
     assert.equal(existsSync(join(b.data, 'inbox', 'inbox.json')), false, 'nothing started')
   } finally {
+    await server.close()
+  }
+})
+
+// --- A standard Inbox while the build is in use (after a login) -----------------------------------
+
+const ifPlain = (b) => restartInbox({ shared: b.shared, env: b.env, home: b.home, ifPlain: true })
+
+test('a standard Inbox of the build’s release is moved onto it even when the build is already the newest', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    assert.equal((await b.run()).installed, true)
+    // Plannotator's login item, or a plain `plannotator` command, started the Inbox on standard Plannotator.
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const plain = await b.health()
+    assert.equal(plain.self, stock)
+
+    const result = await b.run()
+    assert.equal(result.ok, true, result.detail)
+    assert.equal(result.installed, false)
+    assert.equal(result.restarted, true)
+    assert.match(result.detail, /already the newest.*restarted/)
+    assert.equal(result.detail, 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest. The Inbox was running standard Plannotator and was restarted on it.')
+    assert.equal(b.state().detail, result.detail)
+    const health = await b.health()
+    assert.equal(health.self, b.current().path, 'the Inbox runs the Orca build')
+    assert.notEqual(health.pid, plain.pid)
+    assert.equal(health.orcaMode, '1')
+    assert.equal(server.downloads(), 1, 'nothing was downloaded again')
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('an Inbox already on the build in Orca mode is left alone; --if-plain moves only a standard one', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await b.run()
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const plain = await b.health()
+    const moved = await ifPlain(b)
+    assert.deepEqual([moved.ok, moved.restarted], [true, true], moved.detail)
+    assert.equal(moved.detail, `The Inbox started on standard Plannotator 0.28.66 (pid ${plain.pid}); restarted it on the Orca build 0.28.66 (orca.1).`)
+    const onBuild = await b.health()
+    assert.equal(onBuild.self, b.current().path)
+    assert.equal(onBuild.orcaMode, '1')
+
+    const again = await ifPlain(b)
+    assert.deepEqual([again.ok, again.restarted, again.detail], [true, false, 'The Inbox was left as it is: the Inbox already runs the Orca build.'])
+    const routine = await b.run()
+    assert.deepEqual([routine.restarted, routine.detail], [false, 'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use.'])
+    assert.equal((await b.health()).pid, onBuild.pid, 'not restarted')
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('a standard Inbox is never moved back to a build older than the Plannotator installed here', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await b.run()
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const plain = await b.health()
+    // Plannotator updated itself under the running Inbox; its Orca build is not out.
+    installFake(stock, 'good', '0.28.67')
+    const result = await ifPlain(b)
+    assert.deepEqual([result.ok, result.restarted], [true, false], result.detail)
+    assert.equal(result.detail, 'The Inbox was left as it is: the Plannotator installed here is 0.28.67, newer than the Orca build’s 0.28.66.')
+    const health = await b.health()
+    assert.equal(health.self, stock)
+    assert.equal(health.pid, plain.pid)
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('with the Inbox stopped, --restart --if-plain starts nothing; one Plannotator has off is left alone', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary() }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    await b.run()
+    // Turned on here, and not running.
+    mkdirSync(join(b.data, 'inbox'), { recursive: true })
+    writeFileSync(join(b.data, 'inbox', 'turned-on'), '{"on":true}\n')
+    const run = await runProgram(process.execPath, [UPDATER, '--restart', '--if-plain'], { ...b.env, ORCA_PLANNOTATOR_HOME: b.shared, ELECTRON_RUN_AS_NODE: '1' })
+    const outcome = JSON.parse(run.stdout.trim().split('\n').pop())
+    assert.equal(run.code, 0, run.stdout)
+    assert.deepEqual([outcome.ok, outcome.restarted, outcome.detail], [true, false, 'The Inbox was left as it is: the Inbox is not running.'])
+    assert.equal(existsSync(join(b.data, 'inbox', 'inbox.json')), false, 'nothing started')
+
+    // A standard Inbox that runs while Plannotator's mark says off: Plannotator's own restart would refuse.
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const pid = (await b.health()).pid
+    writeFileSync(join(b.data, 'inbox', 'turned-on'), '{"on":false}\n')
+    const off = await ifPlain(b)
+    assert.deepEqual([off.ok, off.restarted, off.detail], [true, false, 'The Inbox was left as it is: the Inbox is off on this computer.'])
+    assert.equal((await b.health()).pid, pid)
+    assert.equal(readFileSync(join(b.data, 'inbox', 'turned-on'), 'utf8'), '{"on":false}\n', 'the mark is only read')
+  } finally {
+    await stopInbox(stock, b.env)
+    await server.close()
+  }
+})
+
+test('a build that does not answer after the restart of a standard Inbox: back to stock, and said so', { skip: STAND_IN }, async () => {
+  const server = await releaseServer([{ version: '0.28.66', build: 'orca.1', bytes: fakeBinary('dead') }])
+  const stock = installFake(join(tempRoot(), 'stock', 'plannotator'))
+  const b = box(server, { stock })
+  try {
+    assert.equal((await b.run()).installed, true, 'no Inbox ran, so nothing was restarted on it yet')
+    await runProgram(stock, ['inbox', '--background'], b.env)
+    const result = await ifPlain(b)
+    assert.deepEqual([result.ok, result.restarted], [false, false])
+    assert.equal(result.detail, 'The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.')
+    assert.equal((await b.health()).self, stock)
+    assert.equal(b.current().build, 'orca.1', 'the build stays installed')
+
+    const routine = await b.run()
+    assert.equal(routine.ok, true)
+    assert.equal(routine.restarted, false)
+    assert.equal(
+      routine.detail,
+      'The Orca build of Plannotator 0.28.66 (orca.1) is already the newest, and it stays in use. The Inbox was running standard Plannotator. The Orca build of Plannotator 0.28.66 did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.'
+    )
+    assert.equal((await b.health()).self, stock)
+  } finally {
+    await stopInbox(stock, b.env)
     await server.close()
   }
 })

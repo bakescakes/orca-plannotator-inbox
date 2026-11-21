@@ -2,7 +2,7 @@
 //   <data>/inbox/inbox.json           where the running Inbox is (port, token; re-read on every call)
 //   GET  /api/inbox/health            version and liveness
 //   POST /api/inbox/bridge/poll       the replies waiting for one session (long poll)
-//   POST /api/inbox/bridge/event      "delivered" acknowledgement
+//   POST /api/inbox/bridge/event      "delivered" acknowledgement, and "state": what a chat waits on the person for
 //   GET  /api/inbox/threads           read once in a while to find Orca sessions that wrote before
 //   GET  /api/inbox/projects          projects and the run's serverSession (project pictures)
 //   POST /api/inbox/projects/:id/picture, GET the same: a project's picture (presentation.ts)
@@ -29,6 +29,20 @@ export type InboxCommand = Record<string, unknown> & {
   body: string
 }
 export type ThreadAuthor = { session: string; raw: string; projectRoot: string | null }
+/** What a chat waits on the person for, in the words Plannotator 0.29.1 takes on a poll and a `state` event. */
+export type BlockedKind = 'permission' | 'question'
+/**
+ * `blocked`: what the chat waits on now, or null. `blockedAt`: when the plugin decided that (its own
+ * clock, never going back), so the Inbox keeps the newest word when a poll and an event cross.
+ */
+export type BlockedState = { blocked: BlockedKind | null; blockedAt: number }
+
+function blockedFields(route: Partial<BlockedState>): Record<string, unknown> {
+  return {
+    ...(route.blocked ? { blocked: { kind: route.blocked } } : {}),
+    ...(typeof route.blockedAt === 'number' ? { blocked_at: route.blockedAt } : {})
+  }
+}
 /** One message of a thread, as `GET /api/inbox/threads/<id>` serves it; only what source checks read. */
 export type ThreadMessage = {
   id: string
@@ -381,12 +395,12 @@ export class InboxClient {
    * connected, so only poll for sessions this plugin can really deliver to.
    */
   async poll(
-    route: { raw: string; projectPath: string | null; title: string | null },
+    route: { raw: string; projectPath: string | null; title: string | null } & Partial<BlockedState>,
     busy: boolean,
     waitMs: number,
     signal?: AbortSignal
   ): Promise<{ commands: InboxCommand[]; invalid: number }> {
-    const body: Record<string, unknown> = { host: 'orca', session: route.raw, busy, waitMs }
+    const body: Record<string, unknown> = { host: 'orca', session: route.raw, busy, waitMs, ...blockedFields(route) }
     if (route.projectPath) body.project_path = route.projectPath
     if (route.title) body.title = route.title
     const answer = await this.request('/api/inbox/bridge/poll', body, waitMs + 8000, signal)
@@ -401,6 +415,17 @@ export class InboxClient {
       else invalid += 1
     }
     return { commands, invalid }
+  }
+
+  /**
+   * Tells the Inbox at once what the chat waits on the person for (`blocked`), or that it no longer
+   * does: a `state` event that carries only that, so the session's busy flag and its replies are left
+   * as they are. The Inbox keeps the word for 45 s, so a wait that lasts is said again before then.
+   * An Inbox from before 0.29.1 reads only `busy` here, which this never sends.
+   */
+  async state(route: { raw: string } & BlockedState, signal?: AbortSignal): Promise<void> {
+    const answer = await this.request('/api/inbox/bridge/event', { host: 'orca', session: route.raw, type: 'state', ...blockedFields(route) }, 8000, signal)
+    if (answer.ok !== true) throw new InboxContractError('The Inbox did not take the chat’s state.')
   }
 
   /** Tells the Inbox one reply reached the agent. Safe to repeat. */

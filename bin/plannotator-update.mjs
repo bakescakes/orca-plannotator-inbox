@@ -18,6 +18,8 @@
 //   plannotator-update --version <x.y.z>     the Inbox asks for that release: Plannotator updates
 //                                            itself when it is older, then as above
 //   plannotator-update --restart             restart the Inbox on the installed build, in Orca mode
+//   plannotator-update --restart --if-plain  only a running standard Inbox of the build's own release
+//                                            (never a stopped one, never one already on the build)
 //   plannotator-update --again               as the first, and a build that could not be used is fetched
 //                                            again now (a person asked), not after its wait
 //
@@ -1039,10 +1041,11 @@ export async function update(options) {
     ref = pickBuild(index, follow ?? version)
     if (!ref && follow) {
       if (before && before.version === follow) {
-        // Its build is in use and the list no longer names it: it stays.
-        const detail = `The Orca build of Plannotator ${before.version} (${before.build}) stays in use.`
+        // Its build is in use and the list no longer names it: it stays, and so does the Inbox on it.
+        const kept = await keepOnBuild({ shared, env, home, record: before, installed: follow, fetchImpl })
+        const detail = `The Orca build of Plannotator ${before.version} (${before.build}) stays in use.${keptWords(kept)}`
         state('ready', detail)
-        return { ok: true, installed: false, version: before.version, build: before.build, latest, detail }
+        return { ok: true, installed: false, restarted: kept.restarted, version: before.version, build: before.build, latest, detail }
       }
       return await plain(null)
     }
@@ -1070,9 +1073,13 @@ export async function update(options) {
       throw new UpdateError(`Plannotator ${ref.plannotator} is older than the ${before.version} in use, so nothing was changed.`)
     }
     if (before && before.version === ref.plannotator && buildNumber(before.build) >= buildNumber(ref.build)) {
-      const detail = `The Orca build of Plannotator ${before.version} (${before.build}) is already the newest, and it stays in use.`
+      // "Stays in use" must be true of what runs: a standard Inbox of this release moves onto the build.
+      const kept = await keepOnBuild({ shared, env, home, record: before, installed: follow, fetchImpl })
+      const detail = kept.restarted
+        ? `The Orca build of Plannotator ${before.version} (${before.build}) is already the newest.${keptWords(kept)}`
+        : `The Orca build of Plannotator ${before.version} (${before.build}) is already the newest, and it stays in use.${keptWords(kept)}`
       state('ready', detail)
-      return { ok: true, installed: false, version: before.version, build: before.build, latest, detail }
+      return { ok: true, installed: false, restarted: kept.restarted, version: before.version, build: before.build, latest, detail }
     }
     // This very build was fetched and could not be used: it is left alone for a while. A person who
     // asks (the Inbox's Update, the panel's Check now) has it tried again at once.
@@ -1260,14 +1267,80 @@ async function activate({ shared, env, home, record, before, fetchImpl }) {
   return { rolledBack: false, detail: `${failed}, and ${describe(before)} did not start again either; the Inbox starts again with an agent’s next message.` }
 }
 
-/** Restarts the Inbox on the installed build in Orca mode, or on stock Plannotator when that fails. */
+/**
+ * Keeps a running Inbox on the build in use (`record`): a standard Plannotator Inbox of the build's own
+ * release (Plannotator's login item started it, or a plain `plannotator` command did) is restarted on
+ * the build in Orca mode, the way the panel's Restart does it, and back on stock Plannotator when the
+ * build does not answer. Only then: never an Inbox that is stopped, already in Orca mode, off on this
+ * computer, or of another release, and never when the Plannotator installed here is newer than the
+ * build (it would move the Inbox to an older release). Run while the lock is held.
+ * `installed`: the release of the Plannotator installed here, when the caller knows it.
+ * Returns `{restarted: true, from}`, `{restarted: false, why}` (left alone), or `{restarted: false, failed: true, detail}`.
+ */
+export async function keepOnBuild({ shared, env, home, record, installed, fetchImpl = fetch }) {
+  if (!record) return { restarted: false, why: 'no Orca build of Plannotator is installed yet' }
+  const orcaConfig = orcaModeConfig(shared)
+  if (!orcaConfig) return { restarted: false, why: 'Orca has not set up the Inbox connection yet' }
+  const dataDir = inboxDataDir(shared, env, home)
+  const stock = findStock(env, home)
+  const running = await inboxRunning(stock ?? record.path, dataDir, env)
+  if (!running) return { restarted: false, why: 'the Inbox is not running' }
+  if (await servesOrcaMode(dataDir, fetchImpl)) return { restarted: false, why: 'the Inbox already runs the Orca build' }
+  // Plannotator's own `inbox restart` refuses while the person has the Inbox off; it stays as they left it.
+  if (!inboxTurnedOn(dataDir)) return { restarted: false, why: 'the Inbox is off on this computer' }
+  const ran = await inboxVersion(dataDir, fetchImpl)
+  if (ran !== record.version) {
+    return { restarted: false, why: ran ? `it runs Plannotator ${ran}, not ${record.version}, the release of the Orca build` : 'it does not say which release it runs' }
+  }
+  const here = installed !== undefined ? installed : stock ? await plannotatorVersion(stock, env) : null
+  if (here && compareVersions(here, record.version) > 0) {
+    return { restarted: false, why: `the Plannotator installed here is ${here}, newer than the Orca build’s ${record.version}` }
+  }
+  if (await restartOn(record.path, dataDir, env, orcaConfig, { oldPid: running.pid, fetchImpl })) return { restarted: true, from: { version: ran, pid: running.pid } }
+  const back = stock ? await restartOn(stock, dataDir, env, null, { fetchImpl }) : null
+  return {
+    restarted: false,
+    failed: true,
+    detail: back
+      ? `The Orca build of Plannotator ${record.version} did not answer within 30 seconds, so the Inbox runs on stock Plannotator again.`
+      : `The Orca build of Plannotator ${record.version} did not answer within 30 seconds, and stock Plannotator did not start either; the Inbox starts again with an agent’s next message.`
+  }
+}
+
+/** What `keepOnBuild` did, as a sentence to add to another; nothing when it left the Inbox alone. */
+function keptWords(kept) {
+  if (kept.restarted) return ' The Inbox was running standard Plannotator and was restarted on it.'
+  return kept.failed ? ` The Inbox was running standard Plannotator. ${kept.detail}` : ''
+}
+
+/**
+ * Restarts the Inbox on the installed build in Orca mode, or on stock Plannotator when that fails.
+ * `ifPlain`: only what `keepOnBuild` allows; a stopped Inbox stays stopped and one on the build is left alone.
+ */
 export async function restartInbox(options) {
-  const { shared, env = process.env, home = homedir(), fetchImpl = fetch } = options
+  const { shared, env = process.env, home = homedir(), fetchImpl = fetch, ifPlain = false } = options
   const p = paths(shared)
   const release = takeLock(shared)
-  if (!release) return { ok: false, busy: true, detail: 'An update of the Orca build is running; the Inbox is restarted when it finishes.' }
+  if (!release) {
+    return { ok: false, busy: true, detail: ifPlain ? 'An update of the Orca build is running, so the Inbox is left as it is for now.' : 'An update of the Orca build is running; the Inbox is restarted when it finishes.' }
+  }
   try {
     const record = readRecord(p.current, shared)
+    if (ifPlain) {
+      const kept = await keepOnBuild({ shared, env, home, record, fetchImpl })
+      if (kept.restarted) {
+        const pid = kept.from.pid ? ` (pid ${kept.from.pid})` : ''
+        return {
+          ok: true,
+          restarted: true,
+          version: record.version,
+          build: record.build,
+          detail: `The Inbox started on standard Plannotator ${kept.from.version}${pid}; restarted it on the Orca build ${record.version} (${record.build}).`
+        }
+      }
+      if (kept.failed) return { ok: false, restarted: false, detail: kept.detail }
+      return { ok: true, restarted: false, detail: `The Inbox was left as it is: ${kept.why}.` }
+    }
     const dataDir = inboxDataDir(shared, env, home)
     const orcaConfig = orcaModeConfig(shared)
     if (!record) return { ok: false, detail: 'No Orca build of Plannotator is installed yet, so the Inbox stays as it is.' }
@@ -1295,13 +1368,14 @@ export async function restartInbox(options) {
 // Command line
 
 export function parseArgs(argv) {
-  const out = { version: null, restart: false, again: false, sharedDir: null }
+  const out = { version: null, restart: false, ifPlain: false, again: false, sharedDir: null }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--version') {
       out.version = argv[i + 1] ?? ''
       i += 1
     } else if (arg === '--restart') out.restart = true
+    else if (arg === '--if-plain') out.ifPlain = true
     else if (arg === '--again') out.again = true
     else if (arg === '--shared-dir') {
       out.sharedDir = argv[i + 1] ?? ''
@@ -1310,6 +1384,7 @@ export function parseArgs(argv) {
   }
   if (out.version !== null && !VERSION.test(out.version)) throw new UpdateError('--version takes a Plannotator version such as 0.28.66.')
   if (out.restart && out.version !== null) throw new UpdateError('--restart does not go with --version.')
+  if (out.ifPlain && !out.restart) throw new UpdateError('--if-plain goes with --restart.')
   return out
 }
 
@@ -1325,7 +1400,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const shared = args.sharedDir ? resolve(args.sharedDir) : sharedDir(env, homedir(), self)
   const installed = readJsonFile(paths(shared).installed)
   const pluginVersion = isRecord(installed) && typeof installed.pluginVersion === 'string' ? installed.pluginVersion : null
-  const result = args.restart ? await restartInbox({ shared, env }) : await update({ shared, env, version: args.version, again: args.again, pluginVersion })
+  const result = args.restart ? await restartInbox({ shared, env, ifPlain: args.ifPlain }) : await update({ shared, env, version: args.version, again: args.again, pluginVersion })
   process.stdout.write(`${JSON.stringify(result)}\n`)
   if (result.ok || result.busy) return 0
   return result.rolledBack ? 2 : 1

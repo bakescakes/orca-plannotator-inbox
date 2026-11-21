@@ -13,12 +13,22 @@ export type SessionStatus = {
   session: string
   title: string | null
   provider: string | null
+  /** For a bot's chat, the bot as a person reads it (`Name (Claude bot)`); null or absent otherwise. */
+  bot?: string | null
   /** False while its reply poll is failing. */
   listening: boolean
   note: string | null
 }
 
-export type BlockedDelivery = { key: string; subject: string | null; session: string; error: string | null; updated: number }
+export type BlockedDelivery = {
+  key: string
+  subject: string | null
+  session: string
+  error: string | null
+  updated: number
+  /** When the chat is a bot's: the bot as a person reads it (`Name (Claude bot)`). */
+  bot?: string | null
+}
 /**
  * A reply that was not delivered and never will be: its source failed the checks (not a person's
  * reply, another chat's or another project's thread, or gone from the Inbox), or the Inbox handed
@@ -66,6 +76,8 @@ export type BuildInfo = {
   waiting?: { version: string; since: number } | null
   /** The build in use leaves out some Orca changes: `lacks` in plain words, `omitted` the changes' names. */
   reduced?: { lacks: string[]; omitted: string[] } | null
+  /** A standard Inbox is being restarted on the build by itself (after a login, say). Absent from older workers. */
+  moving?: boolean
 }
 
 /** What the running Inbox is: the Orca build in Orca mode, standard Plannotator, or not running. */

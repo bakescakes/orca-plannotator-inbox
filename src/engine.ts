@@ -9,14 +9,14 @@ import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { Courier, realOrSelf, type Outcome } from './courier'
 import { FaceSync } from './faces'
-import { InboxClient, InboxContractError, InboxUnavailable, POLL_WAIT_MS, type ThreadAuthor } from './inbox'
+import { InboxClient, InboxContractError, InboxUnavailable, POLL_WAIT_MS, type BlockedKind, type ThreadAuthor } from './inbox'
 import { Activation, Ledger, type KeyValue } from './ledger'
-import { OrcaCli, locateOrcaCli, parseInventory, type Exec, type NativeSession } from './orca-cli'
+import { OrcaCli, PromptKinds, locateOrcaCli, parseInventory, type Exec, type NativeSession } from './orca-cli'
 import { resolveDataDir, type Env } from './paths'
 import { PresentationSync } from './presentation'
 import type { BlockedDelivery, Phase, RejectedDelivery, SessionStatus } from './protocol'
 import { readRegistrations, writeHeartbeat } from './shared'
-import { errorText, isRecord, sleep } from './util'
+import { botLabel, errorText, isRecord, sleep } from './util'
 
 export const MAX_ROUTES = 64
 const TICK_MS = 10_000
@@ -24,6 +24,11 @@ const AUTHORS_EVERY_MS = 60_000
 const REPOS_EVERY_MS = 60_000
 const PICTURES_EVERY_MS = 60_000
 const VERSION_EVERY_MS = 5 * 60_000
+/**
+ * The Inbox forgets what a chat waits on 45 s after it was last said (counted from when a poll or
+ * event arrives). A poll says it; while a long poll is held, the look says it again after this long.
+ */
+const BLOCKED_SAY_AGAIN_MS = 20_000
 const CHAT_PANE = /^structured-agent-session-([A-Za-z0-9_-]{1,160}):/
 
 /**
@@ -109,6 +114,8 @@ export type EngineDeps = {
    * either waits for a reply already let through or holds it; never a send after the Stop.
    */
   exclusive?: <T>(session: string, task: () => Promise<T>) => Promise<T>
+  /** The kinds of prompt chats wait on, shared with whoever else reads them (one `agent read` per wait). */
+  prompts?: PromptKinds
 }
 
 type RouteState = {
@@ -121,7 +128,15 @@ type RouteState = {
   repoRoot: string | null
   title: string | null
   provider: string | null
+  /** The bot whose chat this is (it runs in the bot's home), or null. */
+  bot: string | null
   busy: boolean
+  /** What the chat waits on the person for, as last told to the Inbox; null when nothing. */
+  blocked: BlockedKind | null
+  /** When `blocked` was decided (this clock, never going back), sent with it so the Inbox keeps the newest. */
+  blockedAt: number
+  /** When `blocked` was last said to the Inbox, by a poll or a `state` event. */
+  blockedSaidAt: number
   listening: boolean
   note: string | null
   stop: AbortController
@@ -144,6 +159,7 @@ export class Engine {
   private readonly now: () => number
   private readonly ledger: Ledger
   private readonly activation: Activation
+  private readonly prompts: PromptKinds
   private ledgerLoaded = false
   /** The chosen project folders (real paths); [] for every project. */
   private projects: string[] = []
@@ -169,6 +185,7 @@ export class Engine {
     this.now = deps.now ?? Date.now
     this.ledger = new Ledger(deps.store, this.now)
     this.activation = new Activation(deps.store, this.now)
+    this.prompts = deps.prompts ?? new PromptKinds(this.now)
     this.last = {
       at: this.now(),
       phase: 'problem',
@@ -463,7 +480,7 @@ export class Engine {
       const listed = JSON.stringify(listing)
       for (const chat of this.deps.owned?.() ?? []) {
         if (chat.inboxKey !== inbox.key || open.has(chat.session) || listed.includes(chat.session)) continue
-        open.set(chat.session, { session: chat.session, busy: false, provider: chat.agentType ?? null, title: null, workspacePath: chat.folder })
+        open.set(chat.session, { session: chat.session, busy: false, provider: chat.agentType ?? null, title: null, workspacePath: chat.folder, bot: null, waiting: null, stateStartedAt: null })
       }
       for (const tree of Array.isArray(listing.worktrees) ? listing.worktrees : []) {
         if (!isRecord(tree) || typeof tree.repoId !== 'string' || !Array.isArray(tree.agents)) continue
@@ -499,6 +516,9 @@ export class Engine {
       served.push({ ...candidate, roots, repoRoot })
     }
     const wanted = served.slice(0, MAX_ROUTES)
+    // What each chat waits on the person for: one read of its prompt per wait, never its words.
+    const waits = new Map<string, BlockedKind | null>()
+    await Promise.all([...new Set(wanted.map((candidate) => candidate.session))].map(async (session) => waits.set(session, await this.waitOf(orca, open.get(session)!))))
     const keep = new Set(wanted.map((candidate) => candidate.raw))
     for (const [raw, route] of this.routes) {
       if (!keep.has(raw)) {
@@ -508,13 +528,23 @@ export class Engine {
     }
     for (const candidate of wanted) {
       const chat = open.get(candidate.session)!
+      const blocked = waits.get(candidate.session) ?? null
       const existing = this.routes.get(candidate.raw)
       if (existing) {
         existing.busy = chat.busy
         existing.title = chat.title
         existing.provider = chat.provider
+        existing.bot = chat.bot
         existing.roots = candidate.roots
         existing.repoRoot = candidate.repoRoot
+        if (existing.blocked !== blocked) {
+          // Said at once, not with the next poll: a cleared prompt must not linger in the Inbox.
+          existing.blocked = blocked
+          existing.blockedAt = Math.max(this.now(), existing.blockedAt + 1)
+          if (existing.listening) this.tellState(inbox, existing)
+        } else if (blocked !== null && existing.listening && this.now() - existing.blockedSaidAt >= BLOCKED_SAY_AGAIN_MS) {
+          this.tellState(inbox, existing)
+        }
         continue
       }
       const route: RouteState = {
@@ -525,12 +555,17 @@ export class Engine {
         repoRoot: candidate.repoRoot,
         title: chat.title,
         provider: chat.provider,
+        bot: chat.bot,
         busy: chat.busy,
+        blocked,
+        blockedAt: this.now(),
+        blockedSaidAt: 0,
         listening: true,
         note: null,
         stop: new AbortController()
       }
       this.routes.set(candidate.raw, route)
+      if (route.bot !== null) this.deps.log(`listening for replies to a bot’s chat: ${botLabel(route.bot, route.provider)}`)
       // An escaped rejection would end the whole worker; a poll that dies is found again on the next look.
       const poller: Promise<void> = this.poll(inbox, route)
         .catch((error) => this.deps.log(`poll ended: ${errorText(error)}`))
@@ -552,6 +587,26 @@ export class Engine {
     return { phase: 'ready', headline: HEADLINES.ready, detail: notes.join(' ') || null }
   }
 
+  /**
+   * What a chat waits on the person for: a prompt in the chat (a permission or a question, read from
+   * the chat once per wait), or a question its own turn asked. Null when it waits on nothing, when only
+   * a child agent waits, and when the kind of prompt cannot be read: no kind rather than a guess.
+   */
+  private async waitOf(orca: OrcaCli, chat: NativeSession): Promise<BlockedKind | null> {
+    if (chat.waiting === 'lead-waiting') return 'question'
+    if (chat.waiting !== 'blocked') return null
+    return this.prompts.kindOf(orca, chat.session, chat.stateStartedAt)
+  }
+
+  /** Tells the Inbox now what one chat waits on, without waiting for the answer. Its replies are not touched. */
+  private tellState(inbox: InboxClient, route: RouteState): void {
+    route.blockedSaidAt = this.now()
+    const signal = AbortSignal.any([route.stop.signal, this.stopAll.signal])
+    void inbox.state({ raw: route.raw, blocked: route.blocked, blockedAt: route.blockedAt }, signal).catch((error) => {
+      if (!signal.aborted) this.deps.log(`waiting status not sent: ${errorText(error)}`)
+    })
+  }
+
   /** One chat's reply loop. Ends when the chat closes, the Inbox changes or the plugin stops. */
   private async poll(inbox: InboxClient, route: RouteState): Promise<void> {
     const signal = AbortSignal.any([route.stop.signal, this.stopAll.signal])
@@ -560,6 +615,8 @@ export class Engine {
     while (!signal.aborted) {
       let pause = 0
       try {
+        // Each poll says what the chat waits on; the Inbox counts its 45 s from here.
+        route.blockedSaidAt = this.now()
         const { commands, invalid } = await inbox.poll(route, route.busy, POLL_WAIT_MS, signal)
         if (signal.aborted) return
         failures = 0
@@ -597,7 +654,7 @@ export class Engine {
         route.listening = false
         route.note = errorText(error)
         pause = Math.min(60_000, 2000 * 2 ** Math.min(failures, 5))
-        if (failures === 1) this.deps.log(`poll for a chat failed: ${errorText(error)}`)
+        if (failures === 1) this.deps.log(`poll for ${route.bot === null ? 'a chat' : `a bot’s chat, ${botLabel(route.bot, route.provider)},`} failed: ${errorText(error)}`)
       }
       if (pause > 0) await sleep(pause, signal)
     }
@@ -612,12 +669,15 @@ export class Engine {
     if (!this.ledgerLoaded) return { counts: { inFlight: 0, delivered: 0, blocked: 0, rejected: 0 }, blocked: [], rejected: [] }
     const counts = this.ledger.counts()
     const rows = this.ledger.all()
+    // A reply to a bot's chat says which bot, while that chat is listened for.
+    const bots = new Map<string, string>()
+    for (const route of this.routes.values()) if (route.bot !== null) bots.set(route.session, botLabel(route.bot, route.provider))
     const latest = (state: 'blocked' | 'rejected'): BlockedDelivery[] =>
       rows
         .filter((row) => row.state === state)
         .sort((a, b) => b.updated - a.updated)
         .slice(0, 20)
-        .map((row) => ({ key: row.key, subject: row.subject, session: row.session, error: row.error, updated: row.updated }))
+        .map((row) => ({ key: row.key, subject: row.subject, session: row.session, error: row.error, updated: row.updated, bot: bots.get(row.session) ?? null }))
     // Ignored replies (written before activation) are counted nowhere: they are not a problem.
     return {
       counts: { inFlight: counts.prepared + counts.sending + counts.accepted, delivered: counts.acknowledged, blocked: counts.blocked, rejected: counts.rejected },
@@ -640,7 +700,14 @@ export class Engine {
         shown.listening = shown.listening && route.listening
         shown.note ??= route.note
       } else {
-        chats.set(route.session, { session: route.session, title: route.title, provider: route.provider, listening: route.listening, note: route.note })
+        chats.set(route.session, {
+          session: route.session,
+          title: route.title,
+          provider: route.provider,
+          bot: route.bot === null ? null : botLabel(route.bot, route.provider),
+          listening: route.listening,
+          note: route.note
+        })
       }
     }
     return [...chats.values()]

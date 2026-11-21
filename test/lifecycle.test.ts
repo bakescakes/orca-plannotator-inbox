@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { Lifecycle, LifecycleError, SESSION_HELPER, encoded, helperNative, inboxSource, type DeliveryVerdict, type NativeRun, type OwnedSession } from '../src/lifecycle'
-import { OrcaCli, parseLifecycleInventory } from '../src/orca-cli'
+import { OrcaCli, PromptKinds, parseLifecycleInventory } from '../src/orca-cli'
 import { runHelper } from '../src/navigation'
 import { fakeInbox, fakeLifecycleOrca, fakeNative, launchThread, memoryStore, personMessage, tempDir } from './fakes'
 
@@ -101,6 +101,39 @@ test('a new chat with no activity is proven by its own tab; the catalog shows it
   const busy = await t.life.handle('catalog')
   assert.deepEqual((busy.sessions as Record<string, unknown>).native_1, { busy: true, state: 'working', stopped: false, workspaceId: 'wt1' })
   assert.equal(t.native.state.calls.length, before, 'a listed chat needs no tab proof')
+})
+
+test('the catalog says a launched chat waits on a permission, and nothing when it does not', async () => {
+  const t = setup()
+  // As the worker wires it: the prompt kinds reply delivery reads too.
+  const life = new Lifecycle({ ...(t.life as unknown as { deps: ConstructorParameters<typeof Lifecycle>[0] }).deps, prompts: new PromptKinds(() => t.state.clock) })
+  await life.handle('start', START)
+  const row = async (): Promise<unknown> => ((await life.handle('catalog')).sessions as Record<string, unknown>).native_1
+  t.orca.state.listed.set('native_1', { state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_000_000 })
+  t.orca.state.entries.set('native_1', [{ kind: 'message', role: 'assistant', text: 'Next, the migration.' }, { kind: 'approval', text: 'Allow the migration? (private words)', pending: true }])
+  assert.deepEqual(await row(), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1', waiting: 'permission' })
+  assert.ok(!JSON.stringify(await life.handle('catalog')).includes('private words'), 'the prompt’s words go nowhere')
+  // Working, or done, it waits on nothing: the row is what it always was.
+  t.orca.state.listed.set('native_1', { state: 'working', agentType: 'codex', mainAgent: { state: 'working' }, stateStartedAt: 1_700_000_060_000 })
+  assert.deepEqual(await row(), { busy: true, state: 'working', stopped: false, workspaceId: 'wt1' })
+  t.orca.state.listed.set('native_1', { state: 'done', agentType: 'codex', mainAgent: { state: 'done' }, stateStartedAt: 1_700_000_120_000 })
+  assert.deepEqual(await row(), { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
+  // Without the prompt kinds (or an Orca CLI that cannot read a chat), a blocked chat's row is unchanged.
+  t.orca.state.listed.set('native_1', { state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_180_000 })
+  assert.deepEqual(((await t.life.handle('catalog')).sessions as Record<string, unknown>).native_1, { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
+})
+
+test('a question is not offered as a permission', async () => {
+  const t = setup()
+  const life = new Lifecycle({ ...(t.life as unknown as { deps: ConstructorParameters<typeof Lifecycle>[0] }).deps, prompts: new PromptKinds(() => t.state.clock) })
+  await life.handle('start', START)
+  t.orca.state.listed.set('native_1', { state: 'blocked', agentType: 'codex', mainAgent: { state: 'blocked' }, stateStartedAt: 1_700_000_000_000 })
+  t.orca.state.entries.set('native_1', [{ kind: 'question', text: 'Which branch? (private words)', pending: true }])
+  assert.deepEqual(((await life.handle('catalog')).sessions as Record<string, unknown>).native_1, { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
+  // A question the chat's own turn asked (not a prompt in the chat) is not read and not offered either.
+  t.orca.state.listed.set('native_1', { state: 'waiting', agentType: 'codex', mainAgent: { state: 'waiting' }, stateStartedAt: 1_700_000_060_000 })
+  assert.deepEqual(((await life.handle('catalog')).sessions as Record<string, unknown>).native_1, { busy: false, state: 'waiting', stopped: false, workspaceId: 'wt1' })
+  assert.equal(t.orca.state.calls.filter((args) => args[0] === 'agent' && args[1] === 'read').length, 1)
 })
 
 test('the catalog has the shape the Inbox reads: workspaces, providers, sessions and projects', async () => {
@@ -516,6 +549,23 @@ test('worktree ps and repo list become workspaces and chats; a partial list is r
   assert.equal(inventory.sessions.size, 0, 'a chat listed twice is left out')
   assert.deepEqual(inventory.repos, [{ path: '/p', name: 'p' }])
   assert.throws(() => parseLifecycleInventory({ worktrees: [], truncated: true }, { repos: [] }), /only part/)
+})
+
+test('a bot’s home is never offered as a place to start a chat; a workspace only under a bot is', () => {
+  const inventory = parseLifecycleInventory(
+    {
+      worktrees: [
+        // As a real `worktree ps` lists a bot's home: a folder workspace in the "Bots" project group.
+        { worktreeId: 'folder:home1', repoId: 'folder-workspace:group1', repo: 'Bots', workspaceKind: 'folder-workspace', path: '/bots/one', hostId: 'local', bot: 'Lighthouse Keeper', botHome: true, agents: [{ paneKey: 'structured-agent-session-b1:00000000-0000-4000-8000-000000000000', state: 'idle', agentType: 'claude' }] },
+        // The same, should Orca ever list the group as a repository.
+        { worktreeId: 'folder:home2', repoId: 'r1', workspaceKind: 'folder-workspace', path: '/bots/two', hostId: 'local', bot: 'Ferry', botHome: true, agents: [] },
+        { worktreeId: 'w5', repoId: 'r1', path: '/p/taken', hostId: 'local', bot: 'Ferry', agents: [] }
+      ]
+    },
+    { repos: [{ id: 'r1', path: '/p', displayName: 'p' }] }
+  )
+  assert.deepEqual(inventory.workspaces.map((row) => row.workspaceId), ['w5'])
+  assert.deepEqual([...inventory.sessions.keys()], ['b1'], 'the bot’s chat itself is still known to Stop and Resume')
 })
 
 // ---------------------------------------------------------------------------------------------
