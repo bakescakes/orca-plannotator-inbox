@@ -48,8 +48,9 @@ requireContract(statSync(shimPath).size <= 512 * 1024, "shim source exceeds boun
 const source = readFileSync(shimPath, "utf8");
 for (const [name, expected] of Object.entries(expectedSets)) {
   // Deliberately narrow extraction: changed representation is a review gate,
-  // never a guess that an unrecognized declaration has the old meaning.
-  const pattern = new RegExp("^const " + name + "\\s*=\\s*new Set\\(\\s*(\\[[^\\]]*\\])\\s*\\)\\s*;", "gm");
+  // never a guess that an unrecognized declaration has the old meaning. An exported set is the same declaration
+  // (0.29.2 exports AUTHOR_TOOLS for `inbox call`); its literal is still checked below.
+  const pattern = new RegExp("^(?:export )?const " + name + "\\s*=\\s*new Set\\(\\s*(\\[[^\\]]*\\])\\s*\\)\\s*;", "gm");
   const matches = [...source.matchAll(pattern)];
   requireContract(matches.length === 1, name + " declaration changed; review shim source before admission");
   let actual: unknown;
