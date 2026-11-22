@@ -1,6 +1,7 @@
 // Stand-ins for the two programs the plugin talks to, at the same boundaries the real ones sit:
 // Orca's CLI (argv in, one JSON document out) and the Plannotator Inbox (loopback HTTP).
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -116,6 +117,8 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
      * address and body but carries Orca's own record of the request as its payload.
      */
     bots: new Map<string, string>(),
+    /** A bot's home folder, by the bot's name, in place of `/bots/home-<n>`. */
+    homes: new Map<string, string>(),
     /** Orca refuses every send with this error, having stored nothing (as for a closed chat or a paused bot). */
     refusal: null as null | { code: string; message: string },
     /**
@@ -162,7 +165,7 @@ export function fakeOrca(options: { sessions?: string[]; deliverAtOnce?: boolean
       const local = { path: state.worktreePath, hostId: null, agents: plain, ...(state.repoId ? { repoId: state.repoId } : {}) }
       // Each bot's home, recorded from a real `worktree ps`: its repoId names a project group, not a repository.
       const homes = [...new Set(state.bots.values())].map((bot, index) => ({
-        path: `/bots/home-${index + 1}`,
+        path: state.homes.get(bot) ?? `/bots/home-${index + 1}`,
         worktreeId: `folder:home-${index + 1}`,
         workspaceKind: 'folder-workspace',
         repo: 'Bots',
@@ -335,7 +338,10 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
     /** Standard Plannotator's `connect` report (`POST /api/inbox/control/connect`). */
     stockReport: { added: [], already: [], failed: [], foreign: [], manual: [], unfinished: [], claude_code: false, first: false, at: '' } as Record<string, unknown>,
     /** Every request to the agent routes, with whether it carried the token and an Origin. */
-    agentCalls: [] as { method: string; path: string; body: Record<string, unknown>; token: boolean; origin: boolean }[]
+    agentCalls: [] as { method: string; path: string; body: Record<string, unknown>; token: boolean; origin: boolean }[],
+    /** Each agent's face (`/api/inbox/agent-faces`), and the pictures kept for agents (`/api/inbox/agent-icons`, by SHA-256). */
+    agentFaces: {} as Record<string, { face: string; sessions: string[] }>,
+    agentPictures: new Map<string, Uint8Array>()
   }
   const synthesized = (threadId: string): Record<string, unknown> | null => {
     const replies = [...REPLIES.values()].filter((command) => command.thread_id === threadId)
@@ -358,6 +364,7 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {}
     if (path === '/api/inbox/health') return json(200, { ok: true, app: 'plannotator-inbox', version: '0.28.66', serverSession: state.serverSession })
     if (path === '/api/inbox/threads') return json(200, state.threads)
+    if (path === '/api/inbox/agent-faces' && (init?.method ?? 'GET') === 'GET') return json(200, { faces: state.agentFaces, rev: 1 })
     const method = init?.method ?? 'GET'
     const agentRoute = ['/api/inbox/orca', '/api/inbox/agents', '/api/inbox/control/orca-agents', '/api/inbox/control/connect'].includes(path)
     if (agentRoute) {
@@ -408,6 +415,20 @@ export function fakeInbox(options: { asker?: string; root?: string } = {}) {
       return json(200, { v: 1, agents: state.orcaAgents, changed, problems: [], ...(state.orcaAnswer?.(body) ?? {}) })
     }
     if (path === '/api/inbox/control/connect' && method === 'POST') return json(200, { connect: state.stockReport })
+    if (path === '/api/inbox/agent-faces' && method === 'POST') {
+      if (body.serverSession !== state.serverSession) return json(409, { code: 'session_mismatch' })
+      state.agentFaces[String(body.agent)] = { face: String(body.face), sessions: [] }
+      return json(200, { faces: state.agentFaces, rev: 1 })
+    }
+    if (path === '/api/inbox/agent-icons' && method === 'POST') {
+      if (body.serverSession !== state.serverSession) return json(409, { code: 'session_mismatch' })
+      const data = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/.exec(String(body.picture))
+      if (!data) return json(400, { code: 'validation_error' })
+      const bytes = new Uint8Array(Buffer.from(data[1]!, 'base64'))
+      const id = createHash('sha256').update(bytes).digest('hex')
+      state.agentPictures.set(id, bytes)
+      return json(200, { icon: { id, type: 'image/png', at: 1 }, faces: state.agentFaces, rev: 1, icons: [] })
+    }
     if (path === '/api/inbox/bridge/event' && body.type === 'state') {
       state.events.push(body)
       return json(200, { ok: true })

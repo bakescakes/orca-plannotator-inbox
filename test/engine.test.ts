@@ -105,6 +105,31 @@ test('a bot’s chat is listened for and named as the bot’s; chosen projects c
   }
 })
 
+test('with the Orca build, a bot’s chat shows the bot’s own picture from Orca and an ordinary chat its agent’s mark', async () => {
+  const OTHER = 'claude_2c5a1e0f_0b77'
+  const t = await setup({ sessions: [SESSION, OTHER], register: [OTHER] })
+  const home = join(t.root, 'bots', 'harbor-master')
+  await mkdir(home, { recursive: true })
+  await writeFile(join(home, 'bot.json'), JSON.stringify({ id: 'b-1', name: 'Harbor Master', agent: 'claude', avatar: '⚓', members: [] }))
+  t.orca.state.bots.set(SESSION, 'Harbor Master')
+  t.orca.state.homes.set('Harbor Master', home)
+  t.inbox.state.features = ['mark-faces', 'agents']
+  await writeFile(join(t.shared, 'sessions', `${SESSION}.json`), JSON.stringify({ v: 1, session: SESSION, raw: SESSION, projectPath: home, dataDir: t.dataDir, at: Date.now() }))
+  t.engine.start()
+  try {
+    await until(() => Object.keys(t.inbox.state.agentFaces).length === 2, 'both chats’ faces')
+    const [id, bytes] = [...t.inbox.state.agentPictures][0]!
+    assert.equal(t.inbox.state.agentPictures.size, 1)
+    assert.match(Buffer.from(bytes).toString('utf8'), /<text [^>]*>⚓<\/text>/)
+    assert.deepEqual(t.inbox.state.agentFaces, {
+      [SESSION]: { face: `own:${id}`, sessions: [] },
+      [OTHER]: { face: 'mark:claude-code', sessions: [] }
+    })
+  } finally {
+    await t.engine.stop()
+  }
+})
+
 test('a chat that is not open in Orca is not polled, so the Inbox does not show it as connected', async () => {
   const t = await setup({ sessions: [], register: [SESSION] })
   t.inbox.state.queue.set(SESSION, [reply('msg_1')])

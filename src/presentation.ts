@@ -91,7 +91,7 @@ const SIGNATURES: Record<string, (bytes: Uint8Array) => boolean> = {
   'image/webp': (b) => ascii(b, 0, 4) === 'RIFF' && ascii(b, 8, 12) === 'WEBP'
 }
 
-function escapeXml(text: string): string {
+export function escapeXml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 }
 
@@ -206,7 +206,8 @@ function attributesAreSafe(source: string): boolean {
   return true
 }
 
-export function svgIsSafe(raw: Uint8Array): boolean {
+/** `extraElements`: more element names to allow (an Orca bot mascot's blur filter). */
+export function svgIsSafe(raw: Uint8Array, extraElements: ReadonlySet<string> = new Set()): boolean {
   let text: string
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(raw)
@@ -247,7 +248,7 @@ export function svgIsSafe(raw: Uint8Array): boolean {
         if (rooted || local !== 'svg') return false
         rooted = true
       }
-      if (!SVG_ELEMENTS.has(local) || !attributesAreSafe(attributes)) return false
+      if (!(SVG_ELEMENTS.has(local) || extraElements.has(local)) || !attributesAreSafe(attributes)) return false
       if (!selfClosing) open.push(name)
     }
     at = lt + whole.length

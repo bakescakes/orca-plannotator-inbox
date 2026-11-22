@@ -3,9 +3,17 @@
 // agent with that host's own mark". This module gives each Orca chat the mark of the agent it runs
 // (Claude Code, Codex, OpenCode, …), through the same route the Inbox's own face picker uses.
 //
+// A bot's chat (one in a bot's home) gets the bot's own picture from Orca instead (src/bot-avatars.ts),
+// the way a person gives an agent "Your own…" picture in the picker: the picture is kept by the Inbox
+// and the face names it, `own:<sha256>`. When Orca's picture cannot be read or shown, or the Inbox
+// keeps no pictures for agents, the bot's chat has its agent's mark like any other.
+//
 // It never replaces a face a person chose: it writes only where the Inbox keeps no face, or the
 // face it wrote itself. Standard Plannotator does not know `mark:` faces, so nothing is sent to it.
+import { InboxRefused } from './inbox'
 import type { KeyValue } from './ledger'
+import type { BotRef } from './bot-avatars'
+import type { Picture, PictureResult } from './presentation'
 import { errorText, isRecord, type Json } from './util'
 
 export const FACES_FEATURE = 'mark-faces'
@@ -30,15 +38,24 @@ export type FacesInbox = {
   orcaFeatures(timeoutMs?: number): Promise<string[]>
   agentFaces(timeoutMs?: number): Promise<{ serverSession: string | null; faces: Record<string, FaceEntry> }>
   setAgentFace(agent: string, face: string, serverSession: string, timeoutMs?: number): Promise<void>
+  /** Keeps a picture for agents' icons and answers its id (the SHA-256 of its bytes). */
+  keepAgentPicture(picture: string, serverSession: string, timeoutMs?: number): Promise<string>
 }
-/** `agent`: the id the Inbox lists the chat under (its launch id when the Inbox started it, else its session id). */
-export type FaceChat = { agent: string; session: string; provider: string | null }
+/** Reads a bot's own picture from Orca (src/bot-avatars.ts). Never throws. */
+export type FacesAvatars = { picture(bot: BotRef): Promise<PictureResult> }
+/**
+ * `agent`: the id the Inbox lists the chat under (its launch id when the Inbox started it, else its session id).
+ * `bot`: the bot whose home the chat runs in, when it is a bot's chat; absent or null for any other chat.
+ */
+export type FaceChat = { agent: string; session: string; provider: string | null; bot?: BotRef | null }
 export type FacesReport = { ok: boolean; set: number; reason?: string }
+
+type Wanted = { session: string; mark: string | null; bot: BotRef | null }
 
 export class FaceSync {
   private running: Promise<FacesReport> | null = null
 
-  constructor(private readonly deps: { inbox: FacesInbox; store: KeyValue }) {}
+  constructor(private readonly deps: { inbox: FacesInbox; store: KeyValue; avatars?: FacesAvatars }) {}
 
   /** One pass; never throws. A pass already running is returned instead of starting a second. */
   tick(chats: readonly FaceChat[]): Promise<FacesReport> {
@@ -61,10 +78,11 @@ export class FaceSync {
   }
 
   private async pass(chats: readonly FaceChat[]): Promise<FacesReport> {
-    const wanted = new Map<string, { face: string; session: string }>()
+    const wanted = new Map<string, Wanted>()
     for (const chat of chats) {
-      const face = faceFor(chat.provider)
-      if (face && !wanted.has(chat.agent)) wanted.set(chat.agent, { face, session: chat.session })
+      const mark = faceFor(chat.provider)
+      const bot = this.deps.avatars && chat.bot ? chat.bot : null
+      if ((mark || bot) && !wanted.has(chat.agent)) wanted.set(chat.agent, { session: chat.session, mark, bot })
     }
     if (wanted.size === 0) return { ok: true, set: 0 }
     const { inbox, store } = this.deps
@@ -73,19 +91,37 @@ export class FaceSync {
     if (serverSession === null) return { ok: false, set: 0, reason: 'the Inbox named no server session' }
     const mine = await this.remembered()
     let set = 0
+    /** Whether this plugin may give `agent` the face `face` now (see the note at the top). */
+    const mayWrite = (agent: string, kept: FaceEntry | undefined, face: string): boolean => {
+      if (kept && kept.face === face) return false
+      // Any other face is a person's choice, unless it is one this plugin wrote (the agent or the bot's picture changed).
+      if (kept && kept.face !== 'agent' && mine[agent] !== kept.face) return false
+      // A person put the agent's own mark back after this plugin set one: leave it.
+      if (!kept && mine[agent] === face) return false
+      return true
+    }
     for (const [agent, want] of wanted) {
       if (set >= MAX_PER_PASS) break
       // The Inbox files a face under the agent's id, and lists every session id that agent had.
       const kept = faces[agent] ?? Object.values(faces).find((entry) => entry.sessions.includes(agent) || entry.sessions.includes(want.session))
-      if (kept && kept.face === want.face) {
-        continue
+      // Read again on every pass, so a picture changed in Orca follows.
+      const shown: Picture | null = want.bot ? await this.botPicture(want.bot) : null
+      let face = shown ? `own:${shown.digest}` : want.mark
+      if (face === null || !mayWrite(agent, kept, face)) continue
+      if (shown) {
+        try {
+          const id = await inbox.keepAgentPicture(shown.url, serverSession)
+          if (id !== shown.digest) throw new Error('The Inbox kept the bot’s picture as other bytes.')
+        } catch (error) {
+          // 409: the Inbox restarted under this pass; the next pass reads it again.
+          if (!(error instanceof InboxRefused) || error.status === 409) throw error
+          // An Inbox that keeps no pictures for agents, or not this one: the agent's own mark.
+          face = want.mark
+          if (face === null || !mayWrite(agent, kept, face)) continue
+        }
       }
-      // Any other face is a person's choice, unless it is one this plugin wrote (the agent changed).
-      if (kept && kept.face !== 'agent' && mine[agent] !== kept.face) continue
-      // A person put the agent's own mark back after this plugin set one: leave it.
-      if (!kept && mine[agent] === want.face) continue
-      await inbox.setAgentFace(agent, want.face, serverSession)
-      mine[agent] = want.face
+      await inbox.setAgentFace(agent, face, serverSession)
+      mine[agent] = face
       set += 1
     }
     if (set > 0) {
@@ -93,5 +129,10 @@ export class FaceSync {
       await store.set(STORE_KEY, { v: 1, set: Object.fromEntries(kept) } as Json).catch(() => undefined)
     }
     return { ok: true, set }
+  }
+
+  private async botPicture(bot: BotRef): Promise<Picture | null> {
+    const result = await this.deps.avatars!.picture(bot).catch((): PictureResult => ({ ok: false, reason: 'unreadable' }))
+    return result.ok ? result.picture : null
   }
 }
