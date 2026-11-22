@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "take-updates",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const projectFolders = (rows",
+      "has": ["=> {"],
+      "before": ["orcaSurface.hook({ updates, autoOn: () => resolveAutoUpdate(loadConfig()) && resolveUpdateCheck(loadConfig()), onUpdateChange: () => { if (statusListeners.size === 0) return; const restartAgents = live.restartAgents(); for (const listener of statusListeners) listener(restartAgents); } });"]
+    },
+    {
+      "id": "not-managed",
+      "file": "packages/server/auto-update.ts",
+      "anchor": ["export function isManagedBinary(", "): boolean {"],
+      "after": ["  if (orcaMode()) return false; // The Orca build updater owns this binary."]
+    },
+    {
+      "id": "no-stock-installer",
+      "file": "packages/server/auto-update.ts",
+      "anchor": "export function launchInstaller(",
+      "before": ["import { orcaMode } from \"./inbox-orca-surface\";"],
+      "after": ["  if (orcaMode()) throw new Error(\"Use the Orca build updater; the current version stays in use.\");"]
+    }
+  ]
+}

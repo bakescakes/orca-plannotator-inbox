@@ -1,0 +1,29 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "failure-detail",
+      "file": "packages/inbox/components/Updates.tsx",
+      "anchor": "const sub = prepare",
+      "replace": [
+        ["const sub = prepare", "const sub = detail"]
+      ],
+      "before": [
+        "const said = (details?.failure as { detail?: unknown } | null | undefined)?.detail;",
+        "const detail = typeof said === 'string' && said ? said : null;"
+      ],
+      "after": [
+        "  ? detail",
+        "  : prepare"
+      ]
+    },
+    {
+      "id": "failure-detail-alone",
+      "file": "packages/inbox/components/Updates.tsx",
+      "anchor": "{!mismatch && !couldNotDownload && (",
+      "replace": [
+        ["!couldNotDownload && (", "!couldNotDownload && !detail && ("]
+      ]
+    }
+  ]
+}

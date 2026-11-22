@@ -839,8 +839,9 @@ const LOOK_MS = 3000
 const LOOK_FEATURES_MS = 3000
 
 /**
- * `orca`: the Orca build with its agents route. `orca-old`: an Orca build from before that route,
- * whose own connect already writes the launcher but cannot list, move or take back entries.
+ * `orca`: the Orca build with its agents route. `orca-old`: an Orca build without that route (one
+ * from before it, or a reduced build that left its group out), whose own connect still writes the
+ * launcher (the build's one required group) but cannot list, move or take back entries.
  * `stock`: standard Plannotator.
  */
 type Mode = 'orca' | 'orca-old' | 'stock'
@@ -861,7 +862,7 @@ export function linkFromRow(row: InboxAgentRow, mode: Mode): AgentLink {
         return link('plannotator', 'Connected by Plannotator. Replies come back into Orca chats once the Orca build runs the Inbox and you connect again.')
       }
       if (mode === 'orca-old') {
-        return link('plannotator', 'Connected. The Orca build in use is older than this plugin: connect again once it has updated itself, so an entry that runs Plannotator directly is moved to the launcher.')
+        return link('plannotator', 'Connected. The Orca build in use is older than this plugin, or a reduced one without moving agents: connect again once a full build is in use, so an entry that runs Plannotator directly is moved to the launcher.')
       }
       return link('plannotator', row.reason ?? 'Runs Plannotator directly: messages arrive, but replies do not come back into Orca chats.')
     case 'tool':
@@ -971,7 +972,7 @@ async function everyAgent(
       if (added.length > 0 && mode === 'orca-old') {
         // An Orca build's own connect writes the launcher.
         summary.changed.push(...added)
-        summary.notes.push('The Orca build in use is older than this plugin: an agent that already ran Plannotator directly is moved to the launcher when you connect again after it has updated itself.')
+        summary.notes.push('The Orca build in use is older than this plugin, or a reduced one without moving agents: an agent that already ran Plannotator directly is moved to the launcher when you connect again once a full build is in use.')
       } else if (added.length > 0) {
         summary.notes.push(`Plannotator connected ${names(added)} its own way: replies to ${added.length === 1 ? 'it' : 'them'} come back into Orca chats once the Orca build runs the Inbox and you connect again.`)
       }
@@ -981,7 +982,7 @@ async function everyAgent(
     } else if ((options.known ?? []).some((link) => !OWN_IDS.has(link.agent) && link.state === 'plannotator')) {
       summary.notes.push(
         mode === 'orca-old'
-          ? 'Other agents stay connected: the Orca build in use is older than this plugin. Disconnect again once it has updated itself.'
+          ? 'Other agents stay connected: the Orca build in use is older than this plugin, or a reduced one without moving agents. Disconnect again once a full build is in use.'
           : 'Other agents keep the entries standard Plannotator wrote for them; turn those off in Plannotator’s Settings.'
       )
     }

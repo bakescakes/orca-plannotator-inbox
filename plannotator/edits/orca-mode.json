@@ -1,0 +1,60 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "bridge-wakes-orca",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const BRIDGE_WAKING_HOSTS",
+      "replace": [
+        ["new Set(INBOX_WAKING_HOSTS.filter(", "new Set([...INBOX_WAKING_HOSTS.filter("],
+        [".includes(host)))", ".includes(host)), ...(orcaMode() ? [\"orca\"] : [])])"]
+      ],
+      "after": ["import { createOrcaSurface, orcaMcpCommand, orcaMode } from \"./inbox-orca-surface\";"]
+    },
+    {
+      "id": "surface",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const store = InboxStore.open(",
+      "after": ["const orcaSurface = createOrcaSurface(dataDir, store, version);"]
+    },
+    {
+      "id": "mcp-command-shown",
+      "file": "packages/server/inbox.ts",
+      "anchor": "mcp_command: [...selfCommand, \"inbox\", \"mcp\"]",
+      "replace": [
+        ["[...selfCommand, \"inbox\", \"mcp\"]", "orcaMcpCommand(dataDir, [...selfCommand, \"inbox\", \"mcp\"])"]
+      ]
+    },
+    {
+      "id": "card-route",
+      "file": "packages/server/inbox.ts",
+      "anchor": "if (path === \"/api/inbox/health\" && req.method === \"GET\")",
+      "before": [
+        "const orcaAnswer = await orcaSurface.route(req, path, { json, crossSite: crossSiteCardRead });",
+        "if (orcaAnswer) return orcaAnswer;"
+      ]
+    },
+    {
+      "id": "mcp-import",
+      "file": "packages/server/inbox-agents.ts",
+      "anchor": "function ourCommands(",
+      "before": ["import { orcaMcpCommand } from \"./inbox-orca-surface\";"]
+    },
+    {
+      "id": "mcp-commands-known",
+      "file": "packages/server/inbox-agents.ts",
+      "anchor": "const commands = [[...options.selfCommand, \"inbox\", \"mcp\"]];",
+      "replace": [
+        ["[[...options.selfCommand, \"inbox\", \"mcp\"]]", "[orcaMcpCommand(options.dataDir, [...options.selfCommand, \"inbox\", \"mcp\"], options)]"]
+      ]
+    },
+    {
+      "id": "mcp-command-written",
+      "file": "packages/server/inbox-agents.ts",
+      "anchor": "const command = [...options.selfCommand, \"inbox\", \"mcp\"];",
+      "replace": [
+        ["[...options.selfCommand, \"inbox\", \"mcp\"]", "orcaMcpCommand(options.dataDir, [...options.selfCommand, \"inbox\", \"mcp\"], options)"]
+      ]
+    }
+  ]
+}

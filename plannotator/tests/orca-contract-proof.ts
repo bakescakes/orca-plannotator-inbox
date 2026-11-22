@@ -1,4 +1,9 @@
-/** Orca build gate: the real patched Inbox routes in Orca mode against an inert fake bridge, including owner-only tailnet access. Run with Bun in the patched source tree. */
+/**
+ * Orca build gate: the real edited Inbox routes in Orca mode against an inert fake bridge, including owner-only
+ * tailnet access. Run with Bun in the edited source tree. A build that left out the `projects` group still imports the
+ * catalog's projects (they are only not marked for the window); one without `launch-hosts` skips the launch host's
+ * run-line checks (orca-build-proof.ts proves that source is stock).
+ */
 import {mkdtempSync,mkdirSync,writeFileSync,existsSync,rmSync,realpathSync} from "node:fs";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -60,6 +65,8 @@ globalThis.fetch=((input:any,init:any)=>{
   if(target.hostname!=="127.0.0.1"||!allowedPorts.has(Number(target.port)))throw Error("Inert proof refused non-fixture network");
   return realFetch(input,init);
 }) as typeof fetch;
+const {ORCA_BUILD}=await import(pathToFileURL(join(process.cwd(),"packages/server/inbox-orca-build.ts")).href);
+const projectsOn=!ORCA_BUILD.omitted.includes("projects"),hostsOn=!ORCA_BUILD.omitted.includes("launch-hosts");
 let server:any;
 try{
   const {startInboxServer}=await import(pathToFileURL(join(process.cwd(),"packages/server/inbox.ts")).href);
@@ -73,7 +80,8 @@ try{
   const headers=(login=owner)=>({Host:magic+":"+server.port,"Tailscale-User-Login":login,
     Origin:"https://"+magic+":"+server.port,"Sec-Fetch-Site":"same-origin","Content-Type":"application/json"});
   const healthPath="/api/inbox/orca",threadsPath="/api/inbox/threads";
-  const imported=(value:any)=>value.projects.filter((p:any)=>p.orca_imported);
+  const roots=new Set([project,secondProject]);
+  const imported=(value:any)=>value.projects.filter((p:any)=>projectsOn?p.orca_imported:roots.has(p.root));
   let list:any;
   for(let i=0;i<50;i++){
     list=await(await fetch(base+threadsPath)).json();
@@ -136,6 +144,7 @@ try{
 
   // Exercise the actual LaunchHost and run-line consumer, rather than merely
   // checking that a null poll was emitted (upstream retains prior busy polls).
+  if(hostsOn){
   const {createOrcaLaunchHosts}=await import(pathToFileURL(join(process.cwd(),"packages/server/inbox-orca-host.ts")).href);
   const {inboxRunOf}=await import(pathToFileURL(join(process.cwd(),"packages/core/inbox-run-line.ts")).href);
   let bridgeLive:any={busy:true,busySince:realNow()-1000,polls:2};
@@ -189,9 +198,10 @@ try{
   }
   bridgeLive=null;
   check(host.live!("native_empty")===null,"Native unknown invented a live bridge connection");
+  }
   console.log(JSON.stringify({ok:true,checks,localHealth:localResponse.status,ownerTailnetHealth:remoteResponse.status,
     guestHealth:403,crossSiteRefused:true,nonGetRefused:true,approvedEmptyProjects:imported(list).length,
-    phoneOnlyRefresh:true,privateBearerVerified:authorized,providerOrUpgradeActions:0}));
+    phoneOnlyRefresh:true,privateBearerVerified:authorized,providerOrUpgradeActions:0,launchHost:hostsOn?"checked":"left out",projectsMarked:projectsOn}));
 }finally{
   Date.now=realNow;globalThis.fetch=realFetch;
   server?.stop();sidecar.stop(true);rmSync(root,{recursive:true,force:true});

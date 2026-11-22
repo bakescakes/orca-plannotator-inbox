@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "agents-import",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const BRIDGE_WAKING_HOSTS",
+      "after": ["import { orcaAgentsRoute } from \"./inbox-orca-agents\";"]
+    },
+    {
+      "id": "route",
+      "file": "packages/server/inbox.ts",
+      "anchor": ["if (path === \"/api/inbox/control/connect\")", "return json({ connect: await connectAgents() });", "}"],
+      "after": [
+        "// The Orca plugin: connect, move and disconnect the agents for Orca (inbox-orca-agents.ts; 404 outside Orca mode).",
+        "if (path === \"/api/inbox/control/orca-agents\") return orcaAgentsRoute(req, { json, dataDir, selfCommand, environment: agentEnvironment, connectAgents });"
+      ]
+    }
+  ]
+}

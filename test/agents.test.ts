@@ -231,11 +231,11 @@ test('connect with an Orca build from before the agents route: its own connect w
     ok: true,
     message:
       'Connected Codex and Cursor. It applies to chats started from now on. ' +
-      'The Orca build in use is older than this plugin: an agent that already ran Plannotator directly is moved to the launcher when you connect again after it has updated itself.'
+      'The Orca build in use is older than this plugin, or a reduced one without moving agents: an agent that already ran Plannotator directly is moved to the launcher when you connect again once a full build is in use.'
   })
   assert.ok(!inbox.state.agentCalls.some((call) => call.path === '/api/inbox/control/orca-agents'), 'the route this build lacks was not asked for')
   const off = await disconnectAllAgents(deps, client(inbox), { known })
-  assert.match(off.message, /older than this plugin\. Disconnect again once it has updated itself\./)
+  assert.match(off.message, /older than this plugin, or a reduced one without moving agents\. Disconnect again once a full build is in use\./)
 })
 
 test('connect while the Inbox is down: the three, and a word about the rest', async () => {

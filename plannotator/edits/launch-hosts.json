@@ -1,0 +1,101 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "run-line-rename",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "const runOfRoot = (root",
+      "replace": [
+        ["const runOfRoot = ", "const hostRunOfRoot = "]
+      ]
+    },
+    {
+      "id": "run-line-open-in",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "const hostRunOfRoot = (root",
+      "before": ["const runOfRoot = (root: InboxMessage): InboxRun | null => { const run = hostRunOfRoot(root), via = hostOf(root.launch!)?.routeHost; return run && via ? { ...run, open_in: via } : run; };"]
+    },
+    {
+      "id": "start-source",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "host.start(launch, { name, login }",
+      "replace": [
+        ["{ name, login }", "{ name, login, source: { messageId: root.id, threadId: root.thread_id }, reconcile: again }"]
+      ]
+    },
+    {
+      "id": "settle-route-host",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "to: { host: launch.agent, session: result.session }",
+      "replace": [
+        ["host: launch.agent", "host: host.routeHost ?? launch.agent"]
+      ]
+    },
+    {
+      "id": "stop-refused",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "startLog(launch.id, `stop ${launch.session_ref}: exit ${result.exitCode}",
+      "after": ["if (host.routeHost && result.exitCode !== 0) { memo.heldReply = null; throw new InboxError(\"stop_unavailable\", result.text.slice(0, 300)); } // Refused: the chat still runs, and the run line says why."]
+    },
+    {
+      "id": "open-native",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "if (via === \"tailnet\") return localOnly();",
+      "after": ["if (host.open) { const answer = await host.open(launch); if (answer.exitCode !== 0) throw new InboxError(\"open_unavailable\", answer.text.slice(0, 300)); return json({ ok: true, openedIn: host.routeHost ?? host.agent }); }"]
+    },
+    {
+      "id": "launch-route-host",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "to: { host: host.agent, session: `launch:${id}` }",
+      "replace": [
+        ["host: host.agent", "host: host.routeHost ?? host.agent"]
+      ]
+    },
+    {
+      "id": "deliver-route-host",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "m.to.session === session && m.launch!.session_ref",
+      "replace": [
+        ["m.to?.host === agent", "m.to?.host === (host.routeHost ?? agent)"]
+      ]
+    },
+    {
+      "id": "list-route-host",
+      "file": "packages/server/inbox-launch.ts",
+      "anchor": "host: launch.agent, project_id: root.project_id",
+      "replace": [
+        ["host: launch.agent", "host: hostOf(launch)?.routeHost ?? launch.agent"]
+      ]
+    },
+    {
+      "id": "hosts-import",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const BRIDGE_WAKING_HOSTS",
+      "after": ["import { createOrcaLaunchHosts } from \"./inbox-orca-host\";"]
+    },
+    {
+      "id": "hosts",
+      "file": "packages/server/inbox.ts",
+      "anchor": "hosts: options.launchHosts",
+      "replace": [
+        ["options.launchHosts", "options.launchHosts ?? createOrcaLaunchHosts"]
+      ]
+    },
+    {
+      "id": "open-error",
+      "file": "packages/inbox/components/RunLine.tsx",
+      "anchor": "'Terminal did not open; copy the command instead.'",
+      "replace": [
+        ["'Terminal did not open; copy the command instead.'", "(run.open_in === 'orca' ? 'Orca did not open the chat; it is still there.' : 'Terminal did not open; copy the command instead.')"]
+      ]
+    },
+    {
+      "id": "open-label",
+      "file": "packages/inbox/components/RunLine.tsx",
+      "anchor": ["<Icon name=\"terminal\" size={14} />", "Open in Terminal"],
+      "replace": [
+        ["Open in Terminal", "{run.open_in === 'orca' ? 'Open in Orca' : 'Open in Terminal'}"]
+      ]
+    }
+  ]
+}

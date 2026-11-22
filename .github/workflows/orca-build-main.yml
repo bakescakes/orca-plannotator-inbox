@@ -1,0 +1,169 @@
+# An early look for the Orca build of Plannotator: once a day, the edits in plannotator/edits/ are applied to the head
+# of Plannotator's main branch, and the type checks, upstream's tests and the gates run on it for one target
+# (linux-x64), as a release build runs them. Nothing is compiled, published or tagged: this workflow can read the
+# repository and write issues, and nothing else.
+#
+# Its issue: one issue, while main does not take every edit (a required group that no longer fits or a check that
+# fails: "breaks"; an optional group left out: a release now would ship a reduced build). It names each edit that no
+# longer fits and what it found, and the upstream commits since main last took every edit (the head that last
+# fitted is kept as this workflow's `main-fitted` artifact; without one, since the recipe's release). Each run
+# rewrites its text; it gets a comment only when what no longer fits changes, and is closed when main takes every
+# edit again. A run that could not check (a download failed) changes no issue and fails, so it shows here.
+# Only issues this workflow opened count, found by author and marker as in orca-build.yml.
+name: Orca build against Plannotator main
+
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: orca-build-main
+  cancel-in-progress: false
+
+env:
+  BUILD_DIR: plannotator
+  UPSTREAM: backnotprop/plannotator
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      head: ${{ steps.source.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: plannotator
+          path: src
+      - name: The head of Plannotator's main
+        id: source
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch main "https://github.com/$UPSTREAM.git" upstream
+          head="$(git -C upstream rev-parse HEAD)"
+          if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::No commit at the head of main"; exit 1; fi
+          # The version only names the build (nothing is compiled); main may carry no stable number.
+          version="$(node -p 'require("./upstream/package.json").version' 2> /dev/null || true)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="$(node -p 'require("./src/plannotator/recipe.json").plannotator.version')"; fi
+          { echo "head=$head"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+          echo "Plannotator main at $head ($version)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Fit, type checks, tests and gates (no compile, nothing published)
+        env:
+          HEAD_SHA: ${{ steps.source.outputs.head }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -o pipefail
+          mkdir -p report
+          echo "$HEAD_SHA" > report/head.txt
+          # Upstream's text (its lines quoted by --fit, its build steps' and tests' output) is logged, but no line of it
+          # is read as a workflow command. Nothing of it goes to the summary here: the report job writes that, safely.
+          token="$(node -p 'require("crypto").randomBytes(16).toString("hex")')"
+          echo "::stop-commands::$token"
+          # Every edit tried on its own, nothing written: which fit and what the others found.
+          node "src/$BUILD_DIR/build.mjs" --fit upstream > report/fit.json 2> fit.err || true
+          cat fit.err
+          # As a release build: edits, added files, prepare and check steps, then the gates. Its report says what fit.
+          node "src/$BUILD_DIR/build.mjs" --source upstream --commit "$HEAD_SHA" --version "$VERSION" --target linux-x64 \
+            --check-only --report report/check.json 2>&1 | tee check.err || true
+          echo "::$token::"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: main-check
+          path: report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report:
+    needs: check
+    if: always() && needs.check.result != 'cancelled' && needs.check.outputs.head != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: plannotator
+          path: src
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: main-check
+          path: report
+      - name: The head main last took every edit at
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=""
+          id="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=main-fitted&per_page=1" --jq '.artifacts[0].id // empty' 2> /dev/null || true)"
+          if [ -n "$id" ] && gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > fitted.zip 2> /dev/null; then
+            base="$(unzip -p fitted.zip head.txt 2> /dev/null | tr -cd '0-9a-f' | head -c 40 || true)"
+          fi
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then base="$(node -p 'require("./src/plannotator/recipe.json").plannotator.tag')"; fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Open, update or close the issue
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.check.outputs.head }}
+          BASE: ${{ steps.base.outputs.base }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p report
+          node "src/$BUILD_DIR/release.mjs" main --dir report --head "$HEAD_SHA" --base "$BASE" --upstream "$UPSTREAM" --run "$RUN_URL" > verdict.json
+          kind="$(node -p 'require("./verdict.json").kind')"
+          key="$(node -p 'require("./verdict.json").key')"
+          title="$(node -p 'require("./verdict.json").title')"
+          node -p 'require("./verdict.json").body' > issue.md
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          # One line in a code span (release.mjs), so upstream's words cannot turn into Markdown here.
+          node -p 'require("./verdict.json").summary' | tee -a "$GITHUB_STEP_SUMMARY"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --author "github-actions[bot]" --state open --limit 200 --json author,number,body \
+            --jq '[.[] | select(.author.is_bot == true and .author.login == "app/github-actions") | select(.body | contains("<!-- orca-build-main "))] | first // empty')"
+          # The open issue's number and the key of what it says (both empty without one).
+          number="$(printf '%s' "${open:-null}" | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{const i=JSON.parse(s)??{};if(Number.isInteger(i.number))console.log(i.number)})')"
+          had="$(printf '%s' "${open:-null}" | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{const i=JSON.parse(s)??{};const m=/<!-- orca-build-main key=(fits|unknown|(?:reduced|broken):[0-9a-f]{16}) -->/.exec(i.body??"");console.log(m?m[1]:"")})')"
+          case "$kind" in
+            fits)
+              if [ -n "$number" ]; then
+                gh issue close "$number" --repo "$GITHUB_REPOSITORY" --comment "Plannotator main takes every edit again at $HEAD_SHA ($RUN_URL)."
+              fi
+              ;;
+            broken|reduced)
+              if [ -z "$number" ]; then
+                gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
+              else
+                gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
+                if [ "$had" != "$key" ]; then
+                  gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "What no longer fits changed at $HEAD_SHA ($RUN_URL): see the description."
+                fi
+              fi
+              ;;
+            *)
+              echo "::error::The check against Plannotator main did not run to an answer; no issue was changed."
+              exit 1
+              ;;
+          esac
+      # The head main took every edit at: the next break's issue counts upstream's commits from here.
+      - name: Keep the head that fitted
+        if: steps.issue.outputs.kind == 'fits'
+        env:
+          HEAD_SHA: ${{ needs.check.outputs.head }}
+        run: mkdir -p fitted && echo "$HEAD_SHA" > fitted/head.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.issue.outputs.kind == 'fits'
+        with:
+          name: main-fitted
+          path: fitted
+          retention-days: 90

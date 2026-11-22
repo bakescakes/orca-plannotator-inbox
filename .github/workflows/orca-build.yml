@@ -3,9 +3,9 @@
 # manifest.json, and point the `plannotator-orca-index` release's index.json at it.
 #
 # When it builds: the newest stable release (or, by hand, a given version), unless one of that version's builds was
-# already made from this recipe (recipe.json and build.mjs: `node plannotator/build.mjs --recipe-hash`, recorded in
+# already made from this recipe (recipe.json, build.mjs and edits.mjs: `node plannotator/build.mjs --recipe-hash`, recorded in
 # each manifest.json). A build with no recipe recorded counts as another recipe. So one version and recipe is never
-# published twice, a new release gets its first build, and a recipe change (a fixed patch) gets orca.<n+1>.
+# published twice, a new release gets its first build, and a recipe change (a refitted edit) gets orca.<n+1>.
 # - four times an hour, off the busy minutes (GitHub starts scheduled runs when it has room: on this repository they
 #   have come hours apart, so a new release's build can take that long): a run with nothing to do stops in the first
 #   job, quietly. A version whose build failed is tried
@@ -13,13 +13,14 @@
 #   dropped while another run held the concurrency group.
 # - on a push to main that changes plannotator/**, and by hand: at once.
 #
-# Reduced builds: an optional patch (recipe.json `"required": false`) that no longer applies is left out, and the
-# build goes on without its features. It is published only when every target built and passed with the same patches
-# left out; manifest.json then lists `features` and `omitted`, and the release notes say what is lacking. A required
-# patch that no longer applies, a failed gate, or targets that disagree publish nothing; the index keeps pointing at
-# the last good build.
+# Reduced builds: an optional group of edits (recipe.json `"required": false`) that no longer fits, or whose lines
+# no longer type-check, is left out whole, and the build goes on without its features. It is published only when every
+# target built and passed with the same groups left out; manifest.json then lists `features` and `omitted`, and the
+# release notes say what is lacking. The required group not fitting, a failed gate, or targets that disagree publish
+# nothing; the index keeps pointing at the last good build. orca-build-main.yml tries the edits on upstream's main
+# every day, so a break is usually known before the release that brings it.
 #
-# Issues: a reduced or failed build opens one issue naming the version, the patch or gate, and the first error line.
+# Issues: a reduced or failed build opens one issue naming the version, the group or gate, and the first error line.
 # Only issues this workflow opened itself count: an issue anyone else writes, whatever its text, never delays a build
 # and is never commented on or closed. The list is asked for by author (`github-actions[bot]`, the name the search
 # takes), so other people's issues cannot crowd these out of the 200 it returns, and each one's author is checked
@@ -29,10 +30,10 @@
 #
 # Windows: the binary is cross-compiled on Linux (Bun's --compile --target=bun-windows-x64), because upstream's UI
 # build scripts (vendor.sh, the Vite builds) are written for POSIX shells. A Windows runner then runs the gates on the
-# patched source (leaving out what the build left out) and the --version smoke on that binary before anything is
+# edited source (leaving out what the build left out) and the --version smoke on that binary before anything is
 # published.
 #
-# BUILD_DIR is the folder with the patches, added files, recipe, build script and release script.
+# BUILD_DIR is the folder with the edits, added files, recipe, build script and release script.
 name: Orca build of Plannotator
 
 on:
@@ -163,15 +164,22 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p out
+          # Upstream's output (its build steps and tests) is logged, but no line of it is read as a workflow command,
+          # and what reaches the summary is one line in a code span, without backticks or control characters.
+          token="$(node -p 'require("crypto").randomBytes(16).toString("hex")')"
+          safe() { printf '%s' "$1" | tr -d '\000-\037\140' | cut -c1-300; }
+          echo "::stop-commands::$token"
           # build.mjs writes its report (what it applied, left out and serves) to out/$ASSET.build.json, also on failure.
           if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target "$TARGET" --out "out/$ASSET" 2>&1 | tee build.err; then
-            reason="$(grep '^orca-build: ' build.err | tail -1)"
+            echo "::$token::"
+            reason="$(safe "$(grep '^orca-build: ' build.err | tail -1)")"
             echo "::error::${reason:-orca-build: failed}"
-            echo "${reason:-orca-build: failed}" >> "$GITHUB_STEP_SUMMARY"
+            printf '\140%s\140\n' "${reason:-orca-build: failed}" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          left="$(grep '^orca-build: patches applied: ' build.err | tail -1)"
-          echo "${left#orca-build: }" >> "$GITHUB_STEP_SUMMARY"
+          echo "::$token::"
+          left="$(safe "$(grep '^orca-build: groups applied: ' build.err | tail -1)")"
+          printf '\140%s\140\n' "${left#orca-build: }" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
@@ -210,18 +218,25 @@ jobs:
           COMMIT: ${{ needs.resolve.outputs.commit }}
         run: |
           set -o pipefail
-          # The same patches left out as the Windows binary's build, so the gates check what that binary carries.
+          token="$(node -p 'require("crypto").randomBytes(16).toString("hex")')"
+          safe() { printf '%s' "$1" | tr -d '\000-\037\140' | cut -c1-300; }
+          # The same groups left out as the Windows binary's build, so the gates check what that binary carries. Its
+          # report comes from a job that ran upstream's build: only group names in the plain form are taken (build.mjs
+          # refuses any the recipe does not have).
           without=()
-          for name in $(node -e 'const r=JSON.parse(require("fs").readFileSync("out/plannotator-orca-win32-x64.exe.build.json","utf8"));for(const o of r.omitted)console.log(o.name)'); do
+          while IFS= read -r name; do
             without+=(--without "$name")
-          done
+          done < <(node -e 'const r=JSON.parse(require("fs").readFileSync("out/plannotator-orca-win32-x64.exe.build.json","utf8"));for(const o of r.omitted??[])if(/^[a-z0-9]+(-[a-z0-9]+)*$/.test(String(o?.name)))console.log(o.name)')
+          echo "::stop-commands::$token"
           if ! node "$BUILD_DIR/build.mjs" --version "$VERSION" --commit "$COMMIT" --target win32-x64 --gates-only "${without[@]}" 2>&1 | tee build.err \
              || ! node "$BUILD_DIR/build.mjs" --check-binary out/plannotator-orca-win32-x64.exe --version "$VERSION" 2>&1 | tee -a build.err; then
-            reason="$(grep '^orca-build: ' build.err | tail -1)"
+            echo "::$token::"
+            reason="$(safe "$(grep '^orca-build: ' build.err | tail -1)")"
             echo "::error::${reason:-orca-build: failed on Windows}"
-            echo "${reason:-orca-build: failed on Windows}" >> "$GITHUB_STEP_SUMMARY"
+            printf '\140%s\140\n' "${reason:-orca-build: failed on Windows}" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+          echo "::$token::"
 
   publish:
     needs: [resolve, build, windows-check]
@@ -251,7 +266,7 @@ jobs:
           RECIPE: ${{ needs.resolve.outputs.recipe }}
         run: |
           set -euo pipefail
-          # Every target built, from this recipe, with the same patches left out; each binary still matches its report.
+          # Every target built, from this recipe, with the same groups left out; each binary still matches its report.
           node "src/$BUILD_DIR/release.mjs" manifest --dir out --version "$VERSION" --build "$BUILD" --commit "$COMMIT" --recipe "$RECIPE" >> "$GITHUB_OUTPUT"
           cat out/manifest.json
       - name: Publish the release
@@ -328,6 +343,8 @@ jobs:
           set -euo pipefail
           verdict="$(node "src/$BUILD_DIR/release.mjs" verdict --dir reports --version "$VERSION" --tag "$TAG" \
             --build-result "$BUILD_RESULT" --windows-result "$WINDOWS_RESULT" --publish-result "$PUBLISH_RESULT")"
+          # release.mjs gives `line` as one line without backticks or control characters, and `cause` only as names the
+          # recipe has, so both can sit in a code span, a title and the marker.
           echo "$verdict"
           kind="$(node -p 'JSON.parse(process.argv[1]).kind' "$verdict")"
           cause="$(node -p 'JSON.parse(process.argv[1]).cause ?? ""' "$verdict")"
@@ -358,14 +375,14 @@ jobs:
               if [ -z "$found" ]; then
                 if [ "$kind" = reduced ]; then
                   title="Orca build of Plannotator $VERSION is reduced: ${cause#left-out:} left out"
-                  what="$TAG was published without these optional patches, so it lacks their features."
+                  what="$TAG was published without these optional groups of edits, so it lacks their features. orca-build-main.yml's issue, if open, names each edit that no longer fits; refit it (plannotator/README.md) for a full build."
                 else
                   title="Orca build of Plannotator $VERSION failed: $cause"
                   what="Nothing was published; the index still points at the last good build."
                 fi
                 # shellcheck disable=SC2016 # Markdown, not shell
                 printf '%s\n\n%s\n\n- Version: %s\n- Cause: %s\n- First error line: `%s`\n- Recipe: %s\n- Run: %s\n\nA later full build of this version or a newer one closes this issue.\n\n%s\n' \
-                  "$what" "Why: $line" "$VERSION" "$cause" "$line" "$RECIPE" "$RUN_URL" "$marker" > issue.md
+                  "$what" "Why: \`$line\`" "$VERSION" "$cause" "$line" "$RECIPE" "$RUN_URL" "$marker" > issue.md
                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
               elif [ "${found#* }" = stale ]; then
                 gh issue comment "${found%% *}" --repo "$GITHUB_REPOSITORY" --body "Still $kind ($RUN_URL): \`$line\`"
