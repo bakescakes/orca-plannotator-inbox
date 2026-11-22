@@ -8,7 +8,8 @@ the Inbox window when you get to it. The answer arrives in that same Orca chat b
 next turn.
 
 From the Inbox you can also start a new Orca chat on a thread, stop one, resume it and bring it
-forward, and each Orca chat shows the icon of the agent it runs. For that the plugin downloads
+forward, and each Orca chat shows the icon of the agent it runs (a bot's chat, the bot's own
+picture). For that the plugin downloads
 the **Orca build of Plannotator** (the same Plannotator release with a small set of Orca changes,
 built in public from this repository) and keeps it up to date. Switch that off in Settings and
 the plugin works with the Plannotator installed on your computer exactly as it is; replies still
@@ -52,7 +53,7 @@ The status bar shows an **Inbox** item; pressing it opens the Inbox window.
 | Connect | `src/connect.ts` | **Connect agents**: its own writer for Claude Code, Codex and OpenCode, and Plannotator's connector for every other agent. |
 | Links | `src/navigation.ts`, `bin/reveal.cjs` | Ends each message an Orca chat sends with an **Open in Orca** link that brings that chat forward. |
 | Pictures | `src/presentation.ts` | Gives an Inbox project the icon of its Orca repository. |
-| Agent icons | `src/faces.ts` | Gives each Orca chat the icon of the agent it runs. |
+| Agent icons | `src/faces.ts`, `src/bot-avatars.ts`, `src/png.ts` | Gives each Orca chat the icon of the agent it runs, and a bot's chat the bot's own picture. |
 | Orca build | `src/build-store.ts`, `~/.orca-plannotator-inbox/plannotator-update` | Downloads, checks, installs and updates the Orca build of Plannotator, and keeps the Inbox on it. |
 | Bridge | `src/bridge.ts`, `src/lifecycle.ts`, `bin/session.cjs` | What the Orca build calls to start, stop, resume and open Orca chats. |
 
@@ -113,14 +114,57 @@ chat the mark of the agent it runs (Claude Code, Codex, OpenCode, Pi, Cursor, Gr
 Copilot and the others Orca can run), through the Inbox's own face picker route. A face you chose
 yourself is never replaced, and standard Plannotator is never sent one.
 
+### Bot pictures
+
+With the Orca build, a bot's chat shows the bot's picture from Orca in place of its agent's mark,
+wherever the Inbox draws that chat's agent icon: the sidebar's Agents list, the author of its
+messages, its threads' rows. Two bots that run the same agent look as different as they do in Orca.
+Only a chat in the bot's own home gets it (see [Orca bots](#orca-bots)); a chat in a workspace nested under a
+bot, and every other chat, keeps its agent's mark.
+
+| The bot's picture in Orca | In the Inbox |
+| --- | --- |
+| A mascot | The same mascot, read from the installed Orca's own files, on its default sky blue |
+| A picture you uploaded | That picture, made 128 px square |
+| An emoji (bots from before mascots) | The emoji |
+| None | The bot's initial on a grey tile, as Orca shows a bot without a picture |
+
+The worker reads the picture again once a minute, with the agent icons, so a new picture in Orca
+shows within about a minute and a renamed bot keeps its own. A chat that stops being a bot's (the
+bot was removed while the chat stayed open) goes back to its agent's mark. Orca's CLI does not name
+a bot's picture, so the worker reads `bot.json` in the bot's home (Orca rewrites it on every change,
+and it must name the bot Orca lists there), and for an uploaded picture `avatar.png` beside it. It
+opens no other file of the home, and none through a link. It gives the picture to the Inbox the way
+"Your own…" in the face picker does (`POST /api/inbox/agent-icons`) and sets the chat's face to it
+(`own:<sha256>`). As with agent marks, a face you chose for the chat yourself is never replaced, and
+standard Plannotator is sent nothing. Choosing **Agent** in the picker counts as your choice too: a
+later picture from Orca does not undo it.
+
+Nothing of Orca's artwork is in this plugin: a mascot is read at run time from the Orca installed on
+this computer (`app.asar.unpacked/out/renderer/assets`, found from the CLI the worker runs) and kept
+only in this computer's Inbox. Orca, mascots included, is MIT-licensed.
+
+Limits:
+
+- A mascot's tile colour is kept only in Orca's own store, which the plugin does not read, so a
+  mascot you put on another colour shows on its default sky blue.
+- The chat shows its agent's mark instead when the picture cannot be read or shown: the app's files
+  moved in an Orca update, a mascot or `bot.json` is not in the shape the plugin checks for, an
+  uploaded picture is a PNG it does not read (only 8-bit, not interlaced) and larger than the Inbox's
+  512 KB, or the Inbox keeps no pictures for agents. A mascot Orca does not know shows the initial,
+  as in Orca.
+- Each picture the plugin gives the Inbox stays among the Inbox's own pictures for agents ("Your
+  own…" in the picker) until the Inbox lets go of old ones that no agent shows; it keeps 60.
+- A bot's chat on a paired computer is not served by this plugin, so it gets no picture either.
+
 ### Orca bots
 
 A bot's chats (every chat in its home) take replies like any other chat, the same way: one mail
 to that chat's own address, never to another chat of the bot. Orca's `worktree ps` marks a bot's
 home (`bot`, `botHome`), and the plugin names its chats from that alone: `Name (Claude bot)` as the
 author in the Inbox, and the same in the panel's list of chats, on a reply that needs you, and in
-the plugin's log. A chat in a workspace only nested under a bot is an ordinary chat. The chat is
-still the author, so its agent icon is the agent's.
+the plugin's log. A chat in a workspace only nested under a bot is an ordinary chat. With the Orca
+build, a bot's chat shows the bot's own picture as its icon (see [Bot pictures](#bot-pictures)).
 
 Orca takes mail to a bot's chat as a request to that bot: it keeps the sender, the address and the
 text, and puts its own record of the request in place of the plugin's payload. The plugin accepts
@@ -296,7 +340,8 @@ checks all of it at run time:
   and `bridge/event`, and the stdio MCP server. **Connect agents** also uses
   `/api/inbox/control/orca-agents` (the Orca build), or `GET /api/inbox/agents` and
   `POST /api/inbox/control/connect` (standard Plannotator); an answer it cannot read is reported,
-  and Claude Code, Codex and OpenCode are connected all the same. Which identity fields a tool takes is read from
+  and Claude Code, Codex and OpenCode are connected all the same. Agent icons and bot pictures use
+  `GET`/`POST /api/inbox/agent-faces` and `POST /api/inbox/agent-icons`. Which identity fields a tool takes is read from
   the server's own `tools/list`, so new or renamed tools need no change here. Unknown fields are
   ignored or passed along.
 - **Orca**: plugin Host API 1 (frozen and additive), and these CLI calls with `--json`:
@@ -305,7 +350,9 @@ checks all of it at run time:
   whether `orchestration send` takes `--body-file`; an Orca whose argument check refuses that flag
   is remembered as one without it, and the same request goes again with `--body`), and `agent read`
 (once per wait, to learn whether a waiting chat holds a permission or a question; without it nothing
-is shown). Bringing one exact chat tab forward uses a call Orca does not
+is shown). A bot's picture is read from `bot.json` and `avatar.png` in its home and from the
+mascots in the app's own files; when one of them changes shape, the bot's chat shows its agent's
+mark. Bringing one exact chat tab forward uses a call Orca does not
   publish; when an Orca update changes it, the link opens the chat's workspace instead. The worker runs the CLI that
   ships inside the same Orca, so the two are always the same version.
 - **The Orca build** follows Plannotator's releases by itself (see above). Its changes are kept as
@@ -346,7 +393,7 @@ Plannotator 0.28.66.
 | Notify when a reply needs you | on | A desktop notification when a reply is blocked. |
 | Add an "Open in Orca" link to Inbox messages | on | Off: no link is added and the listener does not run. |
 | Use Orca's repository icons as project pictures | on | Off: project pictures are left alone. |
-| Show each Orca chat with its agent's icon | on | Off: agent icons are left alone. Needs the Orca build. |
+| Show each Orca chat with its agent's icon | on | A bot's chat with the bot's picture. Off: agent icons are left alone. Needs the Orca build. |
 | Use the Orca build of Plannotator | on | Off: nothing is downloaded, and your own Plannotator is used as it is. Start, Stop and Resume from the Inbox need it on. |
 | Only these projects | empty | One folder per line. Empty: every project. |
 | Plannotator data folder | empty | Empty follows Plannotator: `PLANNOTATOR_DATA_DIR`, then `~/.plannotator`. When set, Orca chats send to that Inbox too, unless the agent's own environment names a folder. |
@@ -440,6 +487,10 @@ Against the real programs:
 ```sh
 # A real, unmodified Plannotator in a throwaway HOME. Never touches your Inbox or agent settings.
 PLANNOTATOR_E2E_BIN="$(command -v plannotator)" orca plugin test .
+
+# Bot pictures through a real Inbox, also in a throwaway HOME, with invented bots. With the Orca
+# build every picture form is kept, set and served back; with standard Plannotator nothing is sent.
+PLANNOTATOR_FACES_BIN=/path/to/plannotator orca plugin test .
 
 # Read-only checks against the running Orca; add a chat's session id to read its mailbox,
 # and ORCA_LIVE_SEND=1 to send that chat one marked test mail.

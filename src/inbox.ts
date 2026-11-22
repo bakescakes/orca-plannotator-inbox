@@ -578,6 +578,19 @@ export class InboxClient {
   }
 
   /**
+   * Keeps one picture for agents' icons, as the window's "Your own…" does (`POST /api/inbox/agent-icons`
+   * with a `data:image/…;base64,` URL), and answers its id: the SHA-256 of its bytes, which an agent's
+   * face names as `own:<id>`. The same bytes again are the same picture. An Inbox without the route,
+   * or one that will not take the picture, refuses (4xx) before it keeps anything.
+   */
+  async keepAgentPicture(picture: string, serverSession: string, timeoutMs = 8000, signal?: AbortSignal): Promise<string> {
+    const answer = await this.request('/api/inbox/agent-icons', { picture, serverSession }, timeoutMs, signal)
+    const id = isRecord(answer.icon) ? answer.icon.id : null
+    if (typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) throw new InboxContractError('The Inbox kept an agent picture without a usable id.')
+    return id
+  }
+
+  /**
    * The bytes of the picture the Inbox shows for a project (a set picture first), or null when it
    * has none. Read only to learn whether an earlier write landed.
    */

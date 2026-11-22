@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { Courier, realOrSelf, type Outcome } from './courier'
+import { BotAvatars, orcaAssetFolders } from './bot-avatars'
 import { FaceSync } from './faces'
 import { InboxClient, InboxContractError, InboxUnavailable, POLL_WAIT_MS, type BlockedKind, type ThreadAuthor } from './inbox'
 import { Activation, Ledger, type KeyValue } from './ledger'
@@ -99,6 +100,8 @@ export type EngineDeps = {
   exec?: Exec
   fetch?: typeof fetch
   locateCli?: typeof locateOrcaCli
+  /** Where the installed Orca keeps its mascots' files; by default found from its CLI (`orcaAssetFolders`). */
+  assetFolders?: () => readonly string[]
   /** The Orca profile this plugin runs in, when known; null uses the CLI's default. */
   profile?: string | null
   tickMs?: number
@@ -130,6 +133,8 @@ type RouteState = {
   provider: string | null
   /** The bot whose chat this is (it runs in the bot's home), or null. */
   bot: string | null
+  /** That bot's home folder, as `worktree ps` lists it; null for any other chat. */
+  botHome: string | null
   busy: boolean
   /** What the chat waits on the person for, as last told to the Inbox; null when nothing. */
   blocked: BlockedKind | null
@@ -165,6 +170,9 @@ export class Engine {
   private projects: string[] = []
   private repos: { byId: Map<string, string>; at: number } = { byId: new Map(), at: 0 }
   private faces: { sync: FaceSync; inbox: InboxClient; at: number } | null = null
+  /** Bots' own pictures, read from the Orca whose CLI the worker runs. */
+  private orcaCommand: string[] | null = null
+  private readonly avatars = new BotAvatars({ assetFolders: () => this.deps.assetFolders?.() ?? orcaAssetFolders(this.orcaCommand) })
   private pictures: { sync: PresentationSync; inbox: InboxClient; orca: OrcaCli; at: number } | null = null
   private inbox: InboxClient | null = null
   private orca: OrcaCli | null = null
@@ -327,6 +335,7 @@ export class Engine {
     const command = (this.deps.locateCli ?? locateOrcaCli)(settings.orcaCliPath, this.deps.env)
     if (command === null) return at('no-orca', 'The Orca CLI was not found. Set its path in this plugin’s settings.')
     const key = command.join('\0')
+    this.orcaCommand = command
     if (!this.orca || this.orcaKey !== key) {
       this.orca = new OrcaCli({ command, exec: this.deps.exec, env: this.deps.env, profile: this.deps.profile })
       this.orcaKey = key
@@ -392,18 +401,25 @@ export class Engine {
   }
 
   /**
-   * Once a minute, in the background: gives each Orca chat the icon of the agent it runs. Only the
-   * Orca build of Plannotator is asked, and a face a person chose is never replaced.
+   * Once a minute, in the background: gives each Orca chat the icon of the agent it runs, and a
+   * bot's chat the bot's own picture. Only the Orca build of Plannotator is asked, and a face a
+   * person chose is never replaced.
    */
   private syncFaces(): void {
     const inbox = this.inbox
     if (!inbox) return
-    if (!this.faces || this.faces.inbox !== inbox) this.faces = { sync: new FaceSync({ inbox, store: this.deps.store }), inbox, at: 0 }
+    if (!this.faces || this.faces.inbox !== inbox) this.faces = { sync: new FaceSync({ inbox, store: this.deps.store, avatars: this.avatars }), inbox, at: 0 }
     const faces = this.faces
     if (this.now() - faces.at < PICTURES_EVERY_MS) return
     faces.at = this.now()
     const launches = new Map((this.deps.owned?.() ?? []).map((owned) => [owned.session, owned.launchId]))
-    const chats = [...this.routes.values()].map((route) => ({ agent: launches.get(route.session) ?? route.raw, session: route.raw, provider: route.provider }))
+    // A bot's chat (one in the bot's own home, nothing nested under it) shows the bot's own picture.
+    const chats = [...this.routes.values()].map((route) => ({
+      agent: launches.get(route.session) ?? route.raw,
+      session: route.raw,
+      provider: route.provider,
+      bot: route.bot !== null && route.botHome !== null ? { name: route.bot, home: route.botHome } : null
+    }))
     void faces.sync
       .tick(chats)
       .then((report) => {
@@ -537,6 +553,7 @@ export class Engine {
         existing.title = chat.title
         existing.provider = chat.provider
         existing.bot = chat.bot
+        existing.botHome = chat.bot !== null ? chat.workspacePath : null
         existing.roots = candidate.roots
         existing.repoRoot = candidate.repoRoot
         if (existing.blocked !== blocked) {
@@ -558,6 +575,7 @@ export class Engine {
         title: chat.title,
         provider: chat.provider,
         bot: chat.bot,
+        botHome: chat.bot !== null ? chat.workspacePath : null,
         busy: chat.busy,
         blocked,
         blockedAt: this.now(),
