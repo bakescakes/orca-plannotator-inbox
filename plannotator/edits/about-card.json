@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "card",
+      "file": "packages/inbox/components/Updates.tsx",
+      "anchor": "function AboutPrivacy() {",
+      "after": [
+        "  return (<><OrcaConnection /><StockAboutPrivacy /></>);",
+        "}",
+        "import { OrcaConnection } from './OrcaConnection';",
+        "function StockAboutPrivacy() {"
+      ]
+    }
+  ]
+}

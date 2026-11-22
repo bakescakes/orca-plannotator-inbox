@@ -38,69 +38,124 @@
     "linux-arm64": "bun-linux-arm64",
     "win32-x64": "bun-windows-x64"
   },
-  "patches": [
+  "groups": [
     {
-      "name": "orca-host",
-      "file": "patches/orca-host.patch",
-      "sha256": "bad1e18b4c18a3573837a45501a89645c21761c2fcbaaead794f8ba5a9c5da8f",
+      "name": "orca-mode",
+      "file": "edits/orca-mode.json",
+      "sha256": "d496298fd3d1603b06b36f2e6206d18e7f3d283e9b8ca339e9cdd157dc6c48dd",
       "required": true,
+      "features": []
+    },
+    {
+      "name": "launch-hosts",
+      "file": "edits/launch-hosts.json",
+      "sha256": "210c8a70ec948a5e0d6cbd75d4ed85ba9fe3eb5bdb58eaea993e288cf028ce95",
+      "required": false,
       "features": [
         "launch-hosts"
       ]
     },
     {
-      "name": "interop-surface",
-      "file": "patches/interop-surface.patch",
-      "sha256": "46291d352d4112ac65accb2493258a23087bd0a8c2c892db3e97e476db98302c",
-      "required": true,
+      "name": "update-state",
+      "file": "edits/update-state.json",
+      "sha256": "2a73e592f09c3ec16302f42f96008541b369ddba5ccf40c698527e6bfc8cb980",
+      "required": false,
       "features": [
-        "update-state",
-        "update-detail",
+        "update-state"
+      ]
+    },
+    {
+      "name": "update-detail",
+      "file": "edits/update-detail.json",
+      "sha256": "4693be9b3dc446c78f74955c5f991498037cfb88bd75eefc00d73c045c902dbd",
+      "required": false,
+      "features": [
+        "update-detail"
+      ],
+      "needs": [
+        "update-state"
+      ]
+    },
+    {
+      "name": "agents",
+      "file": "edits/agents.json",
+      "sha256": "af08ea5551f1b8f8b921399842d71c23fabaa13f21d632c1d6ff755811f2f33b",
+      "required": false,
+      "features": [
         "agents"
       ]
     },
     {
-      "name": "agent-marks",
-      "file": "patches/agent-marks.patch",
-      "sha256": "503b9e83a17c2b22c7158c0d62b55395c23e92d0be9e8dececda268e9854a0ef",
+      "name": "mark-faces",
+      "file": "edits/mark-faces.json",
+      "sha256": "479678a8142d6db2ae450de92ec860151d505be14658f570043d33e39e36a269",
       "required": false,
       "features": [
         "mark-faces"
       ]
+    },
+    {
+      "name": "projects",
+      "file": "edits/projects.json",
+      "sha256": "3573c1734f00489188cd187ef2ccec16f77bbc0fa880ad44982d3802502534e6",
+      "required": false,
+      "features": []
+    },
+    {
+      "name": "about-card",
+      "file": "edits/about-card.json",
+      "sha256": "2aca25bd4a94abee6d31b35d458cdd452af1c13e58e86541fe7b9fa51032f022",
+      "required": false,
+      "features": []
     }
   ],
   "modules": [
     {
       "file": "modules/packages/inbox/components/OrcaConnection.tsx",
       "target": "packages/inbox/components/OrcaConnection.tsx",
-      "sha256": "0ad5192612a7636310d99cdca368f1dae0790a2092b1ed703eb4390c86823698"
+      "sha256": "0419a04232692fb0f478985749366870106b4c8a6fa1bf8292452aa1325ce779",
+      "group": "about-card"
+    },
+    {
+      "file": "modules/packages/inbox/orca-project-types.ts",
+      "target": "packages/inbox/orca-project-types.ts",
+      "sha256": "e741de55cf316589b0f7531bd4eab9855579da930016482dedb950c2a60469de",
+      "group": "projects"
+    },
+    {
+      "file": "modules/packages/inbox/orca-run-types.ts",
+      "target": "packages/inbox/orca-run-types.ts",
+      "sha256": "46b0cc39f92ec45599b725663fc5e3e4fb5c91bc3b07709c069ef60fb40e57d1",
+      "group": "launch-hosts"
     },
     {
       "file": "modules/packages/server/inbox-orca-agents.ts",
       "target": "packages/server/inbox-orca-agents.ts",
-      "sha256": "7c20cfd0c498b529f8f59b57f343d95d232b989704056336faf90600af4dbc60"
+      "sha256": "7c20cfd0c498b529f8f59b57f343d95d232b989704056336faf90600af4dbc60",
+      "group": "agents"
     },
     {
       "file": "modules/packages/server/inbox-orca-build.ts",
       "target": "packages/server/inbox-orca-build.ts",
-      "sha256": "ce3be1510773af8d0cd37bd7be1d665e986e24db7a6a4d2557189277910cc4c3",
+      "sha256": "5be4dcb8de2604279b4a20358794fc0b9f2afdc8574bd2cc1c2be7c9b0174b13",
       "generated": "build-info"
     },
     {
       "file": "modules/packages/server/inbox-orca-host.ts",
       "target": "packages/server/inbox-orca-host.ts",
-      "sha256": "ada75edd3164dfad8dde7f6896bef41a6c1d9761de2b4171e91a1d2bc6574e20"
+      "sha256": "ada75edd3164dfad8dde7f6896bef41a6c1d9761de2b4171e91a1d2bc6574e20",
+      "group": "launch-hosts"
     },
     {
       "file": "modules/packages/server/inbox-orca-surface.ts",
       "target": "packages/server/inbox-orca-surface.ts",
-      "sha256": "302a05e46ef22861247f6cc6f5080e6d8eb4ae27b0d28575a8cc294f347e6ecb"
+      "sha256": "7b2cd34339f9c1cfe12b4bf2ec081efb085cdcfc3a984cae24f01a39183aec4a"
     },
     {
       "file": "modules/packages/ui/components/inbox-thread/orca-marks.tsx",
       "target": "packages/ui/components/inbox-thread/orca-marks.tsx",
       "sha256": "afa59ae6b3f92875f5d429b803f1d61bc9394b1558d923302edcaeffe003d518",
-      "patch": "agent-marks"
+      "group": "mark-faces"
     }
   ],
   "gates": [
@@ -116,7 +171,7 @@
     {
       "file": "tests/orca-contract-proof.ts",
       "target": "tests/orca-contract-proof.ts",
-      "sha256": "e481d9ba68a58c678d15b95801636062b0dc97569d986a3e3096cd29bc61c1ba",
+      "sha256": "0b7589a95c5ce3ab16afee1075a9b55b54d2b3bb8901186d77056d99ec04871d",
       "run": [
         "{bun}",
         "tests/orca-contract-proof.ts"
@@ -125,7 +180,7 @@
     {
       "file": "tests/orca-build-proof.ts",
       "target": "tests/orca-build-proof.ts",
-      "sha256": "c7172d6685a3d5a16bc1cb28c21ef3149c27efa23c077d8afb1d6ec23420a8a1",
+      "sha256": "6fae1ae7bf6f9bdba48e6f8be64a3618c0d89dd8d720ea7bb1304fe5a6333336",
       "run": [
         "{bun}",
         "tests/orca-build-proof.ts"
@@ -135,6 +190,7 @@
       "file": "tests/orca-agents-proof.ts",
       "target": "tests/orca-agents-proof.ts",
       "sha256": "1812c9571644bee4f5770499878833c5911dcf6b71e96f701329ddf9df358b57",
+      "group": "agents",
       "run": [
         "{bun}",
         "tests/orca-agents-proof.ts"
@@ -144,7 +200,7 @@
       "file": "tests/orca-marks-proof.ts",
       "target": "tests/orca-marks-proof.ts",
       "sha256": "b4362a67454e24180fa82f78bd5ce9944c8fcc7e660e2c366d512ba24445117b",
-      "patch": "agent-marks",
+      "group": "mark-faces",
       "run": [
         "{bun}",
         "tests/orca-marks-proof.ts"

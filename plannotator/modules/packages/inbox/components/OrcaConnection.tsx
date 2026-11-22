@@ -2,27 +2,10 @@
  * The Orca build of Plannotator: Settings → About's Orca card. It reads only the server's aggregate
  * GET /api/inbox/orca; no token, session id or native command reaches the page. Outside Orca mode that route
  * answers 404 and the card draws nothing.
- *
- * The type augmentations name the optional wire fields the Orca build's patches read in the window, so those
- * patches never edit upstream's shared interfaces.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../icons';
 import { inboxUrl } from '../inboxUrl';
-
-declare module '@plannotator/core/inbox-types' {
-  interface InboxRun {
-    /** Optional native host Open destination (the launch host's `routeHost`); absent means Terminal. */
-    open_in?: string;
-  }
-}
-
-declare module '../api' {
-  interface ProjectFolder {
-    /** A project of the Orca plugin's catalog, shown even before its first message. */
-    orca_imported?: true;
-  }
-}
 
 interface OrcaState {
   mode: string;

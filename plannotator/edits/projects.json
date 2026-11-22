@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "shown-in-list",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const projectFolders = (rows",
+      "has": ["=> {"],
+      "replace": [
+        ["const projectFolders = ", "const stockProjectFolders = "]
+      ],
+      "before": [
+        "orcaSurface.hook({ onChange: () => { for (const listener of deliveryListeners) listener(false, true, false, true); } });",
+        "const projectFolders = (rows?: readonly InboxListRow[]) => orcaSurface.markImported(stockProjectFolders(rows));"
+      ]
+    },
+    {
+      "id": "shown-in-menu",
+      "file": "packages/inbox/projectMenu.ts",
+      "anchor": "projects.filter((project) => project.listed === undefined",
+      "replace": [
+        ["project.listed === undefined", "project.orca_imported === true || project.listed === undefined"]
+      ]
+    }
+  ]
+}

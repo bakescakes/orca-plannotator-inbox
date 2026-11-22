@@ -169,6 +169,11 @@ export interface OrcaSurfaceHooks {
   pollMs?: number;
 }
 
+/**
+ * Each group of the Orca build's edits gives the surface its own hooks (`hook`), so a build that leaves a group out
+ * creates the surface without them: without `updates`, upstream's update control stays stock.
+ */
+
 export function createOrcaSurface(dataDir: string, store: Pick<InboxStore, "ensureProject">, version: string, hooks: OrcaSurfaceHooks = {}) {
   const now = () => (hooks.now ? hooks.now() : Date.now());
   const enabled = orcaMode;
@@ -507,23 +512,34 @@ export function createOrcaSurface(dataDir: string, store: Pick<InboxStore, "ensu
     return null;
   };
 
+  // Upstream's update control, taken over once, in Orca mode only.
+  let tookOver = false;
+  const takeUpdates = () => {
+    const updates = hooks.updates;
+    if (!enabled() || !updates || tookOver) return;
+    tookOver = true;
+    takeOver(updates);
+    seen = JSON.stringify([updates.current(), upgradeState()]);
+    const poll = setInterval(pollNow, hooks.pollMs ?? 3000);
+    (poll as { unref?: () => void }).unref?.();
+    // Automatic updates follow upstream's own preferences, coalesce and back off (autoUpgrade).
+    const autoOn = hooks.autoOn ?? (() => false);
+    const timer = setInterval(() => {
+      try {
+        void autoUpgrade(updates.knownLatest(), autoOn()).catch(() => {});
+      } catch {}
+    }, hooks.tickMs ?? 60000);
+    (timer as { unref?: () => void }).unref?.();
+  };
+  /** More hooks once the surface exists: what one group of the build's edits adds. `updates` is taken over at once. */
+  const hook = (more: OrcaSurfaceHooks) => {
+    Object.assign(hooks, more);
+    takeUpdates();
+  };
+
   if (enabled()) {
     void sync().catch(() => {});
-    const updates = hooks.updates;
-    if (updates) {
-      takeOver(updates);
-      seen = JSON.stringify([updates.current(), upgradeState()]);
-      const poll = setInterval(pollNow, hooks.pollMs ?? 3000);
-      (poll as { unref?: () => void }).unref?.();
-      // Automatic updates follow upstream's own preferences, coalesce and back off (autoUpgrade).
-      const autoOn = hooks.autoOn ?? (() => false);
-      const timer = setInterval(() => {
-        try {
-          void autoUpgrade(updates.knownLatest(), autoOn()).catch(() => {});
-        } catch {}
-      }, hooks.tickMs ?? 60000);
-      (timer as { unref?: () => void }).unref?.();
-    }
+    takeUpdates();
   }
-  return { enabled, health, sync, upgrade, autoUpgrade, upgradeConfigured, upgradeState, imported: isImported, markImported, route, pollNow };
+  return { enabled, health, sync, upgrade, autoUpgrade, upgradeConfigured, upgradeState, imported: isImported, markImported, route, pollNow, hook };
 }

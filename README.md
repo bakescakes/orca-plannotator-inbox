@@ -260,11 +260,12 @@ a checksum for each file.
   for a new build** in the panel, and a newer build of the release is taken at once.
 - **Never back.** The plugin does not move you to an older release. If the Plannotator installed
   here is older than the Orca build in use, the build stays.
-- **Reduced builds.** When a Plannotator release breaks some of the Orca changes, CI may publish a
-  build that leaves those out. Its `manifest.json` lists what it serves (`features`) and what it
-  leaves out (`omitted`); manifests without these lists are full builds. The panel says in one line
-  what a reduced build lacks, such as per-agent icons, or starting and stopping chats from the
-  Inbox. While one is in use, the worker looks every 15 minutes, and installs the full build of the
+- **Reduced builds.** The Orca changes come in groups, one per feature. When a Plannotator
+  release breaks one group, CI publishes a build without that group, and only its feature is
+  missing: the rest of the build works as usual. Its `manifest.json` lists what it serves
+  (`features`) and the groups it leaves out (`omitted`); manifests without these lists are full
+  builds. The panel says in one line what a reduced build lacks, such as per-agent icons, or
+  starting and stopping chats from the Inbox. While one is in use, the worker looks every 15 minutes, and installs the full build of the
   same version (`orca.2` after `orca.1`) as soon as it is published.
 - **Start, Stop, Resume, Open.** The Orca build calls a listener the worker runs on `127.0.0.1`,
   with a key kept in `~/.orca-plannotator-inbox/bridge/`. A launch is recorded before Orca is
@@ -360,9 +361,14 @@ mark. Bringing one exact chat tab forward uses a call Orca does not
   publish; when an Orca update changes it, the link opens the chat's workspace instead. The worker runs the CLI that
   ships inside the same Orca, so the two are always the same version.
 - **The Orca build** follows Plannotator's releases by itself (see above). Its changes are kept as
-  a few small patches and whole added files, and CI applies them to each new Plannotator release;
-  when a release no longer takes them, CI fails, no build is published, and the plugin keeps the
-  build it has.
+  small edits, each found by the text of the line it changes rather than by line number, plus
+  whole added files, and CI applies them to each new Plannotator release. An edit whose line has
+  moved or been reindented still fits; one whose line is gone or now means something else is
+  refused, never guessed. A refused edit leaves out only its own group and feature (a reduced
+  build, above). Only the core group, which turns on Orca mode and the MCP command, stops the
+  build: then no build is published and the plugin keeps the one it has. A daily CI check tries the
+  edits on Plannotator's unreleased `main` and opens an issue when one no longer fits, so it can
+  be refitted before the release (`plannotator/README.md`).
 - **The launcher** lives in `~/.orca-plannotator-inbox`, not in the plugin's folder, because Orca
   replaces that folder on every plugin update. It is rewritten each time Orca starts, so agent
   settings never point at a stale path.
@@ -484,7 +490,10 @@ npm run typecheck
 orca plugin validate . --json
 orca plugin test .          # unit tests, with a stand-in Orca CLI and Inbox
 orca plugin check . --json  # renders the panel in each scenario of src/panel.check.ts
+node plannotator/build.mjs --fit <plannotator checkout>  # which Orca edits fit that checkout
 ```
+
+Building the Orca build itself is described in `plannotator/README.md`.
 
 Against the real programs:
 

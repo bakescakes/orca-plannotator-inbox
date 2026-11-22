@@ -1,0 +1,69 @@
+{
+  "v": 1,
+  "edits": [
+    {
+      "id": "orca-host-name",
+      "file": "packages/core/inbox-types.ts",
+      "anchor": ["export const INBOX_HOST_NAMES", "hermes:"],
+      "after": ["orca: \"Orca\","]
+    },
+    {
+      "id": "mark-face-pattern",
+      "file": "packages/core/inbox-types.ts",
+      "anchor": "export const isInboxAgentFace = (",
+      "before": [
+        "/**",
+        " * Another host's own mark (`mark:<host>`): an agent that runs through a host of its own (an Orca chat, host `orca`)",
+        " * drawn as the agent it runs, with that agent's animated mark where one exists. A host with no mark draws the neutral one.",
+        " */",
+        "export const INBOX_MARK_FACE = /^mark:([a-z0-9][a-z0-9-]{0,39})$/;"
+      ]
+    },
+    {
+      "id": "mark-face-accepted",
+      "file": "packages/core/inbox-types.ts",
+      "anchor": ["export const isInboxAgentFace = (", "INBOX_SET_FACE.test(value)"],
+      "replace": [
+        ["INBOX_SET_FACE.test(value)", "INBOX_SET_FACE.test(value) || INBOX_MARK_FACE.test(value)"]
+      ]
+    },
+    {
+      "id": "mark-host",
+      "file": "packages/inbox/agents/AgentMark.tsx",
+      "anchor": "const kept = useAgentFace(id);",
+      "replace": [
+        ["useAgentFace(id);", "useAgentFace(id), markHost = (kept as string).startsWith('mark:') ? (kept as string).slice(5) : null;"]
+      ],
+      "after": [
+        "// A `mark:<host>` face is that host's own mark and rig, not a face over this one, and never the project's tile.",
+        "if (markHost) host = markHost;"
+      ]
+    },
+    {
+      "id": "mark-not-tile",
+      "file": "packages/inbox/agents/AgentMark.tsx",
+      "anchor": "const face = shownAgentFace(",
+      "replace": [
+        ["const face = shownAgentFace(", "const face: AgentFace = markHost ? 'agent' : shownAgentFace("]
+      ]
+    },
+    {
+      "id": "face-of-mark",
+      "file": "packages/inbox/icons.tsx",
+      "anchor": "export function FaceOfMark(",
+      "has": ["children"],
+      "after": ["  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big}>{children}</UiHostMark>;"]
+    },
+    {
+      "id": "extra-marks",
+      "file": "packages/ui/components/inbox-thread/icons.tsx",
+      "anchor": "function ownMark(",
+      "after": [
+        "  return stockOwnMark(host) ?? orcaExtraMark(host);",
+        "}",
+        "import { orcaExtraMark } from './orca-marks';",
+        "function stockOwnMark(host: string | null | undefined): React.ReactNode | null {"
+      ]
+    }
+  ]
+}

@@ -9,10 +9,13 @@
  * the launch hosts' bridge request shapes; a Stop Orca refuses reaching the run line as an error, not as stopped;
  * and a `mark:<host>` face drawing that host's mark.
  *
- * A reduced build: the build writes what it carries into packages/server/inbox-orca-build.ts. The card must serve
- * exactly that list, the required patches' features must be in it, and a feature left out must be absent, the source
- * as stock has it: without `mark-faces`, a `mark:<host>` face is refused in both modes as stock refuses it, and the
- * Orca marks file, the `orca` host name and the mark-face pattern are not in the source.
+ * A reduced build: the build writes what it carries into packages/server/inbox-orca-build.ts (its features, and the
+ * optional groups of edits it left out). The card must serve exactly that list, each group named for a feature must
+ * be in the build exactly when its feature is listed, and a group left out must leave the source as stock has it
+ * where it would change it: without `mark-faces`, a `mark:<host>` face is refused in both modes as stock refuses it,
+ * and the Orca marks file, the `orca` host name and the mark-face pattern are not in the source; without
+ * `launch-hosts`, `update-state`, `update-detail`, `agents`, `projects` or `about-card`, their files and the lines
+ * they would change are not there, and the behaviour they would change is stock's.
  */
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,9 +102,21 @@ globalThis.fetch = ((input: any, init: any) => {
 
 const { ORCA_BUILD } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-build.ts")).href);
 const features: string[] = [...ORCA_BUILD.features];
-for (const required of ["launch-hosts", "update-state", "update-detail", "agents"]) check(features.includes(required), "the build lacks required feature " + required);
-const marksOn = features.includes("mark-faces");
-check(marksOn === !ORCA_BUILD.omitted.includes("agent-marks"), "mark-faces and the agent-marks patch disagree: " + JSON.stringify(ORCA_BUILD));
+const omitted: string[] = [...ORCA_BUILD.omitted];
+// The optional groups of the build's edits; those named for a feature carry exactly that feature.
+const FEATURE_GROUPS = ["launch-hosts", "update-state", "update-detail", "agents", "mark-faces"];
+const OPTIONAL = [...FEATURE_GROUPS, "projects", "about-card"];
+for (const name of omitted) check(OPTIONAL.includes(name), "the build left out an unknown group: " + name);
+check(features.every((f) => FEATURE_GROUPS.includes(f)) && new Set(features).size === features.length, "the build lists unknown or repeated features: " + JSON.stringify(features));
+const on = (group: string) => !omitted.includes(group);
+for (const group of FEATURE_GROUPS) check(features.includes(group) === on(group), `feature ${group} and its group disagree: ` + JSON.stringify(ORCA_BUILD));
+check(on("update-state") || !on("update-detail"), "update-detail is in a build without update-state");
+const marksOn = on("mark-faces"), hostsOn = on("launch-hosts"), updatesOn = on("update-state"), detailOn = on("update-detail");
+const agentsOn = on("agents"), projectsOn = on("projects"), cardOn = on("about-card");
+const source = (path: string) => (existsSync(join(cwd, path)) ? readFileSync(join(cwd, path), "utf8") : "");
+const stockWithout = (what: string, path: string, ...marks: string[]) => {
+  for (const mark of marks) check(!source(path).includes(mark), `${path} has ${JSON.stringify(mark)} in a build without ${what}`);
+};
 const { startInboxServer } = await import(pathToFileURL(join(cwd, "packages/server/inbox.ts")).href);
 const { ORCA_UPDATER_LABEL } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-surface.ts")).href);
 const inert = async () => ({ ok: false, error: "inert proof" });
@@ -176,18 +191,36 @@ try {
 
   const settings = await getJson(base, "/api/inbox/settings?store=0");
   check(JSON.stringify(settings.mcp_command) === JSON.stringify(mcpCommand), "the plugin's MCP command was not used");
-  const list = await until(() => getJson(base, "/api/inbox/threads"), (v: any) => (v.projects ?? []).some((p: any) => p.orca_imported), "the empty catalog project was not imported");
-  const imported = list.projects.filter((p: any) => p.orca_imported);
+  // The catalog's projects are imported in every build; the `projects` group marks them for the window's list.
+  const list = await until(() => getJson(base, "/api/inbox/threads"), (v: any) => (v.projects ?? []).some((p: any) => (projectsOn ? p.orca_imported : p.root === project)), "the empty catalog project was not imported");
+  const imported = list.projects.filter((p: any) => (projectsOn ? p.orca_imported : p.root === project));
   check(imported.length === 1 && imported[0].threads === 0 && imported[0].listed === 0, "import invented Inbox activity");
-  const card = await getJson(base, "/api/inbox/orca");
+  if (!projectsOn) {
+    check(!list.projects.some((p: any) => p.orca_imported), "a build without projects marked a project");
+    stockWithout("projects", "packages/inbox/projectMenu.ts", "orca_imported");
+    stockWithout("projects", "packages/server/inbox.ts", "markImported");
+    check(!existsSync(join(cwd, "packages/inbox/orca-project-types.ts")), "the project types are in a build without projects");
+  }
+  const card = await until(() => getJson(base, "/api/inbox/orca"), (v: any) => v.projects?.imported === 1, "connection card does not count the imported project");
   check(card.mode === "orca" && card.connected === true && card.projects.imported === 1, "connection card aggregate wrong");
   check(JSON.stringify(card.features) === JSON.stringify(features), "the card's features are not the build's: " + JSON.stringify(card.features));
   check(card.upgrade.configured === true && card.upgrade.state === null, "updater not configured or a state invented");
   check((await fetch(base + "/api/inbox/orca", { method: "POST", headers: same, body: "{}" })).status === 405, "the card route took a POST");
 
   // The updater's state file reaches the stock update model: the sidebar button, the update and failure dialogs.
+  // Without update-detail the window's failure dialog keeps its stock sentence; the server's fields are update-state's.
+  if (detailOn) check(source("packages/inbox/components/Updates.tsx").includes("(details?.failure as { detail?: unknown }"), "update-detail did not reach the failure dialog");
+  else stockWithout("update-detail", "packages/inbox/components/Updates.tsx", "(details?.failure as { detail?: unknown }", "!detail &&");
   const now = () => Date.now() / 1000;
   const put = (value: unknown) => writeFileSync(stateFile, JSON.stringify(value), { mode: 0o600 });
+  if (!updatesOn) {
+    put({ phase: "building", version: "0.28.67", at: now(), detail: "Preparing the Orca build." });
+    const plain = await getJson(base, "/api/inbox/update");
+    check(plain.command !== ORCA_UPDATER_LABEL && plain.failure === null && plain.update?.state !== "updating", "a build without update-state took over the update model");
+    stockWithout("update-state", "packages/server/auto-update.ts", "orcaMode");
+    stockWithout("update-state", "packages/server/inbox.ts", "orcaSurface.hook({ updates");
+    result.update = "stock (left out)";
+  } else {
   put({ phase: "building", version: "0.28.67", at: now(), detail: "Preparing the Orca build." });
   let details = await getJson(base, "/api/inbox/update");
   check(details.update?.state === "updating" && details.update.version === "0.28.67" && details.update.action === "script", "in-progress phase is not shown as updating");
@@ -234,6 +267,8 @@ try {
   check(after.update.state === "failed", "the updater's failure is not shown as failed");
   check(JSON.stringify(JSON.parse(readFileSync(updaterArgs, "utf8"))) === JSON.stringify(["--version", "0.28.67"]), "the updater did not get --version");
   check(existsSync(join(state, "update-attempt.json")), "Update now kept no attempt record");
+  result.update = ["updating", "failed+detail", "rolled-back", "ready", "update-now"];
+  }
 
   // A mark: face set through the API is kept and returned in Orca mode too (refused, as stock, without mark-faces).
   if (marksOn) {
@@ -245,6 +280,13 @@ try {
   }
 
   // The launch hosts: every Orca chat agent, and the bridge request shapes of Start, Stop, Resume and Open.
+  if (!hostsOn) {
+    check(!existsSync(join(cwd, "packages/server/inbox-orca-host.ts")) && !existsSync(join(cwd, "packages/inbox/orca-run-types.ts")), "the launch host files are in a build without launch-hosts");
+    stockWithout("launch-hosts", "packages/server/inbox-launch.ts", "routeHost", "open_in");
+    stockWithout("launch-hosts", "packages/server/inbox.ts", "createOrcaLaunchHosts");
+    stockWithout("launch-hosts", "packages/inbox/components/RunLine.tsx", "open_in", "Open in Orca");
+    result.hosts = "left out (stock)";
+  } else {
   const { createOrcaLaunchHosts } = await import(pathToFileURL(join(cwd, "packages/server/inbox-orca-host.ts")).href);
   const hosts = createOrcaLaunchHosts({ dataDir: data, bridge: { runStateOf: () => null } });
   check(JSON.stringify(hosts.map((h: any) => h.agent).sort()) === JSON.stringify(["claude-code", "codex", "opencode", "pi"]), "launch hosts changed");
@@ -280,7 +322,18 @@ try {
   const accepted = await post("/api/inbox/launch/" + sent.launch.id + "/stop", { serverSession });
   // (No connection polls for this fixture's chat, so its run line is not read here; the real Orca test reads it.)
   check(accepted.status === 200 && actions.filter((a) => a.path === "stop").length === 3, "a Stop Orca accepted was not answered as done: " + accepted.status);
-  result.orca = { mcpCommand: "plugin's", imported: imported.length, features: card.features, update: ["updating", "failed+detail", "rolled-back", "ready", "update-now"], hosts: hosts.map((h: any) => h.agent), actions: actions.map((a) => a.path), refusedStop: "error" };
+  result.hosts = { hosts: hosts.map((h: any) => h.agent), actions: actions.map((a) => a.path), refusedStop: "error" };
+  }
+  // The agents route (orca-agents-proof.ts proves it) and the About card: their files and lines, or none.
+  if (!agentsOn) {
+    check(!existsSync(join(cwd, "packages/server/inbox-orca-agents.ts")), "the agents route file is in a build without agents");
+    stockWithout("agents", "packages/server/inbox.ts", "orcaAgentsRoute", "/api/inbox/control/orca-agents");
+  } else check(source("packages/server/inbox.ts").includes("orcaAgentsRoute(req"), "the agents route is not reached");
+  if (!cardOn) {
+    check(!existsSync(join(cwd, "packages/inbox/components/OrcaConnection.tsx")), "the About card file is in a build without about-card");
+    stockWithout("about-card", "packages/inbox/components/Updates.tsx", "OrcaConnection", "StockAboutPrivacy");
+  } else check(source("packages/inbox/components/Updates.tsx").includes("<OrcaConnection />"), "the About card is not drawn");
+  result.orca = { mcpCommand: "plugin's", imported: imported.length, features: card.features, omitted };
 
   // Without mark-faces, the source is stock's where that patch would change it.
   if (!marksOn) {
