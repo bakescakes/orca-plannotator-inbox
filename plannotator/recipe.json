@@ -2,9 +2,9 @@
   "v": 1,
   "plannotator": {
     "repo": "https://github.com/backnotprop/plannotator.git",
-    "version": "0.29.1",
-    "tag": "v0.29.1",
-    "commit": "e44c3b93590f97bf4365915ddbbfff487c11c6ec"
+    "version": "0.29.2",
+    "tag": "v0.29.2",
+    "commit": "0fe6ba9235e600d6aad4f66cd7236eca2e79ec57"
   },
   "bun": {
     "version": "1.4.4",
@@ -42,7 +42,7 @@
     {
       "name": "orca-host",
       "file": "patches/orca-host.patch",
-      "sha256": "0e35816e6c48c831604b2a9bf12536aa516711e769ec197fcb8d6099686531ad",
+      "sha256": "bad1e18b4c18a3573837a45501a89645c21761c2fcbaaead794f8ba5a9c5da8f",
       "required": true,
       "features": [
         "launch-hosts"
@@ -107,7 +107,7 @@
     {
       "file": "tests/orca-mcp-contract.ts",
       "target": "tests/orca-mcp-contract.ts",
-      "sha256": "16380dbf17cc5c1b2a1016a535ebe78bc0d77f8d4d4c2e46a90822e94919f35b",
+      "sha256": "c25897da544f7418d506d530c901c8c1a5292731bd53c0e52d47a6ba54fd5c1e",
       "run": [
         "{bun}",
         "tests/orca-mcp-contract.ts"
