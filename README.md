@@ -134,7 +134,11 @@ shows within about a minute and a renamed bot keeps its own. A chat that stops b
 bot was removed while the chat stayed open) goes back to its agent's mark. Orca's CLI does not name
 a bot's picture, so the worker reads `bot.json` in the bot's home (Orca rewrites it on every change,
 and it must name the bot Orca lists there), and for an uploaded picture `avatar.png` beside it. It
-opens no other file of the home, and none through a link. It gives the picture to the Inbox the way
+opens no other file of the home, and none through a link: the home must be a real folder, not a
+link (nor a junction on Windows), whose real place is still directly in a folder named `bots`, and
+each file a real file directly in it. Links above that are yours and are followed (your home or
+Orca's data folder kept on another disk, macOS's `/var` and `/tmp`), including a `bots` folder linked
+to another folder named `bots`; a bot's home linked out to anywhere else gives no picture. It gives the picture to the Inbox the way
 "Your own…" in the face picker does (`POST /api/inbox/agent-icons`) and sets the chat's face to it
 (`own:<sha256>`). As with agent marks, a face you chose for the chat yourself is never replaced, and
 standard Plannotator is sent nothing. Choosing **Agent** in the picker counts as your choice too: a

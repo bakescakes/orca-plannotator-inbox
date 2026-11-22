@@ -5,7 +5,12 @@
 // Where it is read: neither Orca's CLI (`bot list`, `worktree ps`) nor the plugin host names a bot's
 // picture. Orca writes it, with the bot's id and name, to `bot.json` in the bot's home whenever it
 // changes, so that file is read, and an uploaded picture's `avatar.png` beside it. No other file
-// of the home is ever opened. The forms, as Orca reads them (`parseBotAvatar`):
+// of the home is ever opened, and nothing through a link: the home must be a real folder (not a
+// link, nor a junction on Windows) whose real place is still directly in a folder named `bots`, as
+// Orca names it (`~/.orca/bots`, or `bots` in Orca's data folder), and each file must be a real file
+// directly in it. Links above the home are the person's own (a home or data folder kept elsewhere,
+// macOS's /var and /tmp) and are followed; so is a `bots` folder linked to another folder named
+// `bots`. A home linked out to anywhere else is refused. The forms, as Orca reads them (`parseBotAvatar`):
 //
 //   mascot:<id>   one of the mascots that ship with Orca: its SVG, read from the installed app
 //   upload:<v>    a square PNG the person gave the bot: averaged down to 128 px
@@ -17,7 +22,7 @@
 // its agent's ordinary mark.
 import { createHash } from 'node:crypto'
 import { constants, realpathSync } from 'node:fs'
-import { lstat, open, readdir } from 'node:fs/promises'
+import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, posix, sep, win32, type PlatformPath } from 'node:path'
 import { isPng, shrinkPng } from './png'
 import { escapeXml, MAX_PICTURE_BYTES, picture, svgIsSafe, type Picture, type PictureResult } from './presentation'
@@ -122,7 +127,9 @@ export async function readPlainFile(
   max: number,
   hit?: (size: number, mtimeMs: number) => boolean,
   /** For tests: runs between looking at the file and opening it. */
-  beforeOpen?: () => Promise<void>
+  beforeOpen?: () => Promise<void>,
+  /** The folder `path` is directly in: still that very folder, not a link, once the file is open. */
+  folder?: Folder
 ): Promise<Read | { ok: true; cached: true }> {
   let seen
   try {
@@ -141,6 +148,7 @@ export async function readPlainFile(
   try {
     const opened = await handle.stat({ bigint: true })
     if (!opened.isFile() || opened.dev !== seen.dev || opened.ino !== seen.ino) return { ok: false, reason: 'not-a-file' }
+    if (folder && !(await stillFolder(folder))) return { ok: false, reason: 'not-a-file' }
     const stat = { size: Number(opened.size), mtimeMs: Number(opened.mtimeMs) }
     if (stat.size > max) return { ok: false, reason: 'too-big' }
     if (hit?.(stat.size, stat.mtimeMs)) return { ok: true, cached: true }
@@ -152,6 +160,43 @@ export async function readPlainFile(
   }
 }
 
+/** A folder as it was found: its real path and identity. */
+type Folder = { real: string; dev: bigint; ino: bigint }
+
+/**
+ * A bot's home as it really is, or null when it is not one: a folder that is not itself a link (a
+ * Windows junction looks like a link here too), whose real path is still directly in a folder named
+ * `bots`, and the same folder there as at the path given.
+ */
+async function botHome(home: string): Promise<Folder | 'missing' | null> {
+  if (!isAbsolute(home) || basename(dirname(home)) !== 'bots') return null
+  let seen
+  try {
+    seen = await lstat(home, { bigint: true })
+  } catch {
+    return 'missing'
+  }
+  if (!seen.isDirectory()) return null
+  const real = await realpath(home)
+  if (basename(dirname(real)) !== 'bots') return null
+  const there = await stat(real, { bigint: true })
+  return there.isDirectory() && there.dev === seen.dev && there.ino === seen.ino ? { real, dev: seen.dev, ino: seen.ino } : null
+}
+
+/**
+ * Whether a folder found earlier is still that folder at that real path, with no link swapped in on
+ * the way. Node cannot open a file relative to an open folder, so a folder swapped out and back again
+ * between the two looks is beyond this; a swap that stays is refused.
+ */
+async function stillFolder(folder: Folder): Promise<boolean> {
+  try {
+    const now = await lstat(folder.real, { bigint: true })
+    return now.isDirectory() && now.dev === folder.dev && now.ino === folder.ino && (await realpath(folder.real)) === folder.real
+  } catch {
+    return false
+  }
+}
+
 /** The same spacing rule `worktree ps` names are read with (`homeBot`). */
 function botName(value: string): string {
   return value.replace(/\s+/g, ' ').trim().slice(0, 120)
@@ -160,7 +205,13 @@ function botName(value: string): string {
 export class BotAvatars {
   private readonly cache = new Map<string, PictureResult>()
 
-  constructor(private readonly deps: { assetFolders: () => readonly string[] }) {}
+  constructor(
+    private readonly deps: {
+      assetFolders: () => readonly string[]
+      /** For tests: runs once the bot's home has been checked, before any of its files is looked at. */
+      beforeRead?: () => Promise<void>
+    }
+  ) {}
 
   /** The bot's picture as Orca shows it now, or why there is none. Never throws. */
   async picture(bot: BotRef): Promise<PictureResult> {
@@ -182,10 +233,12 @@ export class BotAvatars {
   }
 
   private async read(bot: BotRef): Promise<PictureResult> {
-    const { home } = bot
     // A bot's home is a folder of Orca's bots folder (`.../bots/<folder>`); nothing else is opened.
-    if (!isAbsolute(home) || basename(dirname(home)) !== 'bots') return { ok: false, reason: 'not-a-bot-home' }
-    const file = await readPlainFile(join(home, 'bot.json'), MAX_BOT_FILE)
+    const home = await botHome(bot.home)
+    if (home === 'missing') return { ok: false, reason: 'bot-file-missing' }
+    if (home === null) return { ok: false, reason: 'not-a-bot-home' }
+    await this.deps.beforeRead?.()
+    const file = await readPlainFile(join(home.real, 'bot.json'), MAX_BOT_FILE, undefined, undefined, home)
     if (!file.ok) return { ok: false, reason: `bot-file-${file.reason}` }
     if (!('bytes' in file)) return { ok: false, reason: 'unreadable' }
     let saved: unknown
@@ -241,13 +294,19 @@ export class BotAvatars {
     return { ok: false, reason: 'no-mascots' }
   }
 
-  private async upload(home: string, version: string): Promise<PictureResult> {
-    const path = join(home, 'avatar.png')
+  private async upload(home: Folder, version: string): Promise<PictureResult> {
+    const path = join(home.real, 'avatar.png')
     let key = ''
-    const file = await readPlainFile(path, MAX_UPLOAD, (size, mtimeMs) => {
-      key = `upload:${path}:${version}:${size}:${mtimeMs}`
-      return this.cache.has(key)
-    })
+    const file = await readPlainFile(
+      path,
+      MAX_UPLOAD,
+      (size, mtimeMs) => {
+        key = `upload:${path}:${version}:${size}:${mtimeMs}`
+        return this.cache.has(key)
+      },
+      undefined,
+      home
+    )
     if (!file.ok) return { ok: false, reason: `upload-${file.reason}` }
     if (!('bytes' in file)) return this.remember(key, this.cache.get(key)!)
     if (!isPng(file.bytes)) return this.remember(key, { ok: false, reason: 'upload-not-png' })

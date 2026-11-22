@@ -93,6 +93,77 @@ test('a bot file reached through a link is not read', async (t) => {
   assert.deepEqual(await s.avatars.picture({ name: 'Ferry', home }), { ok: false, reason: 'bot-file-not-a-file' })
 })
 
+/** A link to a folder (a junction on Windows, which needs no special right there); false when this account cannot make one. */
+async function folderLink(target: string, path: string): Promise<boolean> {
+  try {
+    await symlink(target, path, 'junction')
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return false
+    throw error
+  }
+}
+
+/** A folder outside every bots folder holding a bot file that names `name`. */
+async function outside(root: string, folder: string, name: string): Promise<string> {
+  const path = join(root, folder)
+  await mkdir(path, { recursive: true })
+  await writeFile(join(path, 'bot.json'), JSON.stringify({ name, avatar: 'mascot:W4' }))
+  return path
+}
+
+test('a bot’s home that is itself a link is not read, wherever it leads', async (t) => {
+  const s = await setup()
+  await mkdir(join(s.root, 'bots'), { recursive: true })
+  const away = await outside(s.root, 'away', 'Ferry')
+  if (!(await folderLink(away, join(s.root, 'bots', 'ferry')))) return t.skip('this account cannot make links')
+  assert.deepEqual(await s.avatars.picture({ name: 'Ferry', home: join(s.root, 'bots', 'ferry') }), { ok: false, reason: 'not-a-bot-home' })
+  // Not even to another bot's home.
+  const tug = await s.bot('tug', { name: 'Tug', avatar: 'mascot:Q7' })
+  assert.ok(await folderLink(tug.home, join(s.root, 'bots', 'tug-again')))
+  assert.deepEqual(await s.avatars.picture({ name: 'Tug', home: join(s.root, 'bots', 'tug-again') }), { ok: false, reason: 'not-a-bot-home' })
+})
+
+test('a bots folder kept elsewhere through a link is read only when it is still a bots folder there', async (t) => {
+  const s = await setup()
+  const moved = join(s.root, 'moved', 'bots', 'ferry')
+  await mkdir(moved, { recursive: true })
+  await writeFile(join(moved, 'bot.json'), JSON.stringify({ name: 'Ferry', avatar: 'mascot:Q7' }))
+  await mkdir(join(s.root, 'kept'), { recursive: true })
+  if (!(await folderLink(join(s.root, 'moved', 'bots'), join(s.root, 'kept', 'bots')))) return t.skip('this account cannot make links')
+  assert.ok((await s.avatars.picture({ name: 'Ferry', home: join(s.root, 'kept', 'bots', 'ferry') })).ok)
+  // `bots` linked to a folder of another name: what it holds is not a bot's home.
+  await outside(join(s.root, 'stash'), 'ferry', 'Ferry')
+  await mkdir(join(s.root, 'odd'), { recursive: true })
+  assert.ok(await folderLink(join(s.root, 'stash'), join(s.root, 'odd', 'bots')))
+  assert.deepEqual(await s.avatars.picture({ name: 'Ferry', home: join(s.root, 'odd', 'bots', 'ferry') }), { ok: false, reason: 'not-a-bot-home' })
+})
+
+test('a bot’s home swapped for a link after it was checked is not read', async (t) => {
+  const s = await setup()
+  const ferry = await s.bot('ferry', { name: 'Ferry', avatar: 'mascot:Q7' })
+  const away = await outside(s.root, 'away', 'Ferry')
+  if (!(await folderLink(away, join(s.root, 'probe')))) return t.skip('this account cannot make links')
+  const swapping = new BotAvatars({
+    assetFolders: () => [s.assets],
+    beforeRead: async () => {
+      await rename(ferry.home, `${ferry.home}-moved`)
+      await folderLink(away, ferry.home)
+    }
+  })
+  assert.deepEqual(await swapping.picture(ferry), { ok: false, reason: 'bot-file-not-a-file' })
+})
+
+test('a link above the bots folder (a home or temporary folder kept elsewhere) is followed', async (t) => {
+  const s = await setup()
+  const ferry = await s.bot('ferry', { name: 'Ferry', avatar: 'upload:1' }, photo(600))
+  const via = `${s.root}-via`
+  if (!(await folderLink(s.root, via))) return t.skip('this account cannot make links')
+  const result = await s.avatars.picture({ name: 'Ferry', home: join(via, 'bots', 'ferry') })
+  assert.ok(result.ok && result.picture.type === 'image/png', JSON.stringify(result))
+  assert.ok((await s.avatars.picture(ferry)).ok)
+})
+
 test('a file put in a bot file’s place between looking at it and opening it is not read', async () => {
   const s = await setup()
   const ferry = await s.bot('ferry', { name: 'Ferry', avatar: 'mascot:Q7' })
