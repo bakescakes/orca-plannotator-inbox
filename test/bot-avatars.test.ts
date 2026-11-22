@@ -3,11 +3,11 @@
 // invented mascots. Never reads the real Orca, unless ORCA_LIVE_CLI is set (then only its mascots).
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { mkdir, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { mkdir, rename, symlink, writeFile } from 'node:fs/promises'
+import { join, posix, win32 } from 'node:path'
 import { test } from 'node:test'
-import { BotAvatars, mascotSvg, orcaAssetFolders, UPLOAD_SIDE } from '../src/bot-avatars'
+import { BotAvatars, mascotSvg, orcaAssetFolders, readPlainFile, UPLOAD_SIDE } from '../src/bot-avatars'
 import { decodePng, encodePng, shrinkPng } from '../src/png'
 import { MAX_PICTURE_BYTES } from '../src/presentation'
 import { tempDir } from './fakes'
@@ -78,13 +78,32 @@ test('a picture changed in Orca is read again; a removed, renamed or other bot�
   assert.deepEqual(await t.avatars.picture({ name: 'Ferry', home: join(t.root, 'work') }), { ok: false, reason: 'not-a-bot-home' })
 })
 
-test('a bot file reached through a link is not read', async () => {
-  const t = await setup()
-  const real = await t.bot('real', { name: 'Ferry', avatar: 'mascot:Q7' })
-  const home = join(t.root, 'bots', 'linked')
+test('a bot file reached through a link is not read', async (t) => {
+  const s = await setup()
+  const real = await s.bot('real', { name: 'Ferry', avatar: 'mascot:Q7' })
+  const home = join(s.root, 'bots', 'linked')
   await mkdir(home, { recursive: true })
-  await symlink(join(real.home, 'bot.json'), join(home, 'bot.json'))
-  assert.deepEqual(await t.avatars.picture({ name: 'Ferry', home }), { ok: false, reason: 'bot-file-not-a-file' })
+  try {
+    await symlink(join(real.home, 'bot.json'), join(home, 'bot.json'), 'file')
+  } catch (error) {
+    // A Windows account without the right to make links: nothing to check here.
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this account cannot make links')
+    throw error
+  }
+  assert.deepEqual(await s.avatars.picture({ name: 'Ferry', home }), { ok: false, reason: 'bot-file-not-a-file' })
+})
+
+test('a file put in a bot file’s place between looking at it and opening it is not read', async () => {
+  const s = await setup()
+  const ferry = await s.bot('ferry', { name: 'Ferry', avatar: 'mascot:Q7' })
+  const path = join(ferry.home, 'bot.json')
+  const other = join(s.root, 'other.json')
+  await writeFile(other, JSON.stringify({ name: 'Ferry', avatar: 'mascot:W4' }))
+  const swapped = await readPlainFile(path, 64 * 1024, undefined, () => rename(other, path))
+  assert.deepEqual(swapped, { ok: false, reason: 'not-a-file' })
+  // Unswapped, the same file reads.
+  const plain = await readPlainFile(path, 64 * 1024)
+  assert.ok(plain.ok && 'bytes' in plain && JSON.parse(Buffer.from(plain.bytes).toString('utf8')).avatar === 'mascot:W4')
 })
 
 test('no picture, or a mascot this Orca does not ship, is the bot’s initial on a tile, as Orca shows it', async () => {
@@ -136,11 +155,46 @@ test('a mascot that is not a plain picture is refused', () => {
   assert.equal(mascotSvg(mascot('M0 0h1z').replace('var(--avatar-rim,0)', 'var(--other)')), null)
 })
 
-test('the app’s asset folder is found from the CLI the worker runs', () => {
-  assert.deepEqual(orcaAssetFolders(['/opt/Orca/resources/bin/orca'], undefined), ['/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'])
-  assert.deepEqual(orcaAssetFolders(['/opt/Orca/orca', '/opt/Orca/resources/app.asar/out/cli/index.js'], undefined), ['/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'])
-  assert.deepEqual(orcaAssetFolders(['/opt/Orca/orca', '/opt/Orca/resources/app.asar.unpacked/out/cli/index.js'], '/opt/Orca/resources'), ['/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'])
-  assert.deepEqual(orcaAssetFolders(null, undefined), [])
+test('the app’s asset folder is found from the CLI the worker runs, on each platform’s layout', () => {
+  // '': no resources path of the worker's own.
+  // What the worker runs everywhere: Orca's binary and the unpacked CLI entry (locateOrcaCli).
+  assert.deepEqual(orcaAssetFolders(['/Applications/Orca.app/Contents/MacOS/Orca', '/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/cli/index.js'], '', posix), [
+    '/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/renderer/assets'
+  ])
+  assert.deepEqual(orcaAssetFolders(['/opt/Orca/orca-ide', '/opt/Orca/resources/app.asar.unpacked/out/cli/index.js'], '/opt/Orca/resources', posix), [
+    '/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'
+  ])
+  assert.deepEqual(orcaAssetFolders(['C:\\Users\\a\\AppData\\Local\\Programs\\Orca\\Orca.exe', 'C:\\Users\\a\\AppData\\Local\\Programs\\Orca\\resources\\app.asar.unpacked\\out\\cli\\index.js'], '', win32), [
+    'C:\\Users\\a\\AppData\\Local\\Programs\\Orca\\resources\\app.asar.unpacked\\out\\renderer\\assets'
+  ])
+  // An entry inside the archive: its unpacked twin.
+  assert.deepEqual(orcaAssetFolders(['/opt/Orca/orca-ide', '/opt/Orca/resources/app.asar/out/cli/index.js'], '', posix), ['/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'])
+  assert.deepEqual(orcaAssetFolders(['D:\\Orca\\Orca.exe', 'D:\\Orca\\resources\\app.asar\\out\\cli\\index.js'], '', win32), ['D:\\Orca\\resources\\app.asar.unpacked\\out\\renderer\\assets'])
+  // A launcher in <resources>/bin, set by hand or found on PATH: macOS `orca`, Linux `orca-ide`, Windows `orca.exe`.
+  assert.deepEqual(orcaAssetFolders(['/Applications/Orca.app/Contents/Resources/bin/orca'], '', posix), ['/Applications/Orca.app/Contents/Resources/app.asar.unpacked/out/renderer/assets'])
+  assert.deepEqual(orcaAssetFolders(['/opt/Orca/resources/bin/orca-ide'], '', posix), ['/opt/Orca/resources/app.asar.unpacked/out/renderer/assets'])
+  assert.deepEqual(orcaAssetFolders(['C:\\Program Files\\Orca\\resources\\bin\\orca.exe'], 'C:\\Program Files\\Orca\\resources', win32), [
+    'C:\\Program Files\\Orca\\resources\\app.asar.unpacked\\out\\renderer\\assets'
+  ])
+  // Relative or missing: none guessed.
+  assert.deepEqual(orcaAssetFolders(['orca'], '', posix), [])
+  assert.deepEqual(orcaAssetFolders(['orca.exe'], 'resources', win32), [])
+  assert.deepEqual(orcaAssetFolders(null, ''), [])
+})
+
+test('a launcher reached through a link (as /usr/bin/orca-ide is) finds the app it belongs to', async (t) => {
+  const s = await setup()
+  const launcher = join(s.root, 'Resources', 'bin', 'orca')
+  await mkdir(join(s.root, 'Resources', 'bin'), { recursive: true })
+  await writeFile(launcher, '')
+  const link = join(s.root, 'orca-on-path')
+  try {
+    await symlink(launcher, link, 'file')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this account cannot make links')
+    throw error
+  }
+  assert.deepEqual(orcaAssetFolders([link], ''), [realpathSync(s.assets)])
 })
 
 test('PNGs: what is written reads back, colours average by their alpha, and an unsupported PNG is not read', () => {

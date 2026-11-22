@@ -17,8 +17,8 @@
 // its agent's ordinary mark.
 import { createHash } from 'node:crypto'
 import { constants, realpathSync } from 'node:fs'
-import { open, readdir } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { lstat, open, readdir } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, posix, sep, win32, type PlatformPath } from 'node:path'
 import { isPng, shrinkPng } from './png'
 import { escapeXml, MAX_PICTURE_BYTES, picture, svgIsSafe, type Picture, type PictureResult } from './presentation'
 import { isRecord } from './util'
@@ -42,25 +42,34 @@ const MAX_CACHED = 50
 
 /**
  * Where an installed Orca keeps its renderer's files as real files (`app.asar.unpacked`), found from
- * the CLI the worker runs: the CLI entry beside them (`out/cli/index.js`), or `<resources>/bin/orca`.
+ * the CLI the worker runs (`locateOrcaCli`). On every platform that is Orca's own binary with the CLI
+ * entry `<resources>/app.asar.unpacked/out/cli/index.js`, beside the plugin host's entry; set by hand
+ * or found on PATH, it is the launcher in `<resources>/bin` (`orca` on macOS, `orca.exe` or
+ * `orca.cmd` on Windows, `orca-ide` on Linux), often through a link such as `/usr/bin/orca-ide`.
+ * `paths` is the platform's path rules: the host's, but for tests.
  */
-export function orcaAssetFolders(command: readonly string[] | null, resourcesPath = (process as { resourcesPath?: string }).resourcesPath): string[] {
+export function orcaAssetFolders(
+  command: readonly string[] | null,
+  resourcesPath = (process as { resourcesPath?: string }).resourcesPath,
+  paths: PlatformPath = process.platform === 'win32' ? win32 : posix
+): string[] {
   const folders: string[] = []
   const cli = command && command.length > 0 ? command[command.length - 1]! : null
-  if (cli && isAbsolute(cli)) {
+  if (cli && paths.isAbsolute(cli)) {
     let real = cli
     try {
-      real = realpathSync(cli)
+      // Links are followed only on this computer's own paths.
+      if (paths.sep === sep) real = realpathSync(cli)
     } catch {
       // Not there: the path as given.
     }
-    if (basename(real) === 'index.js' && basename(dirname(real)) === 'cli') {
-      folders.push(join(dirname(dirname(real)).replace(/app\.asar(?=$|[\\/])/, 'app.asar.unpacked'), 'renderer', 'assets'))
+    if (paths.basename(real) === 'index.js' && paths.basename(paths.dirname(real)) === 'cli') {
+      folders.push(paths.join(paths.dirname(paths.dirname(real)).replace(/app\.asar(?=$|[\\/])/, 'app.asar.unpacked'), 'renderer', 'assets'))
     } else {
-      folders.push(resolve(dirname(real), '..', 'app.asar.unpacked', 'out', 'renderer', 'assets'))
+      folders.push(paths.join(paths.dirname(real), '..', 'app.asar.unpacked', 'out', 'renderer', 'assets'))
     }
   }
-  if (resourcesPath && isAbsolute(resourcesPath)) folders.push(join(resourcesPath, 'app.asar.unpacked', 'out', 'renderer', 'assets'))
+  if (resourcesPath && paths.isAbsolute(resourcesPath)) folders.push(paths.join(resourcesPath, 'app.asar.unpacked', 'out', 'renderer', 'assets'))
   return [...new Set(folders)]
 }
 
@@ -100,8 +109,29 @@ export function mascotSvg(text: string): Uint8Array | null {
 
 type Read = { ok: true; bytes: Uint8Array; size: number; mtimeMs: number } | { ok: false; reason: 'missing' | 'not-a-file' | 'too-big' }
 
-/** One file, never through a link, at most `max` bytes. `key` sees its size and time first: a hit is not read. */
-async function readFile(path: string, max: number, hit?: (size: number, mtimeMs: number) => boolean): Promise<Read | { ok: true; cached: true }> {
+/**
+ * One file, never through a link, at most `max` bytes. `hit` sees its size and time first: a hit is not read.
+ *
+ * Not through a link on every platform: the path itself must not be one (Windows has no `O_NOFOLLOW`, so
+ * opening alone would follow it), and the file opened must be the very file looked at (same volume and
+ * file id), so a link or another file put in its place in between, or a folder on the way swapped in
+ * between for a link to somewhere else, is not read.
+ */
+export async function readPlainFile(
+  path: string,
+  max: number,
+  hit?: (size: number, mtimeMs: number) => boolean,
+  /** For tests: runs between looking at the file and opening it. */
+  beforeOpen?: () => Promise<void>
+): Promise<Read | { ok: true; cached: true }> {
+  let seen
+  try {
+    seen = await lstat(path, { bigint: true })
+  } catch {
+    return { ok: false, reason: 'missing' }
+  }
+  if (!seen.isFile()) return { ok: false, reason: 'not-a-file' }
+  await beforeOpen?.()
   let handle
   try {
     handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
@@ -109,8 +139,9 @@ async function readFile(path: string, max: number, hit?: (size: number, mtimeMs:
     return { ok: false, reason: (error as NodeJS.ErrnoException).code === 'ELOOP' ? 'not-a-file' : 'missing' }
   }
   try {
-    const stat = await handle.stat()
-    if (!stat.isFile()) return { ok: false, reason: 'not-a-file' }
+    const opened = await handle.stat({ bigint: true })
+    if (!opened.isFile() || opened.dev !== seen.dev || opened.ino !== seen.ino) return { ok: false, reason: 'not-a-file' }
+    const stat = { size: Number(opened.size), mtimeMs: Number(opened.mtimeMs) }
     if (stat.size > max) return { ok: false, reason: 'too-big' }
     if (hit?.(stat.size, stat.mtimeMs)) return { ok: true, cached: true }
     const bytes = await handle.readFile()
@@ -154,7 +185,7 @@ export class BotAvatars {
     const { home } = bot
     // A bot's home is a folder of Orca's bots folder (`.../bots/<folder>`); nothing else is opened.
     if (!isAbsolute(home) || basename(dirname(home)) !== 'bots') return { ok: false, reason: 'not-a-bot-home' }
-    const file = await readFile(join(home, 'bot.json'), MAX_BOT_FILE)
+    const file = await readPlainFile(join(home, 'bot.json'), MAX_BOT_FILE)
     if (!file.ok) return { ok: false, reason: `bot-file-${file.reason}` }
     if (!('bytes' in file)) return { ok: false, reason: 'unreadable' }
     let saved: unknown
@@ -202,7 +233,7 @@ export class BotAvatars {
       const path = join(folder, mine[0]!)
       const cached = this.cache.get(`mascot:${path}`)
       if (cached) return this.remember(`mascot:${path}`, cached)
-      const file = await readFile(path, MAX_MASCOT_FILE)
+      const file = await readPlainFile(path, MAX_MASCOT_FILE)
       if (!file.ok || !('bytes' in file)) return { ok: false, reason: 'mascot-unreadable' }
       const svg = mascotSvg(Buffer.from(file.bytes).toString('utf8'))
       return this.remember(`mascot:${path}`, svg ? { ok: true, picture: asPicture(svg, 'image/svg+xml') } : { ok: false, reason: 'mascot-unsafe' })
@@ -213,7 +244,7 @@ export class BotAvatars {
   private async upload(home: string, version: string): Promise<PictureResult> {
     const path = join(home, 'avatar.png')
     let key = ''
-    const file = await readFile(path, MAX_UPLOAD, (size, mtimeMs) => {
+    const file = await readPlainFile(path, MAX_UPLOAD, (size, mtimeMs) => {
       key = `upload:${path}:${version}:${size}:${mtimeMs}`
       return this.cache.has(key)
     })

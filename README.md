@@ -137,7 +137,8 @@ and it must name the bot Orca lists there), and for an uploaded picture `avatar.
 opens no other file of the home, and none through a link. It gives the picture to the Inbox the way
 "Your own…" in the face picker does (`POST /api/inbox/agent-icons`) and sets the chat's face to it
 (`own:<sha256>`). As with agent marks, a face you chose for the chat yourself is never replaced, and
-standard Plannotator is sent nothing.
+standard Plannotator is sent nothing. Choosing **Agent** in the picker counts as your choice too: a
+later picture from Orca does not undo it.
 
 Nothing of Orca's artwork is in this plugin: a mascot is read at run time from the Orca installed on
 this computer (`app.asar.unpacked/out/renderer/assets`, found from the CLI the worker runs) and kept

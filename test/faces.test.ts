@@ -205,3 +205,53 @@ test('an Inbox that restarted under the pass is not given the agent’s mark ins
   assert.equal(report.ok, false)
   assert.deepEqual(t.sets, [])
 })
+
+test('a person’s “Agent” stays when the bot’s picture changes, or cannot be read and the mark would do', async () => {
+  const t = inbox()
+  const a = avatars({ Harbor: HARBOR, Lantern: LANTERN })
+  const store = memoryStore()
+  const harbor = { agent: 'claude_h', session: 'claude_h', provider: 'claude', bot: { name: 'Harbor', home: '/bots/harbor' } }
+  const lantern = { agent: 'claude_l', session: 'claude_l', provider: 'claude', bot: { name: 'Lantern', home: '/bots/lantern' } }
+  await new FaceSync({ inbox: t.api, store, avatars: a.api }).tick([harbor, lantern])
+  assert.equal(t.sets.length, 2)
+  // "Agent" in the picker: an unnamed agent's entry goes; a named one keeps `agent` beside its name.
+  delete t.faces.claude_h
+  t.faces.claude_l = { face: 'agent', sessions: [] }
+  a.pictures.Harbor = LANTERN
+  a.pictures.Lantern = null
+  assert.deepEqual(await new FaceSync({ inbox: t.api, store, avatars: a.api }).tick([harbor, lantern]), { ok: true, set: 0 })
+  assert.equal(t.sets.length, 2)
+  assert.equal(t.faces.claude_h, undefined)
+  assert.equal(t.faces.claude_l?.face, 'agent')
+})
+
+test('a chat named before this plugin set it a face gets one; so does one this plugin has forgotten', async () => {
+  const t = inbox({ faces: { claude_n: { face: 'agent', sessions: [] } } })
+  const store = memoryStore()
+  await store.set('faces.v1', { v: 1, set: { claude_x: 'mark:codex' } })
+  const report = await new FaceSync({ inbox: t.api, store }).tick([
+    { agent: 'claude_n', session: 'claude_n', provider: 'claude' },
+    { agent: 'claude_f', session: 'claude_f', provider: 'claude' }
+  ])
+  assert.deepEqual(report, { ok: true, set: 2 })
+  assert.deepEqual(t.sets.map((item) => [item.agent, item.face]), [['claude_n', 'mark:claude-code'], ['claude_f', 'mark:claude-code']])
+})
+
+test('what this plugin set is kept to a bound, forgetting old chats first and never one Orca has now', async () => {
+  const t = inbox()
+  const store = memoryStore()
+  // A live chat set long ago (the oldest entry), whose person since chose "Agent", then 500 chats that are gone.
+  const old: Record<string, string> = { claude_live: 'mark:claude-code' }
+  for (let i = 0; i < 500; i++) old[`gone_${i}`] = 'mark:codex'
+  await store.set('faces.v1', { v: 1, set: old })
+  const live = { agent: 'claude_live', session: 'claude_live', provider: 'claude' }
+  assert.deepEqual(await new FaceSync({ inbox: t.api, store }).tick([live, { agent: 'claude_new', session: 'claude_new', provider: 'claude' }]), { ok: true, set: 1 })
+  const saved = (await store.get('faces.v1')) as { set: Record<string, string> }
+  const agents = Object.keys(saved.set)
+  assert.equal(agents.length, 500)
+  assert.ok(agents.includes('claude_live') && agents.includes('claude_new'))
+  assert.ok(!agents.includes('gone_0') && !agents.includes('gone_1') && agents.includes('gone_2'))
+  // The live chat's reset still holds.
+  assert.deepEqual(await new FaceSync({ inbox: t.api, store }).tick([live]), { ok: true, set: 0 })
+  assert.deepEqual(t.sets.map((item) => item.agent), ['claude_new'])
+})

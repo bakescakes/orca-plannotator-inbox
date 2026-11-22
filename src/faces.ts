@@ -8,8 +8,9 @@
 // and the face names it, `own:<sha256>`. When Orca's picture cannot be read or shown, or the Inbox
 // keeps no pictures for agents, the bot's chat has its agent's mark like any other.
 //
-// It never replaces a face a person chose: it writes only where the Inbox keeps no face, or the
-// face it wrote itself. Standard Plannotator does not know `mark:` faces, so nothing is sent to it.
+// It never replaces a face a person chose: it writes only where the Inbox keeps no face and this
+// plugin never set one (once it has, no face means the person chose "Agent"), or over the face it
+// wrote itself. Standard Plannotator does not know `mark:` faces, so nothing is sent to it.
 import { InboxRefused } from './inbox'
 import type { KeyValue } from './ledger'
 import type { BotRef } from './bot-avatars'
@@ -52,6 +53,24 @@ export type FacesReport = { ok: boolean; set: number; reason?: string }
 
 type Wanted = { session: string; mark: string | null; bot: BotRef | null }
 
+/**
+ * What this plugin set, at most MAX_REMEMBERED agents, the oldest forgotten first. A chat Orca has
+ * now is never forgotten: without its entry, a face a person reset would be set again.
+ */
+function forgetOldest(mine: Record<string, string>, live: ReadonlySet<string>): Record<string, string> {
+  const entries = Object.entries(mine)
+  let over = entries.length - MAX_REMEMBERED
+  const out: Record<string, string> = {}
+  for (const [agent, face] of entries) {
+    if (over > 0 && !live.has(agent)) {
+      over -= 1
+      continue
+    }
+    out[agent] = face
+  }
+  return out
+}
+
 export class FaceSync {
   private running: Promise<FacesReport> | null = null
 
@@ -93,12 +112,15 @@ export class FaceSync {
     let set = 0
     /** Whether this plugin may give `agent` the face `face` now (see the note at the top). */
     const mayWrite = (agent: string, kept: FaceEntry | undefined, face: string): boolean => {
-      if (kept && kept.face === face) return false
-      // Any other face is a person's choice, unless it is one this plugin wrote (the agent or the bot's picture changed).
-      if (kept && kept.face !== 'agent' && mine[agent] !== kept.face) return false
-      // A person put the agent's own mark back after this plugin set one: leave it.
-      if (!kept && mine[agent] === face) return false
-      return true
+      // The agent's own mark: no entry, or `agent` beside a name or tile the person gave it.
+      if (!kept || kept.face === 'agent') {
+        // Only before this plugin ever set it a face. After that, the person chose "Agent" in the
+        // picker, and that stays, whatever face this plugin would give it now (a bot's picture changes).
+        return mine[agent] === undefined
+      }
+      if (kept.face === face) return false
+      // Any other face is a person's choice, unless it is the one this plugin wrote (the agent or the bot's picture changed).
+      return mine[agent] === kept.face
     }
     for (const [agent, want] of wanted) {
       if (set >= MAX_PER_PASS) break
@@ -121,13 +143,12 @@ export class FaceSync {
         }
       }
       await inbox.setAgentFace(agent, face, serverSession)
+      // Latest last, so the oldest are forgotten first.
+      delete mine[agent]
       mine[agent] = face
       set += 1
     }
-    if (set > 0) {
-      const kept = Object.entries(mine).slice(-MAX_REMEMBERED)
-      await store.set(STORE_KEY, { v: 1, set: Object.fromEntries(kept) } as Json).catch(() => undefined)
-    }
+    if (set > 0) await store.set(STORE_KEY, { v: 1, set: forgetOldest(mine, new Set(wanted.keys())) } as Json).catch(() => undefined)
     return { ok: true, set }
   }
 
