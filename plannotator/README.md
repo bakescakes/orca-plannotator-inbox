@@ -54,7 +54,11 @@ In Orca mode (each item names its group of edits; see [Groups](#groups)):
     animated rig. The plugin uses this to show each Orca chat as the agent it runs.
   - Copilot, OMP, Antigravity and Kimi get marks too (`orca-marks.tsx`).
   - Settings → Rows → Agent icons "From the project name" never turns a `mark:<host>` face into the project's tile.
-  - A build without this group refuses `mark:<host>` faces, as stock Plannotator does. The plugin then sets none.
+  - A build without this group lacks the `mark-faces` feature, so the plugin sets no `mark:<host>` faces. Up to
+    0.29.3 it also refuses them, as stock Plannotator does.
+  - Plannotator after 0.29.3 (from backnotprop/plannotator#3568) names the host `orca` "Orca", accepts `mark:<host>`
+    faces, draws them and keeps them from the project tile itself, in both modes. On it the build leaves those lines
+    as Plannotator has them and adds only the extra marks. The marks look and behave the same either way.
 
 | Orca agent | Face |
 |---|---|
@@ -93,12 +97,12 @@ passed upstream's tests and the remaining gates, and served the shorter `feature
 
 | Group | Required | Feature | A build without it |
 |---|---|---|---|
-| `orca-mode` | yes | none | Is not an Orca build. This group creates the Orca surface the other groups hook into (the config, `orcaMode()`), wakes the plugin's bridge, writes `mcpCommand` on every MCP connect path, and serves `GET /api/inbox/orca`, where the plugin reads `features`. Without it, agents would run Plannotator directly and replies could not come back into Orca chats, and the plugin could not tell the binary from stock. So it cannot be left out: when it no longer fits, nothing is published. |
+| `orca-mode` | yes | none | Is not an Orca build. This group creates the Orca surface the other groups hook into (the config, `orcaMode()`), wakes the plugin's bridge (Plannotator after 0.29.3 wakes a polling Orca chat itself, in either mode), writes `mcpCommand` on every MCP connect path, and serves `GET /api/inbox/orca`, where the plugin reads `features`. Without it, agents would run Plannotator directly and replies could not come back into Orca chats, and the plugin could not tell the binary from stock. So it cannot be left out: when it no longer fits, nothing is published. |
 | `launch-hosts` | no | `launch-hosts` | Starts agents as stock Plannotator does, not as Orca chats. The panel says the build lacks starting and stopping chats from the Inbox. |
 | `update-state` | no | `update-state` | Shows the stock update display. The Orca build is not at the install script's path, so stock Plannotator calls it a copy that cannot update itself and never runs its installer. The plugin's worker still updates the build. |
 | `update-detail` | no, needs `update-state` | `update-detail` | Shows the stock sentence when an update fails. Left out with `update-state`, since the sentence comes from the state that group reads. |
 | `agents` | no | `agents` | Has no agents route. The plugin treats it as an older Orca build: Connect still writes the launcher through `orca-mode`, but cannot list, move or take back entries, and the panel says so. |
-| `mark-faces` | no | `mark-faces` | Refuses `mark:<host>` faces, as stock does, and the plugin sets none. |
+| `mark-faces` | no | `mark-faces` | The plugin sets no `mark:<host>` faces. Up to 0.29.3 the build refuses them, as stock does; a later Plannotator accepts them itself. |
 | `projects` | no | none | Shows an Orca project once its first message arrives, as stock does. |
 | `about-card` | no | none | Shows the stock About section. |
 
@@ -113,7 +117,7 @@ passed upstream's tests and the remaining gates, and served the shorter `feature
 | `edits.mjs` | Applies edits by content and fails closed (Node built-ins only). `build.mjs` and the plugin's tests use it. |
 | `modules/…` | Added files, at their paths in the Plannotator tree. Most of the logic lives here, so the edits stay a line or two each. A file whose recipe entry names a `group` goes with that group. |
 | `modules/packages/server/inbox-orca-build.ts` | What a build carries: its `features` and the groups it left out. `build.mjs` writes it for each build. The copy here is a full build's. |
-| `tests/orca-*.ts` | Gates: MCP identity, the real routes in Orca mode (owner-only tailnet), the full proof (stock mode, each group's change or, for a group left out, stock source where it would change it), the agents route against fake agents in a temporary home (on Windows its guards and list only: upstream's fake agent CLIs are `sh` scripts; group `agents`), and the marks drawn in a DOM (group `mark-faces`). |
+| `tests/orca-*.ts` | Gates: MCP identity (the shim's tool sets must be one it knows: 0.29's, or the later one where `resolve_message` takes the session for `moved_to` only), the real routes in Orca mode (owner-only tailnet), the full proof (stock mode, each group's change or, for a group left out, stock source where it would change it), the agents route against fake agents in a temporary home (on Windows its guards and list only: upstream's fake agent CLIs are `sh` scripts; group `agents`), and the marks drawn in a DOM (group `mark-faces`). |
 | `recipe.json` | Tag and commit, Bun pin, the groups in order (each `required` or not, with the `features` it carries and the groups it `needs`), module paths, the sha256 of every file, and the build steps. |
 | `build.mjs` | The build (Node built-ins only). |
 | `release.mjs` | Used by the workflow: composes `manifest.json` and the release notes, and decides what a run's issue says. |
@@ -123,7 +127,7 @@ passed upstream's tests and the remaining gates, and served the shorter `feature
 ## Build
 
 ```sh
-node build.mjs --version 0.29.2 --target darwin-arm64 --out dist/plannotator-orca-darwin-arm64
+node build.mjs --version 0.29.3 --target darwin-arm64 --out dist/plannotator-orca-darwin-arm64
 ```
 
 Targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`.
@@ -138,7 +142,7 @@ Targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`.
 5. Runs the build steps, with the type checks and upstream's tests, and compiles the binary.
 6. Runs the gates, then `--version` when the binary can run on this machine.
 7. Prints a one-line report: the binary's sha256, the groups applied, the groups left out (each with the edit and
-   what it found), and the final `features`. It writes the same report to `<out>.build.json` (or `--report <file>`). A
+   what it found), the final `features`, and the edits Plannotator makes itself (`satisfied`). It writes the same report to `<out>.build.json` (or `--report <file>`). A
    failed build writes it too, with `ok: false` and its error line.
 
 It downloads the pinned Bun from the npm registry and checks its sha512 against `recipe.json`.
@@ -146,7 +150,8 @@ It downloads the pinned Bun from the npm registry and checks its sha512 against 
 Other ways to run it:
 
 - `--fit <checkout>` tries every edit on a Plannotator checkout and changes nothing. It prints which edits fit and,
-  for each one that does not, what it found. Exit 0 every edit fits, 3 the required group does not, 6 only optional
+  for each one that does not, what it found. An edit Plannotator makes itself has `"satisfied": true` and the line
+  found (`proof`). Exit 0 every edit fits, 3 the required group does not, 6 only optional
   groups do not.
 - `--check-only` applies the edits and runs the type checks, upstream's tests and the gates, without compiling.
   `--gates-only` skips the type checks and tests.
@@ -173,6 +178,8 @@ An edit finds its line by the text on it, not by its line number. Each edit in `
 - `replace`: pairs of `[from, to]`; `from` must be on the line exactly once.
 - `before` / `after`: whole lines put in before or after it, at that line's indentation. Keep them thin: a call into
   an added file, an import, a guard.
+- `upstream`: Plannotator's own version of the change, for an edit Plannotator now makes itself (below). A text, or
+  an array of texts found like `anchor`; each at least 8 characters, on one line.
 
 Only Plannotator's own lines count as anchors, never a line another edit put in. Edits that put lines at the same
 place keep the order they are applied in.
@@ -180,6 +187,23 @@ place keep the order they are applied in.
 An edit is refused, with what was found, when its anchor is missing or on the wrong number of lines, a `has` text or
 a `from` is missing, or the change is already there (an edit is never applied twice). The build also tries each edit a
 second time on its own result, and stops if it would apply again.
+
+### When Plannotator makes the change itself
+
+When Plannotator takes in a change an edit makes, the edit names Plannotator's version in `upstream`. The edit then
+counts as satisfied, and the build leaves those lines as Plannotator has them, only on positive proof:
+
+- The `upstream` text is on exactly one of Plannotator's own lines. On two or more lines, the edit is refused.
+- The edit itself is refused there (its anchor is gone, or its change is already there), or it would still apply
+  within 40 lines of that line, so both are about the same place.
+
+Otherwise it fails closed. With no `upstream` line, the edit applies or is refused as before, so neither found is a
+refusal. With both found far apart (the edit would apply somewhere else), it is refused: refit it.
+
+A satisfied edit still belongs to its group. The group's features stay, and its gates check the behaviour, whether
+Plannotator's own code or the build's provides it. The build report, `--fit`, `manifest.json` (`satisfied`), the
+release notes and the daily check name the satisfied edits by `group/id`. Once every Plannotator version the recipe
+builds makes the change itself, the edit can be removed.
 
 ### Optional groups and reduced builds
 
@@ -233,6 +257,9 @@ runs `--fit` and `--check-only` for `linux-x64`, and compiles, publishes and tag
 - rewritten on every run, with a comment only when what no longer fits changes;
 - closed when `main` takes every edit again.
 
+An edit `main` makes itself (above) counts as taken. The run's summary and the issue name those edits, by `group/id`
+only.
+
 A run that could not check (a download or install failed) changes no issue and fails, so it shows in Actions.
 
 ## Publishing
@@ -247,8 +274,9 @@ A run that could not check (a download or install failed) changes no issue and f
 - A run with nothing to do stops after its first job.
 - A failed build is tried again once a day, or at once on a push or by hand.
 - Every target must build and pass its gates with the same groups left out. Otherwise nothing is published.
-- `manifest.json` lists `features`, `omitted` (the groups left out) and `recipe`, besides the assets and
-  `pluginMin`. The release notes say which features a reduced build lacks, and why.
+- `manifest.json` lists `features`, `omitted` (the groups left out), `satisfied` (the edits Plannotator makes
+  itself) and `recipe`, besides the assets and `pluginMin`. The release notes say which features a reduced build
+  lacks, and why, and which edits Plannotator makes itself. Every target must find the same `satisfied`.
 - A reduced or failed build opens one issue. It names the version, the group or gate, and the first error line. The
   same version and cause gets no second issue, and at most one comment a day. A later full build of that version or a
   newer one closes it.

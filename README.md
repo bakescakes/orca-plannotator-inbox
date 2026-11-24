@@ -347,7 +347,9 @@ checks all of it at run time:
   `POST /api/inbox/control/connect` (standard Plannotator); an answer it cannot read is reported,
   and Claude Code, Codex and OpenCode are connected all the same. Agent icons and bot pictures use
   `GET`/`POST /api/inbox/agent-faces` and `POST /api/inbox/agent-icons`. Which identity fields a tool takes is read from
-  the server's own `tools/list`, so new or renamed tools need no change here. Unknown fields are
+  the server's own `tools/list`, so new or renamed tools need no change here. The one rule kept by
+  name follows Plannotator's own shim: `resolve_message` gets the chat's session only when it moves
+  the thread's questions (`moved_to`); a plain archive goes as written. Unknown fields are
   ignored or passed along.
 - **Orca**: plugin Host API 1 (frozen and additive), and these CLI calls with `--json`:
   `status`, `worktree ps`, `repo list`, `worktree activate`, `orchestration

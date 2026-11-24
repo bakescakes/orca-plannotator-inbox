@@ -2,6 +2,12 @@
   "v": 1,
   "edits": [
     {
+      "id": "surface-import",
+      "file": "packages/server/inbox.ts",
+      "anchor": "const BRIDGE_WAKING_HOSTS",
+      "after": ["import { createOrcaSurface, orcaMcpCommand, orcaMode } from \"./inbox-orca-surface\";"]
+    },
+    {
       "id": "bridge-wakes-orca",
       "file": "packages/server/inbox.ts",
       "anchor": "const BRIDGE_WAKING_HOSTS",
@@ -9,7 +15,7 @@
         ["new Set(INBOX_WAKING_HOSTS.filter(", "new Set([...INBOX_WAKING_HOSTS.filter("],
         [".includes(host)))", ".includes(host)), ...(orcaMode() ? [\"orca\"] : [])])"]
       ],
-      "after": ["import { createOrcaSurface, orcaMcpCommand, orcaMode } from \"./inbox-orca-surface\";"]
+      "upstream": "host === INBOX_T3_HOST || host === \"orca\""
     },
     {
       "id": "surface",

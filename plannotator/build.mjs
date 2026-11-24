@@ -51,7 +51,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyEdit, applyGroups, editedLines, EditRefused, fileText, openFile, parseEdits } from "./edits.mjs";
+import { applyGroups, applyOrSatisfy, editedLines, EditRefused, fileText, openFile, parseEdits } from "./edits.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const recipe = JSON.parse(readFileSync(join(HERE, "recipe.json"), "utf8"));
@@ -183,13 +183,16 @@ const reader = (tree) => (path) => {
 };
 
 /**
- * Applies the groups in order to the tree (edits.mjs `applyGroups`): each whole or not at all. Fills `applied` and
- * `omitted`; a required group that does not fit stops the build (exit 3) before anything is written.
+ * Applies the groups in order to the tree (edits.mjs `applyGroups`): each whole or not at all. Fills `applied`,
+ * `omitted` and `satisfied` (the edits Plannotator makes itself, so nothing was changed for them); a required group
+ * that does not fit stops the build (exit 3) before anything is written.
  */
-function applyToTree(tree, { without = [], dropped = [], version = "this Plannotator", applied, omitted }) {
+function applyToTree(tree, { without = [], dropped = [], version = "this Plannotator", applied, omitted, satisfied }) {
   const result = applyGroups(recipe.groups, (name) => EDITS.get(name), reader(tree), { without, dropped });
   applied.push(...result.applied);
   omitted.push(...result.omitted);
+  satisfied.push(...result.satisfied.map((s) => s.edit));
+  for (const s of result.satisfied) say(`edit ${s.edit} (${s.file}): Plannotator makes this change itself (${JSON.stringify(s.proof.slice(0, 120))}); nothing changed`);
   for (const o of result.omitted) {
     const group = recipe.groups.find((g) => g.name === o.name);
     say(`left out ${o.forced ? "" : "optional "}group ${o.name}${o.forced ? " (--without)" : `: ${o.reason}`}; without it: ${group.features.join(", ") || "no feature"}`);
@@ -236,8 +239,8 @@ function fitReport(tree) {
       const doc = files.get(edit.file);
       if (!doc) return { id: edit.id, file: edit.file, fits: false, why: `${edit.file} is not in this Plannotator` };
       try {
-        applyEdit(doc, edit);
-        return { id: edit.id, file: edit.file, fits: true };
+        const done = applyOrSatisfy(doc, edit);
+        return { id: edit.id, file: edit.file, fits: true, ...(done.satisfied !== null ? { satisfied: true, proof: done.satisfied } : {}) };
       } catch (error) {
         if (!(error instanceof EditRefused)) throw error;
         return { id: edit.id, file: edit.file, fits: false, why: error.why };
@@ -261,7 +264,7 @@ function report(binary, extra = {}) {
 }
 
 /** What the build carries so far; written to `<out>.build.json` at the end, or when it fails. */
-const carried = { reportFile: null, base: {}, applied: [], omitted: [], features: [] };
+const carried = { reportFile: null, base: {}, applied: [], omitted: [], satisfied: [], features: [] };
 function writeReport(info) {
   if (!carried.reportFile) return;
   mkdirSync(dirname(carried.reportFile), { recursive: true });
@@ -343,7 +346,8 @@ async function main() {
   rounds: for (;;) {
     carried.applied.length = 0;
     carried.omitted.length = 0;
-    const files = applyToTree(tree, { without: a.without, dropped, version: a.version, applied: carried.applied, omitted: carried.omitted });
+    carried.satisfied.length = 0;
+    const files = applyToTree(tree, { without: a.without, dropped, version: a.version, applied: carried.applied, omitted: carried.omitted, satisfied: carried.satisfied });
     left = new Set(carried.omitted.map((o) => o.name));
     carried.features = recipe.groups.filter((group) => !left.has(group.name)).flatMap((group) => group.features);
     ours = (entry) => entry.group === undefined || !left.has(entry.group);
@@ -353,7 +357,7 @@ async function main() {
       if (entry === BUILD_INFO) writeFileSync(target, buildInfoText(carried.features, [...left]));
       else copyFileSync(join(HERE, entry.file), target);
     }
-    say(`groups applied: ${carried.applied.join(", ") || "none"}; left out: ${[...left].join(", ") || "none"}; features: ${carried.features.join(", ") || "none"}`);
+    say(`groups applied: ${carried.applied.join(", ") || "none"}; left out: ${[...left].join(", ") || "none"}; features: ${carried.features.join(", ") || "none"}; made by Plannotator itself: ${carried.satisfied.join(", ") || "none"}`);
     for (const step of recipe.steps.prepare) run(fill(step), { cwd: tree, env, failCode: 4 });
     if (gatesOnly) break;
     for (const step of recipe.steps.check) {
@@ -394,7 +398,7 @@ async function main() {
   for (const gate of recipe.gates.filter((g) => !ours(g))) say(`gate ${gate.target} not run: group ${gate.group} is left out`);
   if (!compile) {
     say(`${checkOnly ? "checks and gates" : "gates"} passed for Plannotator ${a.version} (${a.target})`);
-    const info = { ...carried.base, mode: checkOnly ? "check-only" : "gates-only", applied: carried.applied, omitted: carried.omitted, features: carried.features };
+    const info = { ...carried.base, mode: checkOnly ? "check-only" : "gates-only", applied: carried.applied, omitted: carried.omitted, satisfied: carried.satisfied, features: carried.features };
     process.stdout.write(JSON.stringify(info) + "\n");
     writeReport({ ok: true, ...info });
     if (!a.flags.has("keep") && !a.work) rmSync(work, { recursive: true, force: true });
@@ -403,7 +407,7 @@ async function main() {
   const out = resolve(a.out);
   const native = a.target === HOST;
   const version = native ? checkVersion(out, a.version) : null;
-  const info = report(out, { ...carried.base, smoke: version ? "native" : "not runnable here", applied: carried.applied, omitted: carried.omitted, features: carried.features });
+  const info = report(out, { ...carried.base, smoke: version ? "native" : "not runnable here", applied: carried.applied, omitted: carried.omitted, satisfied: carried.satisfied, features: carried.features });
   writeReport({ ok: true, ...info });
   if (!a.flags.has("keep") && !a.work) rmSync(work, { recursive: true, force: true });
 }
@@ -413,7 +417,7 @@ main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   say(message);
   try {
-    writeReport({ ok: false, exit: code, error: `orca-build: ${message}`, ...carried.base, applied: carried.applied, omitted: carried.omitted, features: carried.features });
+    writeReport({ ok: false, exit: code, error: `orca-build: ${message}`, ...carried.base, applied: carried.applied, omitted: carried.omitted, satisfied: carried.satisfied, features: carried.features });
   } catch {}
   process.exit(code);
 });

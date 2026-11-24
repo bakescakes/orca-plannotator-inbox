@@ -2,9 +2,9 @@
   "v": 1,
   "plannotator": {
     "repo": "https://github.com/backnotprop/plannotator.git",
-    "version": "0.29.2",
-    "tag": "v0.29.2",
-    "commit": "0fe6ba9235e600d6aad4f66cd7236eca2e79ec57"
+    "version": "0.29.3",
+    "tag": "v0.29.3",
+    "commit": "71f2cdf9ca72c196d47833d564690fd1cb8efc6c"
   },
   "bun": {
     "version": "1.4.4",
@@ -42,7 +42,7 @@
     {
       "name": "orca-mode",
       "file": "edits/orca-mode.json",
-      "sha256": "d496298fd3d1603b06b36f2e6206d18e7f3d283e9b8ca339e9cdd157dc6c48dd",
+      "sha256": "e6b12f6e8918da7c568d49c4e7d773d5784755a4b5c8c247e83a8d1944abecdb",
       "required": true,
       "features": []
     },
@@ -88,7 +88,7 @@
     {
       "name": "mark-faces",
       "file": "edits/mark-faces.json",
-      "sha256": "479678a8142d6db2ae450de92ec860151d505be14658f570043d33e39e36a269",
+      "sha256": "b1562aacb89b30d945c055ed0e9bae467b6cfe7f38a74271218f235ce3a9c0b8",
       "required": false,
       "features": [
         "mark-faces"
@@ -162,7 +162,7 @@
     {
       "file": "tests/orca-mcp-contract.ts",
       "target": "tests/orca-mcp-contract.ts",
-      "sha256": "c25897da544f7418d506d530c901c8c1a5292731bd53c0e52d47a6ba54fd5c1e",
+      "sha256": "98d054af0027bb77a1924eb480a639e2ffecc8391a7d20f92bbf3e1a7743b724",
       "run": [
         "{bun}",
         "tests/orca-mcp-contract.ts"
@@ -180,7 +180,7 @@
     {
       "file": "tests/orca-build-proof.ts",
       "target": "tests/orca-build-proof.ts",
-      "sha256": "6fae1ae7bf6f9bdba48e6f8be64a3618c0d89dd8d720ea7bb1304fe5a6333336",
+      "sha256": "f8618eace6eaba76c3b3356a2b0e3db3ed83db7fff10fe42fb245e2b96077b57",
       "run": [
         "{bun}",
         "tests/orca-build-proof.ts"
