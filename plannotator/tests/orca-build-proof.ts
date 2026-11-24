@@ -12,8 +12,9 @@
  * A reduced build: the build writes what it carries into packages/server/inbox-orca-build.ts (its features, and the
  * optional groups of edits it left out). The card must serve exactly that list, each group named for a feature must
  * be in the build exactly when its feature is listed, and a group left out must leave the source as stock has it
- * where it would change it: without `mark-faces`, a `mark:<host>` face is refused in both modes as stock refuses it,
- * and the Orca marks file, the `orca` host name and the mark-face pattern are not in the source; without
+ * where it would change it: without `mark-faces`, none of its lines and not the Orca marks file are in the source, and a
+ * `mark:<host>` face is kept or refused in both modes exactly as the source's own face pattern says (refused by a
+ * Plannotator that does not know them; a Plannotator that has them itself, from upstream, keeps them as its own); without
  * `launch-hosts`, `update-state`, `update-detail`, `agents`, `projects` or `about-card`, their files and the lines
  * they would change are not there, and the behaviour they would change is stock's.
  */
@@ -114,6 +115,10 @@ check(on("update-state") || !on("update-detail"), "update-detail is in a build w
 const marksOn = on("mark-faces"), hostsOn = on("launch-hosts"), updatesOn = on("update-state"), detailOn = on("update-detail");
 const agentsOn = on("agents"), projectsOn = on("projects"), cardOn = on("about-card");
 const source = (path: string) => (existsSync(join(cwd, path)) ? readFileSync(join(cwd, path), "utf8") : "");
+// Without mark-faces, whether this Plannotator takes `mark:<host>` faces is its own: none of the group's lines are in.
+const types = await import(pathToFileURL(join(cwd, "packages/core/inbox-types.ts")).href);
+const nativeMarks = !marksOn && types.isInboxAgentFace("mark:codex") === true;
+const keptMarks = marksOn || nativeMarks;
 const stockWithout = (what: string, path: string, ...marks: string[]) => {
   for (const mark of marks) check(!source(path).includes(mark), `${path} has ${JSON.stringify(mark)} in a build without ${what}`);
 };
@@ -151,7 +156,7 @@ try {
   check(stockUpdate.command !== ORCA_UPDATER_LABEL && stockUpdate.failure === null, "stock update details changed");
   const stockSettings = await getJson(stock.base, "/api/inbox/settings?store=0");
   check(JSON.stringify(stockSettings.mcp_command.slice(-2)) === '["inbox","mcp"]', "stock MCP command changed");
-  if (marksOn) {
+  if (keptMarks) {
     check((await markFace(stock.base, "stock_session", "mark:codex")) === 200, "stock refused a mark: face");
     check((await getJson(stock.base, "/api/inbox/agent-faces")).faces.stock_session?.face === "mark:codex", "stock did not keep a mark: face");
   } else {
@@ -162,7 +167,7 @@ try {
   check((await markFace(stock.base, "stock_session", "mark:Not A Host")) >= 400, "a malformed mark: face was kept");
   stock.server.stop();
   stock = null;
-  result.stock = { orcaRoute: 404, updater: "stock", mcpTail: ["inbox", "mcp"], markFaces: marksOn ? "accepted" : "refused (left out)" };
+  result.stock = { orcaRoute: 404, updater: "stock", mcpTail: ["inbox", "mcp"], markFaces: marksOn ? "accepted" : nativeMarks ? "accepted (Plannotator's own)" : "refused (left out)" };
 
   // ── Orca mode ────────────────────────────────────────────────────────────────────────────────────────────────
   const data = join(root, "orca-inbox"), state = join(root, "state");
@@ -271,7 +276,7 @@ try {
   }
 
   // A mark: face set through the API is kept and returned in Orca mode too (refused, as stock, without mark-faces).
-  if (marksOn) {
+  if (keptMarks) {
     check((await markFace(base, "orca_session_1", "mark:codex")) === 200, "Orca mode refused a mark: face");
     check((await getJson(base, "/api/inbox/agent-faces")).faces.orca_session_1?.face === "mark:codex", "Orca mode did not keep a mark: face");
   } else {
@@ -337,13 +342,17 @@ try {
 
   // Without mark-faces, the source is stock's where that patch would change it.
   if (!marksOn) {
-    const types = await import(pathToFileURL(join(cwd, "packages/core/inbox-types.ts")).href);
-    check(types.INBOX_MARK_FACE === undefined && types.isInboxAgentFace("mark:codex") === false, "the source knows mark: faces without mark-faces");
-    check(types.INBOX_HOST_NAMES.orca === undefined, "the source names the orca host without mark-faces");
+    // None of the group's own lines (Plannotator's own version of them, when it has one, is its business).
     check(!existsSync(join(cwd, "packages/ui/components/inbox-thread/orca-marks.tsx")), "the Orca marks file is in a build without mark-faces");
-    check(!readFileSync(join(cwd, "packages/ui/components/inbox-thread/icons.tsx"), "utf8").includes("orca-marks"), "the marks use the Orca marks without mark-faces");
-    check(!readFileSync(join(cwd, "packages/inbox/icons.tsx"), "utf8").includes("'mark:'"), "the icons draw mark: faces without mark-faces");
-    result.marks = "left out (stock)";
+    stockWithout("mark-faces", "packages/ui/components/inbox-thread/icons.tsx", "orca-marks", "stockOwnMark");
+    stockWithout("mark-faces", "packages/inbox/icons.tsx", "'mark:'");
+    stockWithout("mark-faces", "packages/inbox/agents/AgentMark.tsx", "markHost");
+    stockWithout("mark-faces", "packages/core/inbox-types.ts", "an agent that runs through a host of its own");
+    if (!nativeMarks) {
+      check(types.INBOX_MARK_FACE === undefined, "the source knows mark: faces without mark-faces");
+      check(types.INBOX_HOST_NAMES.orca === undefined, "the source names the orca host without mark-faces");
+    }
+    result.marks = nativeMarks ? "left out (Plannotator's own mark: faces)" : "left out (stock)";
   }
   // A mark: face draws that host's own mark (and an Orca-only agent's mark from the Orca build's marks).
   // React resolves from the window's package (the tests folder has no dependencies of its own).

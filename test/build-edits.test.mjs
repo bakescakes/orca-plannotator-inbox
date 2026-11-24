@@ -130,6 +130,99 @@ test('a required group that no longer fits stops, and nothing after it is tried'
   assert.deepEqual(result.applied, [])
 })
 
+// Plannotator making one of the edits itself: `upstream` names its own version of the change.
+const OWN_GUARD = '  if (isOrcaHost(launch)) return null;'
+const GUARD_UP = { ...GUARD, upstream: 'if (isOrcaHost(launch)) return null;' }
+const ROUTE_UP = { ...ROUTE, upstream: 'host: launch.routeHost ?? launch.agent' }
+const withOwnGuard = SOURCE.replace('export function start(launch) {\n', `export function start(launch) {\n${OWN_GUARD}\n`)
+const withOwnRoute = SOURCE.replace('{ to: { host: launch.agent, session', '{ to: { host: launch.routeHost ?? launch.agent, session')
+const GROUPS = [{ name: 'core', required: true }, { name: 'marks', required: false }]
+
+test('an edit Plannotator now makes itself is satisfied: nothing is changed, and its group still applies', () => {
+  // Its line kept (an added line): the proof sits where the edit would go.
+  const kept = applyGroups(GROUPS, (name) => (name === 'core' ? [ROUTE] : [GUARD_UP]), () => withOwnGuard)
+  assert.equal(kept.stopped, null)
+  assert.deepEqual(kept.applied, ['core', 'marks'])
+  assert.deepEqual(kept.omitted, [])
+  assert.deepEqual(kept.satisfied, [{ edit: 'marks/guard', file: 'a.ts', proof: 'if (isOrcaHost(launch)) return null;' }])
+  const text = fileText(kept.files.get('a.ts'))
+  assert.doesNotMatch(text, /orcaMode\(\)/)
+  assert.equal(text.split('isOrcaHost').length, 2)
+  // Its line gone (Plannotator changed it the same way): the edit cannot apply, the proof says why.
+  const changed = applyGroups(GROUPS, (name) => (name === 'core' ? [ROUTE_UP] : [GUARD]), () => withOwnRoute)
+  assert.deepEqual(changed.applied, ['core', 'marks'])
+  assert.deepEqual(changed.satisfied.map((s) => s.edit), ['core/route'])
+  assert.equal(fileText(changed.files.get('a.ts')).split('routeHost').length, 2)
+  // Without the proof in the source, the same edits apply as any other.
+  const stock = applyGroups(GROUPS, (name) => (name === 'core' ? [ROUTE_UP] : [GUARD_UP]), () => SOURCE)
+  assert.deepEqual(stock.satisfied, [])
+  assert.match(fileText(stock.files.get('a.ts')), /host\.routeHost \?\? launch\.agent[\s\S]*/)
+  assert.match(fileText(stock.files.get('a.ts')), /orcaMode\(\)/)
+})
+
+test('neither the edit nor Plannotator’s own version found: refused as before', () => {
+  const gone = SOURCE.replace('to: { host: launch.agent, session', 'to: { host: someone.else, session')
+  const result = applyGroups([{ name: 'marks', required: false }], () => [ROUTE_UP], () => gone)
+  assert.deepEqual(result.applied, [])
+  assert.deepEqual(result.satisfied, [])
+  assert.match(result.omitted[0].reason, /^edit marks\/route \(a\.ts\): anchor .* is on no line, expected 1$/)
+})
+
+test('Plannotator’s version away from the edit’s place, or on two lines, is refused: never a guess', () => {
+  const filler = Array.from({ length: 60 }, (_, i) => `const filler${i} = ${i};`).join('\n')
+  const far = `${SOURCE}${filler}\nfunction other(launch) {\n${OWN_GUARD}\n}\n`
+  const away = applyGroups([{ name: 'marks', required: false }], () => [GUARD_UP], () => far)
+  assert.deepEqual(away.applied, [])
+  assert.match(away.omitted[0].reason, /has its own version of it \(.*isOrcaHost.*\) away from where this edit would go: refit it/)
+  const twice = applyGroups([{ name: 'marks', required: false }], () => [GUARD_UP], () => withOwnGuard + `function other(launch) {\n${OWN_GUARD}\n}\n`)
+  assert.match(twice.omitted[0].reason, /own version of it .* is on 2 lines, expected 1/)
+  // A required group stops on it, as on any refusal.
+  const stopped = applyGroups([{ name: 'core', required: true }], () => [GUARD_UP], () => far)
+  assert.equal(stopped.stopped.edit, 'core/guard')
+  // The proof is a line's text of some length, so it cannot match by accident.
+  assert.throws(() => parseEdits(JSON.stringify({ v: 1, edits: [{ ...GUARD, upstream: 'if (' }] })), /upstream must be one line's text/)
+  assert.throws(() => parseEdits(JSON.stringify({ v: 1, edits: [{ ...GUARD, upstream: [] }] })), /upstream must be one line's text/)
+})
+
+test('edits Plannotator makes itself are named in the manifest, the release notes and the daily check; the features stay', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orca-build-satisfied-'))
+  try {
+    const all = RECIPE.groups.flatMap((g) => g.features)
+    const dir = join(root, 'out')
+    mkdirSync(dir)
+    const made = ['mark-faces/face-of-mark', 'mark-faces/orca-host-name']
+    for (const target of TARGETS) {
+      const bytes = Buffer.from(target)
+      writeFileSync(join(dir, assetOf(target)), bytes)
+      writeFileSync(join(dir, assetOf(target) + '.build.json'), JSON.stringify({ ok: true, plannotator: '0.29.4', target, recipe: 'r', sha256: createHash('sha256').update(bytes).digest('hex'), omitted: [], satisfied: [...made].reverse(), features: all }))
+    }
+    const { manifest: m, notes } = manifest(dir, { version: '0.29.4', build: 'orca.1', commit: 'c', recipe: 'r' })
+    assert.deepEqual(m.features, all)
+    assert.deepEqual(m.omitted, [])
+    assert.deepEqual(m.satisfied, made)
+    assert.match(notes, /A full build: every Orca change is in it\./)
+    assert.match(notes, /Plannotator makes 2 of these changes itself now, so the build leaves those lines as Plannotator has them: `mark-faces\/face-of-mark`, `mark-faces\/orca-host-name`\./)
+    // Only edit names the recipe has.
+    writeFileSync(join(dir, assetOf(TARGETS[0]) + '.build.json'), JSON.stringify({ ok: true, plannotator: '0.29.4', target: TARGETS[0], recipe: 'r', sha256: createHash('sha256').update(Buffer.from(TARGETS[0])).digest('hex'), omitted: [], satisfied: ['mark-faces/x\n<!--'], features: all }))
+    assert.throws(() => manifest(dir, { version: '0.29.4', build: 'orca.1', commit: 'c', recipe: 'r' }), /groups or features the recipe does not have/)
+
+    const check = join(root, 'check')
+    mkdirSync(check)
+    writeFileSync(join(check, 'check.json'), JSON.stringify({ ok: true, omitted: [], satisfied: [...made, 'made/up'] }))
+    const v = mainVerdict(check, { head: '0123456789abcdef0123456789abcdef01234567', base: 'v0.29.3', upstream: 'backnotprop/plannotator', run: '' })
+    assert.equal(v.kind, 'fits')
+    assert.equal(v.line, 'Every edit fits 0123456789ab and its checks and gates pass. Plannotator makes 2 of the edits itself now: mark-faces/face-of-mark, mark-faces/orca-host-name.')
+    // From --fit alone, too, when the check stopped before it wrote what it found.
+    writeFileSync(join(check, 'check.json'), JSON.stringify({ ok: false, exit: 4, error: 'orca-build: gate tests/orca-mcp-contract.ts failed: exit 1' }))
+    writeFileSync(join(check, 'fit.json'), JSON.stringify({ groups: [{ name: 'mark-faces', edits: [{ id: 'face-of-mark', fits: true, satisfied: true, proof: 'x' }] }] }))
+    const broken = mainVerdict(check, { head: '0123456789abcdef0123456789abcdef01234567', base: 'v0.29.3', upstream: 'backnotprop/plannotator', run: '' })
+    assert.equal(broken.kind, 'broken')
+    assert.match(broken.body, /- Made by Plannotator itself now \(left as it has them\): `mark-faces\/face-of-mark`\n/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('Windows line endings are kept', () => {
   const crlf = SOURCE.replaceAll('\n', '\r\n')
   const out = apply(crlf, GUARD)

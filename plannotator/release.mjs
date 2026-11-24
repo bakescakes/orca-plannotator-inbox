@@ -33,6 +33,19 @@ const featuresOf = (name) => recipe.groups.find((g) => g.name === name)?.feature
 const knownGroup = (name) => recipe.groups.some((g) => g.name === name);
 const knownFeature = (name) => recipe.groups.some((g) => g.features.includes(name));
 const knownGate = (file) => recipe.gates.some((g) => g.target === file);
+/** Every edit the recipe has, as `group/id`: the only edit names a report may give back. */
+const EDIT_NAMES = new Set(
+  recipe.groups.flatMap((g) => {
+    try {
+      const data = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), g.file), "utf8"));
+      return (Array.isArray(data.edits) ? data.edits : []).map((e) => `${g.name}/${e.id}`);
+    } catch {
+      return [];
+    }
+  }),
+);
+/** A report's `satisfied` (the edits Plannotator makes itself): only names the recipe has, sorted, once each. */
+const satisfiedOf = (list) => [...new Set((Array.isArray(list) ? list : []).filter((n) => typeof n === "string" && EDIT_NAMES.has(n)))].sort();
 
 /**
  * Text that came from a build report (and so may hold upstream's words), made safe to place anywhere: one line, no
@@ -82,6 +95,7 @@ export function manifest(dir, { version, build, commit, recipe }) {
     // Reports come from jobs that ran upstream's build steps: only names the recipe knows may reach
     // $GITHUB_OUTPUT, the manifest or the notes.
     const strange = [...(report.omitted ?? []).map((o) => o?.name).filter((n) => !knownGroup(n)), ...(Array.isArray(report.features) ? report.features : [null]).filter((f) => !knownFeature(f))];
+    if ((report.satisfied ?? []).some((n) => !EDIT_NAMES.has(n))) strange.push("satisfied");
     if (strange.length) throw Error(`${name}'s report names groups or features the recipe does not have`);
     reports[target] = report;
   }
@@ -91,9 +105,11 @@ export function manifest(dir, { version, build, commit, recipe }) {
     if (JSON.stringify(names(r.omitted)) !== JSON.stringify(names(first.omitted)))
       throw Error(`the targets left out different groups: ${TARGETS[0]} ${JSON.stringify(names(first.omitted))}, ${target} ${JSON.stringify(names(r.omitted))}`);
     if (JSON.stringify(r.features) !== JSON.stringify(first.features)) throw Error(`the targets carry different features: ${TARGETS[0]} ${JSON.stringify(first.features)}, ${target} ${JSON.stringify(r.features)}`);
+    if (JSON.stringify(satisfiedOf(r.satisfied)) !== JSON.stringify(satisfiedOf(first.satisfied))) throw Error(`the targets found different edits made by Plannotator itself`);
   }
+  const satisfied = satisfiedOf(first.satisfied);
   const omitted = names(first.omitted);
-  const result = { v: 1, plannotator: version, build, pluginMin: PLUGIN_MIN, assets, features: [...first.features], omitted, recipe: first.recipe };
+  const result = { v: 1, plannotator: version, build, pluginMin: PLUGIN_MIN, assets, features: [...first.features], omitted, satisfied, recipe: first.recipe };
   const lacking = [...new Set(omitted.flatMap(featuresOf))].filter((f) => !first.features.includes(f));
   const why = (first.omitted ?? []).map((o) => `- \`${o.name}\` (${featuresOf(o.name).join(", ") || "no feature"}): ${o.forced ? "left out on purpose (--without)" : "no longer fits this Plannotator release"}: ${code(o.reason)}.`);
   const notes = [
@@ -102,6 +118,9 @@ export function manifest(dir, { version, build, commit, recipe }) {
     omitted.length
       ? [`**A reduced build.** It lacks ${lacking.join(", ") || "no feature the plugin reads"}: it leaves out ${omitted.length === 1 ? "one optional group of Orca edits" : "some optional groups of Orca edits"}. The plugin works with it and says what is missing.`, "", ...why, "", `Features it serves: ${result.features.join(", ")}.`].join("\n")
       : `A full build: every Orca change is in it. Features: ${result.features.join(", ")}.`,
+    ...(satisfied.length
+      ? ["", `Plannotator makes ${satisfied.length === 1 ? "one of these changes" : `${satisfied.length} of these changes`} itself now, so the build leaves ${satisfied.length === 1 ? "that line" : "those lines"} as Plannotator has ${satisfied.length === 1 ? "it" : "them"}: ${satisfied.map((n) => "`" + n + "`").join(", ")}.`]
+      : []),
     "",
     `Recipe ${first.recipe}.`,
   ].join("\n");
@@ -178,6 +197,13 @@ export function mainVerdict(dir, { head, base, upstream, run }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(upstream))) upstream = "backnotprop/plannotator";
   if (!/^https:\/\/[A-Za-z0-9._~:/?#@!$&'*+,;=%-]+$/.test(String(run ?? "")) || /[()]/.test(String(run))) run = "";
   const short = String(head).slice(0, 12);
+  // The edits Plannotator's main makes itself: from the check's report, else from --fit; names the recipe has only.
+  const upstreamHas = satisfiedOf(
+    Array.isArray(check?.satisfied)
+      ? check.satisfied
+      : (Array.isArray(fit?.groups) ? fit.groups : []).filter((g) => known(g?.name) && Array.isArray(g.edits)).flatMap((g) => g.edits.filter((e) => e?.satisfied === true).map((e) => `${g.name}/${e.id}`)),
+  );
+  const itself = upstreamHas.length ? ` Plannotator makes ${upstreamHas.length} of the edits itself now: ${upstreamHas.join(", ")}.` : "";
   let kind, line;
   if (!/^[0-9a-f]{40}$/.test(String(head))) {
     kind = "unknown";
@@ -197,7 +223,7 @@ export function mainVerdict(dir, { head, base, upstream, run }) {
     line = plain(check.omitted.filter((o) => known(o?.name)).map((o) => `${o.name}: ${plain(o.reason)}`).join("; ")) || "Some edits were left out.";
   } else {
     kind = misfits.length ? "reduced" : "fits";
-    line = kind === "fits" ? `Every edit fits ${short} and its checks and gates pass.` : "Some edits do not fit.";
+    line = kind === "fits" ? `Every edit fits ${short} and its checks and gates pass.${itself}` : "Some edits do not fit.";
   }
   const left = (Array.isArray(check?.omitted) ? check.omitted : []).map((o) => o?.name).filter(known).sort();
   // The key says what no longer fits, so a change gets a comment. It goes into an HTML comment, so it holds no
@@ -219,6 +245,7 @@ export function mainVerdict(dir, { head, base, upstream, run }) {
     `- Commits since main last took every edit: ${compare}`,
     `- Result: ${code(line)}`,
     ...(run ? [`- Run: ${run}`] : []),
+    ...(upstreamHas.length ? [`- Made by Plannotator itself now (left as it has them): ${upstreamHas.map((n) => "`" + n + "`").join(", ")}`] : []),
     "",
     ...(misfits.length
       ? ["| Edit | Group | File | What it found |", "|---|---|---|---|", ...misfits.slice(0, 50).map((m) => `| ${code(m.edit)} | ${m.group}${m.required ? " (required)" : ""} | ${code(m.file)} | ${code(m.why)} |`), ""]

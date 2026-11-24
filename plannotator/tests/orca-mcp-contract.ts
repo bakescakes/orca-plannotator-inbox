@@ -19,12 +19,26 @@ function same(actual: unknown, expected: unknown): boolean {
       : value;
   return JSON.stringify(ordered(actual)) === JSON.stringify(ordered(expected));
 }
-const expectedSets: Record<string, string[]> = {
-  FILLED_TOOLS: ["send_message", "read_thread", "submit_guide", "card", "steps", "thread_pulls", "routine"],
-  NO_PROJECT_TOOLS: ["steps"],
-  PROJECT_ONLY_TOOLS: ["search"],
-  AUTHOR_TOOLS: ["send_message", "submit_guide", "card", "steps", "thread_pulls", "routine"],
+// The shim's tool sets, as each reviewed contract has them. The source must match one of them exactly.
+// `resolve-session` (after 0.29.3): the shim fills resolve_message's agent_session, and only when it names moved_to
+// (the thread it names must hold a question that session asked); a plain archive is sent untouched, and never with
+// an author. The plugin's launcher fills the same field with the Orca chat's own session, from the server's
+// tools/list, and leaves a plain archive untouched as the shim does (bin/inbox-mcp.mjs).
+const CONTRACTS: Record<string, Record<string, string[]>> = {
+  "0.29": {
+    FILLED_TOOLS: ["send_message", "read_thread", "submit_guide", "card", "steps", "thread_pulls", "routine"],
+    NO_PROJECT_TOOLS: ["steps"],
+    PROJECT_ONLY_TOOLS: ["search"],
+    AUTHOR_TOOLS: ["send_message", "submit_guide", "card", "steps", "thread_pulls", "routine"],
+  },
+  "resolve-session": {
+    FILLED_TOOLS: ["send_message", "read_thread", "submit_guide", "card", "steps", "thread_pulls", "routine", "resolve_message"],
+    NO_PROJECT_TOOLS: ["steps", "resolve_message"],
+    PROJECT_ONLY_TOOLS: ["search"],
+    AUTHOR_TOOLS: ["send_message", "submit_guide", "card", "steps", "thread_pulls", "routine"],
+  },
 };
+const SET_NAMES = Object.keys(CONTRACTS["0.29"]);
 const identityFields = ["agent_host", "agent_session", "agent_name", "project_path"];
 const author = ["agent_host", "agent_session", "agent_name"];
 const allowed: Record<string, string[]> = {
@@ -46,7 +60,8 @@ const upstream = process.cwd();
 const shimPath = join(upstream, "apps/hook/server/inbox-mcp-shim.ts");
 requireContract(statSync(shimPath).size <= 512 * 1024, "shim source exceeds bounded inspection; review its identity contract");
 const source = readFileSync(shimPath, "utf8");
-for (const [name, expected] of Object.entries(expectedSets)) {
+const actualSets: Record<string, string[]> = {};
+for (const name of SET_NAMES) {
   // Deliberately narrow extraction: changed representation is a review gate,
   // never a guess that an unrecognized declaration has the old meaning. An exported set is the same declaration
   // (0.29.2 exports AUTHOR_TOOLS for `inbox call`); its literal is still checked below.
@@ -58,7 +73,14 @@ for (const [name, expected] of Object.entries(expectedSets)) {
   catch { throw new Error(PREFIX + name + " is no longer a literal JSON string list; review before admission"); }
   requireContract(Array.isArray(actual) && actual.every(item => typeof item === "string") && new Set(actual).size === actual.length,
     name + " is not an unambiguous literal tool set");
-  requireContract(same([...actual].sort(), [...expected].sort()), name + " changed; packaged native identity coverage must be reviewed");
+  actualSets[name] = [...(actual as string[])].sort();
+}
+const contract = Object.keys(CONTRACTS).find((key) => SET_NAMES.every((name) => same(actualSets[name], [...CONTRACTS[key][name]].sort())));
+requireContract(contract !== undefined, "the shim's tool sets changed (" + SET_NAMES.map((name) => name + " " + JSON.stringify(actualSets[name])).join(", ") + "); packaged native identity coverage must be reviewed");
+const resolveSession = contract === "resolve-session";
+if (resolveSession) {
+  allowed.resolve_message = ["agent_session"];
+  inputs.resolve_message = {message_id: "msg_contract", moved_to: "msg_contract_target"};
 }
 
 const home = mkdtempSync(join(tmpdir(), "orca-mcp-contract-"));
@@ -112,6 +134,15 @@ try {
       {host: "orca", session: native.agent_session, name: native.agent_name}, null);
     requireContract(same(defaults.params.arguments, {...input, ...fields}), tool + " default filling contract changed"); checks++;
   }
+  // resolve_message: a plain archive goes untouched (an older Inbox's strict schema), with or without a session at hand.
+  if (resolveSession) {
+    const plain = {message_id: "msg_contract"};
+    requireContract(schemaFor("resolve_message").safeParse(plain).success, "resolve_message no longer takes a plain archive"); checks++;
+    for (const host of [null, {host: "orca", session: native.agent_session, name: native.agent_name}]) {
+      requireContract(same(fillInboxToolArguments(call("resolve_message", plain), native.project_path, "ses_wrong", host, null).params.arguments, plain),
+        "resolve_message's plain archive is no longer sent untouched"); checks++;
+    }
+  }
   // Query scope is not author provenance; retain an explicit cross-project read.
   for (const tool of ["read_thread", "search"]) {
     const args = {...inputs[tool], project_path: "/inert/another-project", ...(tool === "read_thread" ? {agent_session: native.agent_session} : {})};
@@ -129,7 +160,7 @@ try {
       && result.params.arguments.agent_session === providerThread && schemaFor("read_thread").safeParse(result.params.arguments).success,
       "read_thread absent/null/array normalization changed; recheck wrapper argument-shape guard"); checks++;
   }
-  console.log(JSON.stringify({ok: true, contract: "native-mcp-identity-v1", checks, tools: Object.keys(inputs), sourceSets: Object.keys(expectedSets), effects: "schema-registration-and-pure-shim-only"}));
+  console.log(JSON.stringify({ok: true, contract: "native-mcp-identity-v1", shimSets: contract, checks, tools: Object.keys(inputs), sourceSets: SET_NAMES, effects: "schema-registration-and-pure-shim-only"}));
 } catch (error) {
   throw new Error(PREFIX + (error instanceof Error ? error.message : "unknown upstream contract failure"));
 } finally {

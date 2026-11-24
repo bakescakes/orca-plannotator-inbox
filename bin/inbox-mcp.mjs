@@ -769,8 +769,10 @@ export function enrich(message, context) {
   const proof = context.proof
   if (!isRecord(proof) || !context.delivering()) return UNTOUCHED
   const tool = params.name
-  const fields = context.fieldsOf(tool)
   const args = params.arguments ?? {}
+  // resolve_message takes the session only to move a thread's questions (`moved_to`: the thread it names must hold a
+  // question this chat asked); a plain archive goes as the agent wrote it, as Plannotator's own shim sends it.
+  const fields = tool === 'resolve_message' && args.moved_to === undefined ? [] : context.fieldsOf(tool)
   const ownMeta = isRecord(params._meta) ? params._meta : null
   const claimedWake = ownMeta !== null && WAKES_META in ownMeta
   if (fields.length === 0) {

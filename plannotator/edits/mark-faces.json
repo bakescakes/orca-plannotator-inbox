@@ -5,7 +5,8 @@
       "id": "orca-host-name",
       "file": "packages/core/inbox-types.ts",
       "anchor": ["export const INBOX_HOST_NAMES", "hermes:"],
-      "after": ["orca: \"Orca\","]
+      "after": ["orca: \"Orca\","],
+      "upstream": ["export const INBOX_HOST_NAMES", "orca: \"Orca\","]
     },
     {
       "id": "mark-face-pattern",
@@ -17,7 +18,8 @@
         " * drawn as the agent it runs, with that agent's animated mark where one exists. A host with no mark draws the neutral one.",
         " */",
         "export const INBOX_MARK_FACE = /^mark:([a-z0-9][a-z0-9-]{0,39})$/;"
-      ]
+      ],
+      "upstream": "export const INBOX_MARK_FACE = /^mark:([a-z0-9][a-z0-9-]{0,39})$/;"
     },
     {
       "id": "mark-face-accepted",
@@ -25,7 +27,8 @@
       "anchor": ["export const isInboxAgentFace = (", "INBOX_SET_FACE.test(value)"],
       "replace": [
         ["INBOX_SET_FACE.test(value)", "INBOX_SET_FACE.test(value) || INBOX_MARK_FACE.test(value)"]
-      ]
+      ],
+      "upstream": ["export const isInboxAgentFace = (", "INBOX_MARK_FACE.test(value)"]
     },
     {
       "id": "mark-host",
@@ -37,7 +40,8 @@
       "after": [
         "// A `mark:<host>` face is that host's own mark and rig, not a face over this one, and never the project's tile.",
         "if (markHost) host = markHost;"
-      ]
+      ],
+      "upstream": "const host = isInboxMarkFace(shown) ? inboxMarkFaceHost(shown) : ownHost;"
     },
     {
       "id": "mark-not-tile",
@@ -45,14 +49,16 @@
       "anchor": "const face = shownAgentFace(",
       "replace": [
         ["const face = shownAgentFace(", "const face: AgentFace = markHost ? 'agent' : shownAgentFace("]
-      ]
+      ],
+      "upstream": "const face = isInboxMarkFace(shown) ? 'agent' : shown;"
     },
     {
       "id": "face-of-mark",
       "file": "packages/inbox/icons.tsx",
       "anchor": "export function FaceOfMark(",
       "has": ["children"],
-      "after": ["  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big}>{children}</UiHostMark>;"]
+      "after": ["  if ((face as string).startsWith('mark:')) return <UiHostMark host={(face as string).slice(5)} big={big}>{children}</UiHostMark>;"],
+      "upstream": ["export function FaceOfMark(", "<UiHostMark host={inboxMarkFaceHost(face)} big={big}>"]
     },
     {
       "id": "extra-marks",

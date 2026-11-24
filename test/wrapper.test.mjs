@@ -185,6 +185,28 @@ test('reading tools get the session and project only when none was given; tools 
   assert.deepEqual(search, call('search', { query: 'x' }))
 })
 
+test('resolve_message gets the chat’s session only when it moves the questions; a plain archive goes as written', () => {
+  // From the Plannotator after 0.29.3: its schema takes agent_session, and its shim fills it only with moved_to.
+  const fields = { ...FIELDS, resolve_message: ['agent_session'] }
+  const moved = call('resolve_message', { message_id: 'msg_1', moved_to: 'msg_2' })
+  const result = enrich(moved, context({ fieldsOf: (tool) => fields[tool] ?? [] }))
+  assert.equal(result.changed, true)
+  assert.equal(result.authored, false)
+  assert.deepEqual(moved.params.arguments, { message_id: 'msg_1', moved_to: 'msg_2', agent_session: SESSION })
+  for (const args of [{ message_id: 'msg_1' }, { message_id: 'msg_1', resolved: false }]) {
+    const plain = call('resolve_message', { ...args })
+    assert.deepEqual(enrich(plain, context({ fieldsOf: (tool) => fields[tool] ?? [] })), { changed: false, authored: false })
+    assert.deepEqual(plain.params.arguments, args)
+  }
+  // A plain archive's own wake claim is still dropped, as on any tool without identity.
+  const claimed = call('resolve_message', { message_id: 'msg_1' }, { [WAKE]: true })
+  assert.equal(enrich(claimed, context({ fieldsOf: (tool) => fields[tool] ?? [] })).changed, true)
+  assert.deepEqual(claimed.params._meta, {})
+  // An older Plannotator, whose resolve_message takes no session: untouched either way.
+  const older = call('resolve_message', { message_id: 'msg_1', moved_to: 'msg_2' })
+  assert.equal(enrich(older, context()).changed, false)
+})
+
 test('a wake claim from the agent is always removed; only messages wake', () => {
   const plain = call('search', { query: 'x' }, { [WAKE]: true, keep: 1 })
   assert.equal(enrich(plain, context()).changed, true)

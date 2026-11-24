@@ -14,7 +14,8 @@
  *    "has": ["children"],                 text the line must also have, so a change in meaning refuses the edit
  *    "replace": [["from", "to"], …],      in that line, `from` (exactly once) becomes `to`
  *    "before": ["line", …],               lines put before it, or
- *    "after": ["line", …]}                after it, each indented by that line's own indentation
+ *    "after": ["line", …],                after it, each indented by that line's own indentation
+ *    "upstream": "INBOX_MARK_FACE.test("} proof that Plannotator now makes this change itself (below)
  *
  * Matching ignores indentation and whatever else is on the line, and sees only Plannotator's own lines: never a line
  * another edit put in. Edits that put lines at the same place stack in the order they are applied.
@@ -25,13 +26,23 @@
  * After each edit, the same edit is tried once more on the result and must be refused; an edit that would apply
  * twice is a broken recipe.
  *
+ * Satisfied by Plannotator: an edit may name `upstream`, text (or a list, found as an anchor is) on the line where
+ * Plannotator's own version of the change sits. When that proof is on exactly one of Plannotator's lines, the edit is
+ * satisfied: nothing is changed, and its group still applies and still carries its features. It stays fail-closed:
+ *   - proof on no line: the edit is applied, or refused, as any other;
+ *   - proof on more than one line: refused (which one is the change?);
+ *   - proof found and the edit refused (its anchor gone, or its change already on the line): satisfied;
+ *   - proof found and the edit would still apply: satisfied only when the proof is within 40 lines of the edit's own
+ *     line (Plannotator made the change in the same place, and keeping the anchor is what an added check or line
+ *     does). Anywhere else the two disagree, and the edit is refused.
+ *
  * A group of edits applies whole or not at all (`applyGroup`); `applyGroups` takes the recipe's groups in order, leaves
  * out an optional group that does not fit (and any group that needs it), and stops at a required one. Each line an edit changed or put in remembers which
  * edit did (`editedLines`), so an error a type check reports on that line can be laid on its group.
  */
 
 const WITHIN = 40;
-const KEYS = new Set(["id", "file", "anchor", "count", "has", "replace", "before", "after"]);
+const KEYS = new Set(["id", "file", "anchor", "count", "has", "replace", "before", "after", "upstream"]);
 
 export class EditRefused extends Error {
   constructor(edit, why) {
@@ -71,6 +82,10 @@ export function parseEdits(text, name = "edits") {
     if (edit.before !== undefined && !isLines(edit.before)) throw Error(`${where}: before must be a list of lines`);
     if (edit.after !== undefined && !isLines(edit.after)) throw Error(`${where}: after must be a list of lines`);
     if (!edit.replace && !edit.before && !edit.after) throw Error(`${where} changes nothing: give replace, before or after`);
+    if (edit.upstream !== undefined) {
+      const proof = typeof edit.upstream === "string" ? [edit.upstream] : edit.upstream;
+      if (!Array.isArray(proof) || proof.length === 0 || !proof.every((p) => isText(p) && p.trim().length >= 8)) throw Error(`${where}: upstream must be one line's text (8 characters or more), or a list of them`);
+    }
   }
   return data.edits;
 }
@@ -183,6 +198,64 @@ export function applyEdit(doc, edit, by = null) {
   }
 }
 
+/**
+ * Where an edit's `upstream` proof is: the indexes of the lines it ends on (Plannotator's own lines only), found as an
+ * anchor is found. Empty when it is on no line.
+ */
+function proofLines(doc, edit) {
+  const proof = typeof edit.upstream === "string" ? [edit.upstream] : edit.upstream;
+  const found = [];
+  doc.lines.forEach((line, start) => {
+    if (!line.own || !line.text.includes(proof[0])) return;
+    let at = start;
+    for (const next of proof.slice(1)) {
+      let hit = -1;
+      for (let i = at + 1, seen = 0; i < doc.lines.length && seen < WITHIN; i++) {
+        if (!doc.lines[i].own) continue;
+        seen++;
+        if (doc.lines[i].text.includes(next)) {
+          hit = i;
+          break;
+        }
+      }
+      if (hit === -1) return;
+      at = hit;
+    }
+    found.push(at);
+  });
+  return found;
+}
+
+/**
+ * Applies one edit, or finds Plannotator has made it itself (`upstream`, see above). Returns `{ satisfied: null }` when
+ * it was applied, `{ satisfied: <the proof's line> }` when nothing was changed because Plannotator has it; throws
+ * EditRefused otherwise.
+ */
+export function applyOrSatisfy(doc, edit, by = null) {
+  if (edit.upstream === undefined) {
+    applyEdit(doc, edit, by);
+    return { satisfied: null };
+  }
+  const proof = proofLines(doc, edit);
+  const first = typeof edit.upstream === "string" ? edit.upstream : edit.upstream[0];
+  if (proof.length > 1) throw new EditRefused(edit, `Plannotator's own version of it (${shown(first)}) is on ${proof.length} lines, expected 1`);
+  if (proof.length === 0) {
+    applyEdit(doc, edit, by);
+    return { satisfied: null };
+  }
+  const line = doc.lines[proof[0]].text.trim();
+  let targets;
+  try {
+    targets = anchored(doc, edit);
+    applyEdit(copyFile(doc), edit);
+  } catch (error) {
+    if (!(error instanceof EditRefused)) throw error;
+    return { satisfied: line };
+  }
+  if (targets.every((at) => Math.abs(at - proof[0]) <= WITHIN)) return { satisfied: line };
+  throw new EditRefused(edit, `Plannotator has its own version of it (${shown(line)}) away from where this edit would go: refit it`);
+}
+
 /** Would `edit` apply to this text? Null when it would, else why not. */
 export function refusalOf(text, edit) {
   try {
@@ -196,11 +269,13 @@ export function refusalOf(text, edit) {
 
 /**
  * Applies a group's edits to `files` (a Map of path → open file, filled from `read(path)` on first use). All or
- * nothing: on a refusal `files` is left as it was. Returns null when every edit applied, else
+ * nothing: on a refusal `files` is left as it was. Returns null when every edit applied or was satisfied by Plannotator
+ * (each satisfied one, `{ edit, file, proof }`, is pushed to `satisfied` once the whole group holds), else
  * `{ edit, file, why }` for the first edit refused.
  */
-export function applyGroup(files, edits, read, group = "edits") {
+export function applyGroup(files, edits, read, group = "edits", satisfied = null) {
   const work = new Map();
+  const found = [];
   const open = (path) => {
     if (!work.has(path)) {
       if (files.has(path)) work.set(path, copyFile(files.get(path)));
@@ -216,16 +291,22 @@ export function applyGroup(files, edits, read, group = "edits") {
     const doc = open(edit.file);
     const name = `${group}/${edit.id}`;
     if (!doc) return { edit: name, file: edit.file, why: `${edit.file} is not in this Plannotator` };
+    let done;
     try {
-      applyEdit(doc, edit, name);
+      done = applyOrSatisfy(doc, edit, name);
     } catch (error) {
       if (error instanceof EditRefused) return { edit: name, file: edit.file, why: error.why };
       throw error;
+    }
+    if (done.satisfied !== null) {
+      found.push({ edit: name, file: edit.file, proof: done.satisfied });
+      continue;
     }
     // Idempotence: the result, read afresh, must refuse the same edit.
     if (refusalOf(fileText(doc), edit) === null) throw Error(`edit ${name} would apply twice to ${edit.file}; give it an anchor or change it no longer matches once it is applied`);
   }
   for (const [path, doc] of work) files.set(path, doc);
+  if (satisfied) satisfied.push(...found);
   return null;
 }
 
@@ -235,13 +316,14 @@ export const editedLines = (doc) => doc.lines.flatMap((line, i) => (line.by ? [{
 /**
  * The recipe's groups in order (`{ name, required, needs? }`), each group's edits from `editsOf(name)`, files from
  * `read(path)` (text, or null when absent). `without`: names left out on purpose; `dropped`: `{ name, reason, edit? }`
- * left out for a reason found later (a type check). Returns `{ files, applied, omitted, stopped }`: `omitted` entries
+ * left out for a reason found later (a type check). Returns `{ files, applied, omitted, satisfied, stopped }`:
+ * `satisfied` lists the edits of applied groups that Plannotator makes itself (`{ edit, file, proof }`); `omitted` entries
  * are `{ name, reason, forced, edit?, file? }`; `stopped` is `{ group, edit, file, why }` when a required group did not
  * fit, and then nothing after it was tried and nothing should be written.
  */
 export function applyGroups(groups, editsOf, read, { without = [], dropped = [] } = {}) {
   const files = new Map();
-  const applied = [], omitted = [];
+  const applied = [], omitted = [], satisfied = [];
   const left = (name) => omitted.some((o) => o.name === name);
   for (const group of groups) {
     if (without.includes(group.name)) {
@@ -258,13 +340,13 @@ export function applyGroups(groups, editsOf, read, { without = [], dropped = [] 
       omitted.push({ name: group.name, reason: `needs ${need}, which is left out`, forced: false });
       continue;
     }
-    const refused = applyGroup(files, editsOf(group.name), read, group.name);
+    const refused = applyGroup(files, editsOf(group.name), read, group.name, satisfied);
     if (refused) {
-      if (group.required) return { files, applied, omitted, stopped: { group: group.name, ...refused } };
+      if (group.required) return { files, applied, omitted, satisfied, stopped: { group: group.name, ...refused } };
       omitted.push({ name: group.name, reason: `edit ${refused.edit} (${refused.file}): ${refused.why}`, forced: false, edit: refused.edit, file: refused.file });
       continue;
     }
     applied.push(group.name);
   }
-  return { files, applied, omitted, stopped: null };
+  return { files, applied, omitted, satisfied, stopped: null };
 }
