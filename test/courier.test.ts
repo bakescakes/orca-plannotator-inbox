@@ -293,6 +293,22 @@ test('on Windows a mail fits one command line, so a shorter reply already points
   assert.match(buildEnvelope('k'.repeat(64), SESSION, reply('msg_1', { body: 'x'.repeat(40_000) }), 'darwin').body, /x{40000}/)
 })
 
+test('the subject says what arrived, then the thread: Orca shows it beside a sender it calls "an agent"', () => {
+  const subject = (overrides: Record<string, unknown>): string => buildEnvelope('k'.repeat(64), SESSION, reply('msg_s', overrides as never)).subject
+  assert.equal(subject({}), 'Inbox reply: Ship it?')
+  assert.equal(subject({ subject: '  Ship\n it?  ' }), 'Inbox reply: Ship it?')
+  // An unnamed thread: no title is made up for it.
+  assert.equal(subject({ subject: null }), 'Inbox reply')
+  assert.equal(subject({ type: 'message', subject: null }), 'Inbox message')
+  assert.equal(subject({ type: 'message', new_thread: true }), 'Inbox message: Ship it?')
+  assert.equal(subject({ type: 'message', handoff: { from: 'Codex' } }), 'Inbox thread handed to you: Ship it?')
+  assert.equal(subject({ handed_away: true }), 'Inbox thread handed on: Ship it?')
+  assert.equal(subject({ tagged: true }), 'Inbox tag: Ship it?')
+  assert.equal(subject({ reask: true }), 'Inbox ask again: Ship it?')
+  assert.equal(subject({ ack_of: 'msg_question' }), 'Inbox reaction: Ship it?')
+  assert.equal(subject({ subject: 'x'.repeat(1000) }).length, 300)
+})
+
 test('what else the person did travels with the reply', () => {
   const handoff = buildEnvelope('k'.repeat(64), SESSION, reply('msg_2', { type: 'message', handoff: { from: 'Codex' }, name_thread: true, added_in_a_later_plannotator: { n: 1 }, tidy: false } as never))
   assert.match(handoff.body, /handed you this Plannotator Inbox thread/)
