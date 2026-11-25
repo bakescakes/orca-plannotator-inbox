@@ -71,8 +71,10 @@ meet one of these.
 - On Windows, Plannotator keeps starting agents from the Inbox switched off, and the Orca build
   does the same: Start, Stop and Resume are not offered there unless `inboxLaunch.enabled` is
   `true` in Plannotator's `config.json`. That has not been tried inside Orca on Windows.
-- On Windows, CI runs the tests and the end-to-end run with the real Plannotator through the
-  launcher. The plugin has not been run inside Orca on Windows, nor with a real agent there.
+- On Windows, CI runs the tests, the end-to-end run with the real Plannotator through the
+  launcher, and the plugin inside a real Orca with the newest releases, where a reply is delivered
+  to a real native chat. The update half of that test and the test with the Orca build run on
+  macOS and Linux only, and no signed-in agent has been tried on Windows.
 
 Bot pictures and the waiting mark have limits of their own, listed in
 [Bot pictures](how-it-works.md#bot-pictures) and

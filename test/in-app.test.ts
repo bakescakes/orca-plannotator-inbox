@@ -10,19 +10,20 @@
 // older programs run first, then the newer ones take over the same profile and the same Inbox
 // data, with nothing installed or connected again, and a second reply must still arrive.
 //
-// Runs only when ORCA_INAPP_CLI names the `orca` CLI inside the Orca.app to start, and
-// PLANNOTATOR_E2E_BIN a `plannotator` binary, and `claude` is installed (Orca needs an agent
-// program to open a chat). It never touches the default Orca profile, the real Inbox or any
+// Runs only when ORCA_INAPP_CLI names the CLI inside the Orca to start (`orca` in Orca.app on macOS,
+// `resources/bin/orca-ide` on Linux, `orca.exe` on Windows), and PLANNOTATOR_E2E_BIN a `plannotator`
+// binary, and `claude` is installed (Orca needs an agent program to open a chat). It never touches the default Orca profile, the real Inbox or any
 // agent's settings. The ORCA_E2E_* variables are Orca's own test switches for a disposable profile.
 import assert from 'node:assert/strict'
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, cp, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, sep } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
-import { chatAgentScript, mcpClient, refusingModel, tempDir, until } from './fakes'
+import { launcherPath } from '../src/shared'
+import { chatAgentBatch, chatAgentName, chatAgentScript, execProgram, findClaude, mcpClient, orcaAppFolder, refusingModel, serveInApp, spawnProgram, systemEnv, tempDir, until, windowsHomeEnv } from './fakes'
 import { processesIn, stopProcessesIn } from './own-processes'
 
 const text = (name: string): string => (process.env[name] ?? '').trim()
@@ -30,11 +31,8 @@ const CLI = text('ORCA_INAPP_CLI')
 const BINARY = text('PLANNOTATOR_E2E_BIN')
 const CLI_BEFORE = text('ORCA_INAPP_CLI_BEFORE')
 const BINARY_BEFORE = text('PLANNOTATOR_E2E_BIN_BEFORE')
-const CLAUDE = text('PATH')
-  .split(delimiter)
-  .filter(Boolean)
-  .map((folder) => join(folder, 'claude'))
-  .find((candidate) => existsSync(candidate))
+const CLAUDE = findClaude(text('PATH'))
+const WINDOWS = process.platform === 'win32'
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url))
 /** What Orca gives a native chat's agent, and Connect passes on to the launcher. */
 const CHAT_VARIABLES = ['ORCA_AGENT_SESSION_ID', 'ORCA_STRUCTURED_SESSION', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_USER_DATA_PATH', 'ORCA_CLI_COMMAND', 'ORCA_TERMINAL_HANDLE']
@@ -61,11 +59,10 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
   await mkdir(chatEnvDir, { recursive: true })
   const quoted = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
   const model = await refusingModel()
-  await writeFile(
-    join(bin, 'claude'),
-    chatAgentScript({ claude: await realpath(CLAUDE!), chatEnvDir, configDir: join(root, 'claude-config'), modelUrl: model.url, variables: CHAT_VARIABLES })
-  )
-  await chmod(join(bin, 'claude'), 0o755)
+  const chatAgent = join(bin, chatAgentName())
+  const agentInput = { claude: await realpath(CLAUDE!), chatEnvDir, configDir: join(root, 'claude-config'), modelUrl: model.url, variables: CHAT_VARIABLES }
+  await writeFile(chatAgent, WINDOWS ? chatAgentBatch(agentInput) : chatAgentScript(agentInput))
+  await chmod(chatAgent, 0o755)
   // Orca asks a login shell for PATH and that shell's order wins: it lists the system folders first
   // (Homebrew's among them, where an installed `claude` may be), then what it inherited. So this
   // folder is put first the way a person would do it, in the shell's own profile.
@@ -78,6 +75,9 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
     HOME: home,
     USER: process.env.USER,
     TMPDIR: process.env.TMPDIR,
+    ...systemEnv(),
+    ...serveInApp(),
+    ...(WINDOWS ? await windowsHomeEnv(home, bin) : {}),
     ORCA_E2E_USER_DATA_DIR: profile,
     ORCA_USER_DATA_PATH: profile,
     ORCA_E2E_HEADLESS: '1'
@@ -89,7 +89,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
   await writeFile(join(profile, 'plugins-data', 'local.plannotator-inbox', 'settings.json'), JSON.stringify({ orcaBuild: false }))
   const plannotatorEnv = { ...env, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0', PLANNOTATOR_AUTO_UPDATE: '0', PLANNOTATOR_BROWSER: 'none' }
   const run = (file: string, args: string[], options: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<string> =>
-    new Promise((resolve) => execFile(file, args, { env: options.env ?? env, cwd: options.cwd ?? root, timeout: 90_000, maxBuffer: 32 * 1024 * 1024 }, (_error, stdout) => resolve(String(stdout))))
+    new Promise((resolve) => execProgram(file, args, { env: options.env ?? env, cwd: options.cwd ?? root, timeout: 90_000, maxBuffer: 32 * 1024 * 1024 }, (_error, stdout) => resolve(stdout)))
 
   await run('git', ['init', '-q', '-b', 'trial', project])
   await run('git', ['-c', 'user.name=trial', '-c', 'user.email=trial@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: project })
@@ -132,9 +132,9 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       await until(async () => { const now = await state(); return now !== null && now.at >= started && now.delivering === true }, 'the installed worker to say it delivers', 60_000)
       const plugins = (await orca('plugin', 'list')).result?.plugins as { pluginKey: string; status: string }[]
       assert.equal(plugins.find((plugin) => plugin.pluginKey.endsWith('plannotator-inbox'))?.status, 'running')
-      const launcher = await readFile(join(shared, 'inbox-mcp'), 'utf8')
-      const app = await realpath(cli.slice(0, cli.indexOf('.app/') + 4))
-      assert.ok(launcher.includes(`${app}/`), `the launcher runs this Orca’s own program:\n${launcher}`)
+      const launcher = await readFile(launcherPath(shared), 'utf8')
+      const app = `${await realpath(orcaAppFolder(cli))}${sep}`
+      assert.ok(WINDOWS ? launcher.toLowerCase().includes(app.toLowerCase()) : launcher.includes(app), `the launcher runs this Orca’s own program:\n${launcher}`)
 
       // A real native chat. Its agent is not signed in here; the chat exists all the same.
       const launched = await orca('agent', 'launch', '--agent', 'claude', '--worktree', `path:${project}`, '--surface', 'chat', '--prompt', 'Automated test: no action needed.')
@@ -145,13 +145,13 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       // The agent's side: the launcher exactly as the chat's agent would run it.
       await until(() => existsSync(join(chatEnvDir, session)), 'Orca to start the chat’s agent', 60_000)
       const chatEnv: Record<string, string> = {}
-      for (const line of (await readFile(join(chatEnvDir, session), 'utf8')).split('\n')) {
+      for (const line of (await readFile(join(chatEnvDir, session), 'utf8')).split(/\r?\n/)) {
         const at = line.indexOf('=')
         if (at > 0 && line.slice(at + 1) !== '') chatEnv[line.slice(0, at)] = line.slice(at + 1)
       }
       assert.equal(chatEnv.ORCA_AGENT_SESSION_ID, session)
       assert.ok(chatEnv.ORCA_CLI_COMMAND, `Orca names its CLI to a chat: ${Object.keys(chatEnv).join(', ')}`)
-      agent = spawn(join(shared, 'inbox-mcp'), [], { cwd: project, env: { ...plannotatorEnv, PLANNOTATOR_BIN: plannotator, ...chatEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
+      agent = spawnProgram(launcherPath(shared), [], { cwd: project, env: { ...plannotatorEnv, PLANNOTATOR_BIN: plannotator, ...chatEnv }, stdio: ['pipe', 'pipe', 'pipe'] })
       const mcp = mcpClient(agent as never)
       const hello = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'orca-plannotator-inapp', version: '0' } })
       assert.match(String(hello.instructions), /In this Orca chat you are already connected/)
@@ -227,7 +227,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
     } catch (error) {
       const logs = await run(cli, ['plugin', 'logs', 'local.plannotator-inbox', '--json'])
       const seen = await readdir(chatEnvDir).catch(() => [] as string[])
-      const agentSays = await run(join(bin, 'claude'), ['--version'])
+      const agentSays = await run(chatAgent, ['--version'])
       process.stderr.write(`the Inbox last answered the test’s poll: ${lastPoll || 'not asked'}\nsecond Orca said:\n${serveLog.slice(-12_000)}\nthe plugin logged:\n${logs.slice(0, 3000)}\nchats whose agent started: ${JSON.stringify(seen)}\nthe agent program (${await realpath(CLAUDE!)}) says: ${agentSays.trim() || 'nothing'}\n`)
       throw error
     } finally {
@@ -246,9 +246,10 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
       // The second Orca, its helpers and its crash reporter, which stopping the CLI leaves running: exactly
       // the processes started for this throwaway profile, never another Orca.
       await stopProcessesIn(root)
-      // Stopping says so, so an agent is not told replies arrive while nothing delivers.
+      // Stopping says so, so an agent is not told replies arrive while nothing delivers. Windows has no
+      // signal for the CLI to pass on: ending it ends the Orca it started without a word to the worker.
       const last = existsSync(join(shared, 'state.json')) ? JSON.parse(await readFile(join(shared, 'state.json'), 'utf8')) : null
-      if (last && serve.signalCode !== 'SIGKILL') assert.equal(last.delivering, false, 'the worker says it stopped delivering')
+      if (last && serve.signalCode !== 'SIGKILL' && !WINDOWS) assert.equal(last.delivering, false, 'the worker says it stopped delivering')
     }
   }
 
@@ -263,7 +264,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
   process.stderr.write(`in-app passed: ${passed.join(' → then, same profile and Inbox data, ')}\n`)
 })
 
-test('cleanup stops exactly the processes started in the test’s own throwaway folder', { skip: process.platform === 'win32' ? 'POSIX ps' : false }, async () => {
+test('cleanup stops exactly the processes started in the test’s own throwaway folder', async () => {
   const mine = await realpath(await tempDir('orca-plannotator-own-'))
   const other = await realpath(await tempDir('orca-plannotator-other-'))
   const idle = 'setTimeout(() => {}, 600000)'

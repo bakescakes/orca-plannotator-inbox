@@ -15,7 +15,7 @@
 //  5. Stop and Resume, as far as a chat whose agent's turns all fail allows (see the step).
 //  6. The started chat's icon: `mark:claude-code` under the id the Inbox lists that agent by.
 //
-// Runs only when ORCA_INAPP_CLI names the `orca` CLI inside the Orca.app to start,
+// Runs only when ORCA_INAPP_CLI names the CLI inside the Orca to start (macOS or Linux),
 // ORCA_BUILD_E2E_BIN an Orca build of Plannotator for this computer, and `claude` is installed (Orca
 // needs an agent program to open a chat). It never touches the default Orca profile, the real Inbox
 // or any agent's settings; the chat's agent has no one's account, and its model is a local
@@ -28,7 +28,7 @@ import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
-import { chatAgentScript, mcpClient, refusingModel, tempDir, until } from './fakes'
+import { chatAgentScript, findClaude, mcpClient, orcaAppFolder, refusingModel, serveInApp, systemEnv, tempDir, until } from './fakes'
 import { stopProcessesIn } from './own-processes'
 // @ts-expect-error a plain module without types, shared with the updater's own tests
 import { releaseServer } from './release-fakes.mjs'
@@ -36,11 +36,7 @@ import { releaseServer } from './release-fakes.mjs'
 const text = (name: string): string => (process.env[name] ?? '').trim()
 const CLI = text('ORCA_INAPP_CLI')
 const BUILD = text('ORCA_BUILD_E2E_BIN')
-const CLAUDE = text('PATH')
-  .split(delimiter)
-  .filter(Boolean)
-  .map((folder) => join(folder, 'claude'))
-  .find((candidate) => existsSync(candidate))
+const CLAUDE = findClaude(text('PATH'))
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url))
 const CHAT_VARIABLES = ['ORCA_AGENT_SESSION_ID', 'ORCA_STRUCTURED_SESSION', 'ORCA_AGENT_SESSION_SPAWN_TOKEN', 'ORCA_USER_DATA_PATH', 'ORCA_CLI_COMMAND', 'ORCA_TERMINAL_HANDLE']
 const skip =
@@ -114,6 +110,8 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     HOME: home,
     USER: process.env.USER,
     TMPDIR: process.env.TMPDIR,
+    ...systemEnv(),
+    ...serveInApp(),
     ORCA_E2E_USER_DATA_DIR: profile,
     ORCA_USER_DATA_PATH: profile,
     ORCA_E2E_HEADLESS: '1',
@@ -155,16 +153,21 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
    * The chat tabs Orca's runtime has in one workspace (`session.tabs.list`), by session id with their
    * agent. Unlike `worktree ps`, this lists a chat that has had no turn yet.
    */
-  const app = CLI.slice(0, CLI.indexOf('.app/') + 4)
+  // Orca's own files: in Orca.app on macOS; on Linux beside `resources`, with the program named as
+  // Orca's own CLI looks for it.
+  const app = orcaAppFolder(CLI)
+  const mac = app.endsWith('.app')
+  const resources = mac ? join(app, 'Contents', 'Resources') : join(app, 'resources')
+  const program = mac ? join(app, 'Contents', 'MacOS', 'Orca') : (['orca-ide', 'orca', 'Orca'].map((name) => join(app, name)).find((path) => existsSync(path)) ?? join(app, 'orca-ide'))
   const tabsIn = async (worktree: string): Promise<Map<string, string>> => {
-    const out = join(app, 'Contents', 'Resources', 'app.asar.unpacked', 'out')
+    const out = join(resources, 'app.asar.unpacked', 'out')
     const script = [
       `const { RuntimeClient } = require(${JSON.stringify(join(out, 'cli', 'runtime', 'client.js'))})`,
       'new RuntimeClient(undefined, 12000, null, null)',
       `  .call('session.tabs.list', { worktree: ${JSON.stringify(worktree)} })`,
       '  .then((answer) => process.stdout.write(JSON.stringify(answer), () => process.exit(0)), (error) => process.stdout.write(JSON.stringify({ ok: false, error: String(error) }), () => process.exit(1)))'
     ].join('\n')
-    const answered = await run(join(app, 'Contents', 'MacOS', 'Orca'), ['-e', script], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } })
+    const answered = await run(program, ['-e', script], { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } })
     const parsed = JSON.parse(answered.stdout || '{}') as { ok?: boolean; result?: { tabs?: Json[] } }
     assert.equal(parsed.ok, true, answered.stdout.slice(0, 600))
     const tabs = new Map<string, string>()

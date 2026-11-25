@@ -143,6 +143,141 @@ jobs:
           "$ORCA" plugin types .
           "$ORCA" plugin test .
 
+  linux:
+    name: newest Orca and Plannotator on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The package a person installs, with what it depends on. Its CLI is `orca-ide`.
+      - name: Newest Orca
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/orca"
+          gh release download --repo stablyai/orca --pattern 'orca-ide_*_amd64.deb' --dir "$RUNNER_TEMP/orca"
+          sudo apt-get update -q
+          sudo apt-get install -y -q "$RUNNER_TEMP"/orca/orca-ide_*_amd64.deb
+          echo "ORCA=/opt/Orca/resources/bin/orca-ide" >> "$GITHUB_ENV"
+
+      - name: Newest Plannotator
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/plannotator"
+          cd "$RUNNER_TEMP/plannotator"
+          gh release download --repo backnotprop/plannotator --pattern 'plannotator-linux-x64' --pattern 'plannotator-linux-x64.sha256'
+          sha256sum -c plannotator-linux-x64.sha256
+          chmod +x plannotator-linux-x64
+          echo "PLANNOTATOR_E2E_BIN=$RUNNER_TEMP/plannotator/plannotator-linux-x64" >> "$GITHUB_ENV"
+
+      # The Orca build of Plannotator this repository publishes; its tests are skipped until one exists.
+      - name: Newest Orca build of Plannotator
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/orca-build"
+          cd "$RUNNER_TEMP/orca-build"
+          if gh release download plannotator-orca-index --repo "$GITHUB_REPOSITORY" --pattern index.json 2> /dev/null; then
+            tag="$(node -p 'JSON.parse(require("fs").readFileSync("index.json", "utf8")).latest.tag')"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern plannotator-orca-linux-x64 --pattern manifest.json
+            want="$(node -p 'JSON.parse(require("fs").readFileSync("manifest.json", "utf8")).assets["linux-x64"].sha256')"
+            echo "$want  plannotator-orca-linux-x64" | sha256sum -c
+            chmod +x plannotator-orca-linux-x64
+            echo "ORCA_BUILD_E2E_BIN=$PWD/plannotator-orca-linux-x64" >> "$GITHUB_ENV"
+          else
+            echo "No Orca build is published yet."
+          fi
+
+      - name: Types for this Orca, then type-check
+        run: |
+          npm ci
+          "$ORCA" plugin types .
+          npm run typecheck
+
+      - name: Validate the manifest
+        run: '"$ORCA" plugin validate . --json'
+
+      - name: Tests, including the end-to-end run with the real Plannotator
+        run: '"$ORCA" plugin test .'
+
+      - name: Render the panel in every scenario
+        run: '"$ORCA" plugin check . --json'
+
+  linux-update:
+    # The plugin inside a real Orca on Linux, across a real update, as on macOS. The newest Orca is
+    # installed from its package; the previous one is unpacked beside it, with Chromium's sandbox
+    # helper set up the way the package's own install script does it.
+    name: inside Orca on Linux, across an update
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Newest and previous Orca
+        run: |
+          set -euo pipefail
+          previous="$(gh release list --repo stablyai/orca --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName')"
+          mkdir -p "$RUNNER_TEMP/orca" "$RUNNER_TEMP/orca-before"
+          gh release download --repo stablyai/orca --pattern 'orca-ide_*_amd64.deb' --dir "$RUNNER_TEMP/orca"
+          gh release download "$previous" --repo stablyai/orca --pattern 'orca-ide_*_amd64.deb' --dir "$RUNNER_TEMP/orca-before"
+          sudo apt-get update -q
+          sudo apt-get install -y -q "$RUNNER_TEMP"/orca/orca-ide_*_amd64.deb
+          dpkg-deb -x "$RUNNER_TEMP"/orca-before/orca-ide_*_amd64.deb "$RUNNER_TEMP/orca-before/root"
+          before="$(find "$RUNNER_TEMP/orca-before/root/opt" -path '*/resources/bin/orca-ide' -print -quit)"
+          sandbox="$(dirname "$(dirname "$(dirname "$before")")")/chrome-sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          echo "ORCA=/opt/Orca/resources/bin/orca-ide" >> "$GITHUB_ENV"
+          echo "ORCA_INAPP_CLI=/opt/Orca/resources/bin/orca-ide" >> "$GITHUB_ENV"
+          echo "ORCA_INAPP_CLI_BEFORE=$before" >> "$GITHUB_ENV"
+
+      - name: Newest and previous Plannotator
+        run: |
+          set -euo pipefail
+          previous="$(gh release list --repo backnotprop/plannotator --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName')"
+          for pair in "plannotator:" "plannotator-before:$previous"; do
+            mkdir -p "$RUNNER_TEMP/${pair%%:*}"
+            cd "$RUNNER_TEMP/${pair%%:*}"
+            gh release download ${pair#*:} --repo backnotprop/plannotator --pattern 'plannotator-linux-x64' --pattern 'plannotator-linux-x64.sha256'
+            sha256sum -c plannotator-linux-x64.sha256
+            chmod +x plannotator-linux-x64
+          done
+          echo "PLANNOTATOR_E2E_BIN=$RUNNER_TEMP/plannotator/plannotator-linux-x64" >> "$GITHUB_ENV"
+          echo "PLANNOTATOR_E2E_BIN_BEFORE=$RUNNER_TEMP/plannotator-before/plannotator-linux-x64" >> "$GITHUB_ENV"
+
+      # The Orca build of Plannotator this repository publishes; its tests are skipped until one exists.
+      - name: Newest Orca build of Plannotator
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/orca-build"
+          cd "$RUNNER_TEMP/orca-build"
+          if gh release download plannotator-orca-index --repo "$GITHUB_REPOSITORY" --pattern index.json 2> /dev/null; then
+            tag="$(node -p 'JSON.parse(require("fs").readFileSync("index.json", "utf8")).latest.tag')"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern plannotator-orca-linux-x64 --pattern manifest.json
+            want="$(node -p 'JSON.parse(require("fs").readFileSync("manifest.json", "utf8")).assets["linux-x64"].sha256')"
+            echo "$want  plannotator-orca-linux-x64" | sha256sum -c
+            chmod +x plannotator-orca-linux-x64
+            echo "ORCA_BUILD_E2E_BIN=$PWD/plannotator-orca-linux-x64" >> "$GITHUB_ENV"
+          else
+            echo "No Orca build is published yet."
+          fi
+
+      # Orca needs an agent program to open a chat. It is never signed in here.
+      - name: An agent program
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/agent" @anthropic-ai/claude-code
+          echo "$RUNNER_TEMP/agent/bin" >> "$GITHUB_PATH"
+
+      # A desktop session as Orca's own Linux tests start one: a session bus and a virtual display.
+      - name: Install the plugin in a real Orca, deliver a reply, update both, deliver another
+        run: |
+          npm ci
+          "$ORCA" plugin types .
+          dbus-run-session -- xvfb-run -a "$ORCA" plugin test .
+
   windows:
     name: Windows
     runs-on: windows-latest
@@ -204,5 +339,65 @@ jobs:
       - name: Tests, including the end-to-end run with the real Plannotator
         run: |
           Set-Location $env:PLUGIN
+          & $env:ORCA plugin test .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows-inapp:
+    # The plugin inside a real Orca on Windows: the newest Orca and Plannotator, without the update
+    # half (the installer keeps one Orca). The test with the Orca build of Plannotator is not run here.
+    name: inside Orca on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      # As in the Windows job: the plugin is tested from a copy on the drive Orca installs to.
+      - name: Put the plugin on the drive Orca installs to
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $plugin = Join-Path $env:LOCALAPPDATA 'plugin-under-test'
+          Copy-Item -Recurse -Force $env:GITHUB_WORKSPACE $plugin
+          "PLUGIN=$plugin" >> $env:GITHUB_ENV
+
+      - name: Newest Orca
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'orca'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download --repo stablyai/orca --pattern 'orca-windows-setup.exe' --dir $dir
+          Start-Process -FilePath (Join-Path $dir 'orca-windows-setup.exe') -ArgumentList '/S' -Wait
+          $shim = Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter 'orca.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $shim) { throw 'the Orca CLI was not found after installing' }
+          $cli = Join-Path $shim.DirectoryName 'orca.exe'
+          if (-not (Test-Path $cli)) { throw "no orca.exe beside $($shim.FullName)" }
+          "ORCA=$cli" >> $env:GITHUB_ENV
+          "ORCA_INAPP_CLI=$cli" >> $env:GITHUB_ENV
+
+      - name: Newest Plannotator
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'plannotator'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download --repo backnotprop/plannotator --pattern 'plannotator-win32-x64.exe' --pattern 'plannotator-win32-x64.exe.sha256' --dir $dir
+          $want = ((Get-Content (Join-Path $dir 'plannotator-win32-x64.exe.sha256')) -split '\s+')[0].ToLower()
+          $have = (Get-FileHash (Join-Path $dir 'plannotator-win32-x64.exe') -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $have) { throw 'the Plannotator download does not match its checksum' }
+          "PLANNOTATOR_E2E_BIN=$(Join-Path $dir 'plannotator-win32-x64.exe')" >> $env:GITHUB_ENV
+
+      # Orca needs an agent program to open a chat. It is never signed in here.
+      - name: An agent program
+        run: npm install --global @anthropic-ai/claude-code
+
+      - name: Install the plugin in a real Orca and deliver a reply
+        run: |
+          Set-Location $env:PLUGIN
+          npm ci
+          & $env:ORCA plugin types .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:ORCA plugin test .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

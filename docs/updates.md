@@ -77,15 +77,18 @@ told that replies arrive by themselves.
 ## Daily CI
 
 CI runs every day against the newest released Orca and Plannotator (`.github/workflows/ci.yml`),
-so a breaking update shows up as a failed run rather than as a missing reply. It has three jobs:
+so a breaking update shows up as a failed run rather than as a missing reply. It has six jobs:
 
 - an end-to-end run with the real, unmodified `plannotator` binary, through the launcher as an
-  agent's settings run it,
-- the same tests and end-to-end run on Windows, and
-- the plugin inside a real Orca, across an update: the previous Orca and Plannotator releases
-  start in a throwaway profile, the plugin is installed and delivers a reply to a real native
-  chat; then the newest releases take over the same profile and the same Inbox data, nothing is
-  installed or connected again, and a second reply has to arrive.
+  agent's settings run it, on macOS,
+- the same tests and end-to-end run on Linux, and on Windows,
+- the plugin inside a real Orca, across an update, on macOS and on Linux: the previous Orca and
+  Plannotator releases start in a throwaway profile, the plugin is installed and delivers a reply
+  to a real native chat; then the newest releases take over the same profile and the same Inbox
+  data, nothing is installed or connected again, and a second reply has to arrive, and
+- the plugin inside a real Orca on Windows with the newest releases: installed, and a reply
+  delivered to a real native chat. There is no update half there, because the Windows installer
+  keeps one Orca.
 
 That update test passed locally from Orca 1.4.258 and Plannotator 0.28.63 to Orca 1.4.261 and
 Plannotator 0.28.66.
