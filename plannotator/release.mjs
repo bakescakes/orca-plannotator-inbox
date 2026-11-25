@@ -123,6 +123,8 @@ export function manifest(dir, { version, build, commit, recipe }) {
       : []),
     "",
     `Recipe ${first.recipe}.`,
+    "",
+    "This is Plannotator with a few changes for Orca, kept in this repository under `plannotator/`. Plannotator is by backnotprop and is licensed MIT or Apache-2.0; both license texts are attached as LICENSE-MIT and LICENSE-APACHE.",
   ].join("\n");
   return { manifest: result, notes: notes.trimEnd() + "\n" };
 }
