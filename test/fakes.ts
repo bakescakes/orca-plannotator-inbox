@@ -1,12 +1,13 @@
 // Stand-ins for the two programs the plugin talks to, at the same boundaries the real ones sit:
 // Orca's CLI (argv in, one JSON document out) and the Plannotator Inbox (loopback HTTP).
-import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, spawn, type ChildProcess, type ChildProcessWithoutNullStreams, type ExecFileOptions, type SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import type { InboxCommand } from '../src/inbox'
 import type { KeyValue } from '../src/ledger'
 import type { Exec } from '../src/orca-cli'
@@ -45,6 +46,115 @@ export function chatAgentScript(input: { claude: string; chatEnvDir: string; con
     `  DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 exec ${quoted(input.claude)} "$@"`,
     ''
   ].join('\n')
+}
+
+/**
+ * `chatAgentScript` for Windows, as a batch file (`claude.cmd`). The variables are read with delayed
+ * expansion, so a value with `&` or `)` in it is written as it is; the program then runs with the
+ * caller's arguments untouched.
+ */
+export function chatAgentBatch(input: { claude: string; chatEnvDir: string; configDir: string; modelUrl: string; variables: readonly string[] }): string {
+  return [
+    '@echo off',
+    'if not defined ORCA_AGENT_SESSION_ID goto run',
+    'setlocal EnableDelayedExpansion',
+    `set "target=${input.chatEnvDir}\\!ORCA_AGENT_SESSION_ID!"`,
+    'type nul > "!target!.tmp"',
+    ...input.variables.map((name) => `>> "!target!.tmp" echo(${name}=!${name}!`),
+    'move /y "!target!.tmp" "!target!" > nul',
+    'endlocal',
+    ':run',
+    `set "CLAUDE_CONFIG_DIR=${input.configDir}"`,
+    `set "ANTHROPIC_API_KEY=${FAKE_MODEL_KEY}"`,
+    `set "ANTHROPIC_BASE_URL=${input.modelUrl}"`,
+    'set "DISABLE_AUTOUPDATER=1"',
+    'set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"',
+    `"${input.claude}" %*`,
+    'exit /b %ERRORLEVEL%',
+    ''
+  ].join('\r\n')
+}
+
+/** The chat agent's file name on the throwaway PATH. */
+export function chatAgentName(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'claude.cmd' : 'claude'
+}
+
+/**
+ * The real `claude` on `path`. On Windows npm installs `claude.cmd` beside the package, whose native
+ * program is the one to run.
+ */
+export function findClaude(path: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const folders = path.split(platform === 'win32' ? ';' : delimiter).filter(Boolean)
+  if (platform !== 'win32') return folders.map((folder) => join(folder, 'claude')).find((candidate) => existsSync(candidate))
+  for (const folder of folders) {
+    for (const candidate of [join(folder, 'claude.exe'), join(folder, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')]) {
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return undefined
+}
+
+/** The folder of the Orca app a CLI belongs to: `Orca.app` on macOS, elsewhere the folder that holds `resources/bin/<cli>`. */
+export function orcaAppFolder(cli: string): string {
+  const at = cli.indexOf('.app/')
+  return at >= 0 ? cli.slice(0, at + 4) : dirname(dirname(dirname(cli)))
+}
+
+/**
+ * Starts a `.cmd` file or a program. Windows starts a batch file only through `cmd.exe`; no `/s`, so
+ * cmd keeps the quotes around the file's path.
+ */
+export function spawnProgram(file: string, args: string[], options: SpawnOptions): ChildProcess {
+  if (process.platform === 'win32' && file.toLowerCase().endsWith('.cmd')) {
+    return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', file, ...args], { ...options, windowsHide: true })
+  }
+  return spawn(file, args, options)
+}
+
+/** `execFile` with `spawnProgram`'s rule for a `.cmd` file. */
+export function execProgram(file: string, args: string[], options: ExecFileOptions, done: (error: Error | null, stdout: string, stderr: string) => void): void {
+  const call = (program: string, list: string[], extra: ExecFileOptions): void =>
+    void execFile(program, list, { ...options, ...extra, encoding: 'utf8' }, (error, stdout, stderr) => done(error, String(stdout), String(stderr)))
+  if (process.platform === 'win32' && file.toLowerCase().endsWith('.cmd')) call(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', file, ...args], { windowsHide: true })
+  else call(file, args, {})
+}
+
+/**
+ * What the throwaway Orca needs from this computer besides the test's own variables: on Linux the
+ * display and session bus, when there are any, and Orca's switch for running without Chromium's
+ * sandbox; on Windows the system's own variables. Nothing on macOS.
+ */
+export function systemEnv(platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const names =
+    platform === 'linux'
+      ? ['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'ORCA_ELECTRON_NO_SANDBOX']
+      : platform === 'win32'
+        ? ['SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'ProgramData', 'CommonProgramFiles', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'OS', 'TEMP', 'TMP', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME']
+        : []
+  const found: Record<string, string> = {}
+  for (const name of names) {
+    const value = process.env[name]
+    if (value !== undefined && value !== '') found[name] = value
+  }
+  return found
+}
+
+/**
+ * The throwaway Orca's own variables on Windows: its home is the throwaway one (`USERPROFILE`, which
+ * Node takes for the home there, and the AppData folders inside it), and PATH is the agent's folder
+ * first, then this computer's PATH without any folder that holds a `claude`.
+ */
+export async function windowsHomeEnv(home: string, bin: string): Promise<Record<string, string>> {
+  const appData = join(home, 'AppData', 'Roaming')
+  const localAppData = join(home, 'AppData', 'Local')
+  await mkdir(appData, { recursive: true })
+  await mkdir(localAppData, { recursive: true })
+  const rest = (process.env.PATH ?? '')
+    .split(';')
+    .filter(Boolean)
+    .filter((folder) => !['claude', 'claude.cmd', 'claude.exe', 'claude.ps1'].some((name) => existsSync(join(folder, name))))
+  return { PATH: [bin, ...rest].join(';'), HOME: home, USERPROFILE: home, APPDATA: appData, LOCALAPPDATA: localAppData }
 }
 
 /** The made-up key `chatAgentScript` gives the chat's agent; `refusingModel` turns it away. */

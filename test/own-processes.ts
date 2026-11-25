@@ -7,7 +7,7 @@
 import { execFile } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, relative, sep } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 
 const alive = (pid: number): boolean => {
   try {
@@ -18,22 +18,40 @@ const alive = (pid: number): boolean => {
   }
 }
 
+/**
+ * Every process with its command line, one `<pid> <command line>` per line: `ps` on macOS and Linux
+ * (whose `ps` takes the POSIX options), and Windows' own process list through PowerShell.
+ */
+function listProcesses(): Promise<string> {
+  const [file, args] =
+    process.platform === 'darwin'
+      ? ['/bin/ps', ['-axww', '-o', 'pid=,command=']]
+      : process.platform === 'win32'
+        ? [
+            join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+            ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }']
+          ]
+        : ['/bin/ps', ['-A', '-ww', '-o', 'pid=,args=']]
+  return new Promise<string>((resolve, reject) =>
+    execFile(file, args, { maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))))
+  )
+}
+
 /** The processes (other than this one and its parent) whose command line names something inside `folder`. */
 export async function processesIn(folder: string): Promise<number[]> {
-  if (process.platform === 'win32') return []
   const temporary = await realpath(tmpdir())
   const own = await realpath(folder)
   const inside = relative(temporary, own)
   // Only a folder of its own inside the system's temporary folder: never a home, a profile or a root.
   if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`${own} is not a throwaway folder inside ${temporary}.`)
-  const mark = `${own}${sep}`
-  const listing = await new Promise<string>((resolve, reject) =>
-    execFile('/bin/ps', ['-axww', '-o', 'pid=,command='], { maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))))
-  )
+  // Windows paths are not case-sensitive, and a program there may be given one in either case.
+  const windows = process.platform === 'win32'
+  const mark = windows ? `${own}${sep}`.toLowerCase() : `${own}${sep}`
+  const listing = await listProcesses()
   const found: number[] = []
-  for (const line of listing.split('\n')) {
+  for (const line of listing.split(/\r?\n/)) {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line)
-    if (!match || !match[2]!.includes(mark)) continue
+    if (!match || !(windows ? match[2]!.toLowerCase() : match[2]!).includes(mark)) continue
     const pid = Number(match[1])
     if (pid !== process.pid && pid !== process.ppid) found.push(pid)
   }
