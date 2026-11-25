@@ -87,7 +87,8 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   login, the Inbox runs standard Plannotator. Until it moves to the Orca build, Start, Stop and
   Open in Orca are missing from the Inbox and per-agent icons are not shown.
 - Use the plugin in one Orca profile at a time.
-- The plugin has not been run inside Orca on Windows.
+- On Windows, Start, Stop and Resume from the Inbox are off unless you switch them on in
+  Plannotator, and they have not been tested inside Orca there.
 
 The full list is in [Limits](docs/limits.md).
 
