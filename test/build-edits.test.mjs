@@ -201,6 +201,8 @@ test('edits Plannotator makes itself are named in the manifest, the release note
     assert.deepEqual(m.omitted, [])
     assert.deepEqual(m.satisfied, made)
     assert.match(notes, /A full build: every Orca change is in it\./)
+    // a modified Plannotator names its licenses, whose texts the workflow attaches to the release.
+    assert.match(notes, /licensed MIT or Apache-2\.0; both license texts are attached as LICENSE-MIT and LICENSE-APACHE\./)
     assert.match(notes, /Plannotator makes 2 of these changes itself now, so the build leaves those lines as Plannotator has them: `mark-faces\/face-of-mark`, `mark-faces\/orca-host-name`\./)
     // Only edit names the recipe has.
     writeFileSync(join(dir, assetOf(TARGETS[0]) + '.build.json'), JSON.stringify({ ok: true, plannotator: '0.29.4', target: TARGETS[0], recipe: 'r', sha256: createHash('sha256').update(Buffer.from(TARGETS[0])).digest('hex'), omitted: [], satisfied: ['mark-faces/x\n<!--'], features: all }))

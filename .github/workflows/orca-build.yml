@@ -269,6 +269,18 @@ jobs:
           # Every target built, from this recipe, with the same groups left out; each binary still matches its report.
           node "src/$BUILD_DIR/release.mjs" manifest --dir out --version "$VERSION" --build "$BUILD" --commit "$COMMIT" --recipe "$RECIPE" >> "$GITHUB_OUTPUT"
           cat out/manifest.json
+      # The build is a modified Plannotator, so each release carries Plannotator's own license texts,
+      # read at the commit that was built.
+      - name: Fetch Plannotator's license texts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          for name in LICENSE-MIT LICENSE-APACHE; do
+            gh api -H "Accept: application/vnd.github.raw" "repos/$UPSTREAM/contents/$name?ref=$COMMIT" > "out/$name"
+            test -s "out/$name"
+          done
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -279,7 +291,8 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
             --title "Plannotator $VERSION, Orca build ${TAG##*-}" --notes-file out/notes.md \
             out/plannotator-orca-darwin-arm64 out/plannotator-orca-darwin-x64 out/plannotator-orca-linux-x64 \
-            out/plannotator-orca-linux-arm64 out/plannotator-orca-win32-x64.exe out/manifest.json
+            out/plannotator-orca-linux-arm64 out/plannotator-orca-win32-x64.exe out/manifest.json \
+            out/LICENSE-MIT out/LICENSE-APACHE
       - name: Point the index at this build
         env:
           GH_TOKEN: ${{ github.token }}
