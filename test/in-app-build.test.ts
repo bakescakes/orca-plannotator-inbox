@@ -28,7 +28,7 @@ import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
-import { chatAgentScript, findClaude, mcpClient, orcaAppFolder, refusingModel, systemEnv, tempDir, until } from './fakes'
+import { chatAgentScript, findClaude, mcpClient, orcaAppFolder, refusingModel, serveInApp, systemEnv, tempDir, until } from './fakes'
 import { stopProcessesIn } from './own-processes'
 // @ts-expect-error a plain module without types, shared with the updater's own tests
 import { releaseServer } from './release-fakes.mjs'
@@ -111,6 +111,7 @@ test('inside a real Orca with the Orca build: Start, Open, Stop and Resume from 
     USER: process.env.USER,
     TMPDIR: process.env.TMPDIR,
     ...systemEnv(),
+    ...serveInApp(),
     ORCA_E2E_USER_DATA_DIR: profile,
     ORCA_USER_DATA_PATH: profile,
     ORCA_E2E_HEADLESS: '1',

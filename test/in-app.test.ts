@@ -23,7 +23,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { isRecord } from '../src/util'
 import { launcherPath } from '../src/shared'
-import { chatAgentBatch, chatAgentName, chatAgentScript, execProgram, findClaude, mcpClient, orcaAppFolder, refusingModel, spawnProgram, systemEnv, tempDir, until, windowsHomeEnv } from './fakes'
+import { chatAgentBatch, chatAgentName, chatAgentScript, execProgram, findClaude, mcpClient, orcaAppFolder, refusingModel, serveInApp, spawnProgram, systemEnv, tempDir, until, windowsHomeEnv } from './fakes'
 import { processesIn, stopProcessesIn } from './own-processes'
 
 const text = (name: string): string => (process.env[name] ?? '').trim()
@@ -76,6 +76,7 @@ test('inside a real Orca: installed from a folder, a chat’s reply is delivered
     USER: process.env.USER,
     TMPDIR: process.env.TMPDIR,
     ...systemEnv(),
+    ...serveInApp(),
     ...(WINDOWS ? await windowsHomeEnv(home, bin) : {}),
     ORCA_E2E_USER_DATA_DIR: profile,
     ORCA_USER_DATA_PATH: profile,

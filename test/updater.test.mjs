@@ -2,7 +2,7 @@
 // Plannotator binaries, in throwaway folders. The end-to-end part at the bottom uses a real
 // Plannotator binary (PLANNOTATOR_E2E_BIN) as the "Orca build".
 import assert from 'node:assert/strict'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -942,6 +942,12 @@ test('a build that does not answer after the restart of a standard Inbox: back t
 
 // --- With a real Plannotator ---------------------------------------------------------------------
 
+/** The program a process runs, as a path. Linux's `ps` names only the file, so there it is read from /proc. */
+async function programOf(pid, env) {
+  if (process.platform === 'linux') return readlinkSync(`/proc/${pid}/exe`)
+  return (await runProgram('/bin/ps', ['-o', 'comm=', '-p', String(pid)], env)).stdout.trim()
+}
+
 test(
   'a real Plannotator Inbox moves onto a downloaded build with its data, and a broken build is rolled back',
   { skip: !BINARY ? 'set PLANNOTATOR_E2E_BIN to run' : STAND_IN },
@@ -970,8 +976,7 @@ test(
       const after = await b.health()
       assert.notEqual(after.pid, before.pid)
       assert.equal(after.version, version)
-      const ps = await runProgram('/bin/ps', ['-o', 'comm=', '-p', String(after.pid)], env)
-      assert.equal(ps.stdout.trim(), b.current().path, 'the Inbox process is the downloaded build')
+      assert.equal(await programOf(after.pid, env), b.current().path, 'the Inbox process is the downloaded build')
       const entry = readJson(join(b.data, 'inbox', 'inbox.json'))
       const threads = await (await fetch(`http://127.0.0.1:${entry.port}/api/inbox/threads`)).text()
       assert.match(threads, /Kept across the update/)
@@ -982,8 +987,7 @@ test(
       assert.equal(broken.rolledBack, true, broken.detail)
       assert.equal(b.current().build, 'orca.1')
       const back = await b.health()
-      const comm = await runProgram('/bin/ps', ['-o', 'comm=', '-p', String(back.pid)], env)
-      assert.equal(comm.stdout.trim(), b.current().path)
+      assert.equal(await programOf(back.pid, env), b.current().path)
       const entryBack = readJson(join(b.data, 'inbox', 'inbox.json'))
       assert.match(await (await fetch(`http://127.0.0.1:${entryBack.port}/api/inbox/threads`)).text(), /Kept across the update/)
       process.stderr.write(`updater e2e passed against Plannotator ${version}\n`)

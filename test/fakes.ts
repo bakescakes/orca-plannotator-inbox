@@ -141,6 +141,14 @@ export function systemEnv(platform: NodeJS.Platform = process.platform): Record<
 }
 
 /**
+ * On Linux and Windows `orca serve` runs on Orca's headless server by default, which has no plugins;
+ * this keeps it on the Orca app, where plugins run. macOS serves from the app already.
+ */
+export function serveInApp(platform: NodeJS.Platform = process.platform): Record<string, string> {
+  return platform === 'darwin' ? {} : { ORCA_SERVE_RUNTIME: 'electron' }
+}
+
+/**
  * The throwaway Orca's own variables on Windows: its home is the throwaway one (`USERPROFILE`, which
  * Node takes for the home there, and the AppData folders inside it), and PATH is the agent's folder
  * first, then this computer's PATH without any folder that holds a `claude`.
