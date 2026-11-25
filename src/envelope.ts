@@ -42,6 +42,26 @@ function oneLine(value: unknown, fallback: string): string {
   return text || fallback
 }
 
+/**
+ * What the mail is, in two words: the start of its subject. Orca shows the subject beside the sender in the chat,
+ * and names a plugin's mail "an agent", so the subject says what arrived: the person's reply, not an agent's message.
+ * Same order as `instruction`.
+ */
+function kind(command: InboxCommand): string {
+  if (command.handed_away) return 'Inbox thread handed on'
+  if (command.handoff) return 'Inbox thread handed to you'
+  if (command.tagged) return 'Inbox tag'
+  if (command.reask === true) return 'Inbox ask again'
+  if (typeof command.ack_of === 'string' && command.ack_of !== '') return 'Inbox reaction'
+  return command.type === 'message' ? 'Inbox message' : 'Inbox reply'
+}
+
+/** The mail's subject: what it is, then the thread's name when it has one (`Inbox reply: Ship it?`). */
+export function subjectOf(command: InboxCommand): string {
+  const named = oneLine(command.subject, '')
+  return (named ? `${kind(command)}: ${named}` : kind(command)).slice(0, 300)
+}
+
 function instruction(command: InboxCommand): string {
   if (command.handed_away) return 'The person handed this Plannotator Inbox thread to another session. Stop work on it; nothing here needs an answer.'
   if (command.handoff) return `The person handed you this Plannotator Inbox thread: it is yours now. Read it first with read_thread. ${ANSWER}`
@@ -109,7 +129,7 @@ export function buildEnvelope(
     replyTo: typeof command.reply_to === 'string' ? command.reply_to : null,
     session
   })
-  const envelope = { session, subject: `Plannotator: ${title}`.slice(0, 300), body, payload }
+  const envelope = { session, subject: subjectOf(command), body, payload }
   if (size(envelope.body) + size(envelope.payload) + size(envelope.subject) > limit) {
     throw new EnvelopeError('The reply cannot be fitted into one Orca mail.')
   }

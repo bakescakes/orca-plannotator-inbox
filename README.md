@@ -432,6 +432,10 @@ Commands: **Open Inbox**, **Show Status**, **Connect Agents**, **Disconnect Agen
   passes the chat's variables to its MCP servers. Every other connected agent sends through the
   launcher as plain Plannotator, and gets replies Plannotator's own way.
 - Connecting agents other than Claude Code, Codex and OpenCode needs the Inbox to be running.
+- In the chat, Orca shows a reply as mail from "an agent" with a "?" icon: it names a sender only
+  from a chat, a terminal, a task or a bot, and a plugin is none of those. So the mail's subject
+  says what arrived, then the thread's name: `Inbox reply: <thread name>` (`Inbox message`,
+  `Inbox reaction`, `Inbox tag`, `Inbox thread handed to you` and so on for the other kinds).
 - From Orca 1.4.265 a reply's text goes to Orca through standard input (`orchestration send
   --body-file -`), never on the command line, so it does not show in the process list. A reply up
   to about 500 KB is included in the mail; a longer one is not, and the chat is told to read it
