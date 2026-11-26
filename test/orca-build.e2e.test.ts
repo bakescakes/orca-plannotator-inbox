@@ -136,7 +136,13 @@ test('the real Orca build: installed, run in Orca mode, replies delivered, agent
   let child: ReturnType<typeof spawn> | null = null
   let stderr = ''
   try {
-    // 1. The worker installs the build by itself: downloaded, size and checksum checked, run once.
+    // 1. A new install asks first and downloads nothing. After "Use it" the worker installs the
+    //    build: downloaded, size and checksum checked, run once.
+    await until(async () => (await status()).askBuild === true, 'the first-run question')
+    assert.equal((await status()).build, undefined)
+    assert.equal(releases.downloads(), 0, 'nothing is downloaded before the answer')
+    assert.equal((await worker.request('build.choose', { use: true })).ok, true)
+    assert.equal((await status()).askBuild, undefined)
     await until(async () => (await status()).build?.mode === 'orca-build', 'the Orca build to be installed', 180_000)
     const installed = (await status()).build!
     assert.equal(installed.version, version)
