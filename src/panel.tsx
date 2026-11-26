@@ -184,6 +184,31 @@ function Build({ build, server }: { build: BuildInfo; server: ServerMode | undef
   )
 }
 
+/**
+ * A new install, before anything is downloaded: the one question about the Orca build. The words say
+ * what it is and that nothing of the person's own is replaced.
+ */
+function AskBuild() {
+  return (
+    <Card
+      title="Start and stop Orca chats from the Inbox"
+      description="This uses the Orca build of Plannotator: the same Plannotator release you have, with a few small changes so the Inbox can work with Orca chats. Your own Plannotator and your Inbox stay as they are."
+    >
+      <Stack gap="sm">
+        <Row gap="xs" wrap>
+          <Button disabled={read(busy)} onPress={() => act(() => plugin.request('build.choose', { use: true }))}>
+            Use it
+          </Button>
+          <Button variant="ghost" disabled={read(busy)} onPress={() => act(() => plugin.request('build.choose', { use: false }))}>
+            Not now
+          </Button>
+        </Row>
+        <Text muted size="xs">Replies reach your chats either way. You can change this in Settings.</Text>
+      </Stack>
+    </Card>
+  )
+}
+
 export default function Panel() {
   const current = read(status)
   const message = read(notice)
@@ -269,7 +294,7 @@ export default function Panel() {
 
       {current.agents.length > 0 ? <Agents agents={current.agents} /> : null}
 
-      {current.build ? <Build build={current.build} server={current.server} /> : null}
+      {current.askBuild ? <AskBuild /> : current.build ? <Build build={current.build} server={current.server} /> : null}
 
       <KeyValue
         label="Details"

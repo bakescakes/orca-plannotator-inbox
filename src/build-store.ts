@@ -484,6 +484,16 @@ export class BuildStore {
     return writePrivateJson(storePaths(this.deps.sharedDir).check, check)
   }
 
+  /**
+   * True where this plugin already keeps an Orca build or has looked for one (its record of the build
+   * in use, or of its last look, exists). A new install has neither.
+   */
+  async used(): Promise<boolean> {
+    const paths = storePaths(this.deps.sharedDir)
+    const there = (path: string): Promise<boolean> => stat(path).then(() => true, () => false)
+    return (await there(paths.current)) || (await there(paths.check))
+  }
+
   async status(): Promise<BuildStatus> {
     const [record, check, state, held] = await Promise.all([
       readCurrentBuild(this.deps.sharedDir, this.deps.platform),

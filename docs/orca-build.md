@@ -9,9 +9,11 @@ same number with the changes under [`plannotator/`](../plannotator/) applied, bu
 repository's public CI for macOS, Linux and Windows, and published on its Releases page with a
 checksum for each file.
 
-To turn it off, switch off **Use the Orca build of Plannotator** in Settings. Then nothing is
-downloaded, and your own Plannotator is used as it is. Start, Stop and Resume from the Inbox need
-it on.
+On a new install the panel asks once, before anything is downloaded: **Use it** or **Not now**.
+**Not now** switches off **Use the Orca build of Plannotator** in Settings, which is also where
+to change your mind later. With it off nothing is downloaded, and your own Plannotator is used as
+it is. Start, Stop and Resume from the Inbox need it on. Where the plugin already keeps an Orca
+build, an update of the plugin does not ask.
 
 ## Plannotator owns its updates
 
@@ -21,8 +23,8 @@ Plannotator is installed, it uses the newest Orca build.
 
 ## Install
 
-On start, at most every six hours after, and within seconds of your Plannotator changing, the
-worker reads the list of Orca builds, downloads the one of your Plannotator's release for your
+Once you have pressed **Use it**: on start, at most every six hours after, and within seconds of
+your Plannotator changing, the worker reads the list of Orca builds, downloads the one of your Plannotator's release for your
 computer, checks its size and SHA-256, runs it once to see that it answers, and only then records
 it under `~/.orca-plannotator-inbox/plannotator/`. Nothing is installed over your own
 `plannotator`.

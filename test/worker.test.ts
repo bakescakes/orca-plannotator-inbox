@@ -49,7 +49,9 @@ async function machine(settings: Record<string, string | boolean> = {}, existing
       }
     }
   }
-  const host = mockHost({ capabilities: CAPABILITIES, settings: { enabled: true, notifyBlocked: true, dataDir, orcaCliPath: '', ...settings } })
+  // `fresh`: a new install, which has not yet said whether to use the Orca build. Every other test is past that.
+  const { fresh, ...rest } = settings
+  const host = mockHost({ capabilities: CAPABILITIES, storage: fresh === true ? {} : { 'build.asked': true }, settings: { enabled: true, notifyBlocked: true, dataDir, orcaCliPath: '', ...rest } })
   const worker = await mountWorker({ default: (api) => start(api, runtime), deactivate }, { host, commands: ['inbox.open', 'inbox.status', 'agents.connect', 'agents.disconnect', 'inbox.restartOnBuild', 'build.check'] })
   return { root, home, shared, dataDir, orca, inbox, host, worker, opened, onOpen, updaterRuns, updater }
 }
@@ -478,5 +480,71 @@ test('the bridge: config.json names this Inbox, the launcher and the update comm
     }
   } finally {
     await t.worker.deactivate().catch(() => undefined)
+  }
+})
+
+/** A few looks, with time for a download to start if one were going to. */
+async function looks(t: Awaited<ReturnType<typeof machine>>): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await t.worker.request('status.get', { fresh: true })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+  }
+}
+
+test('a new install asks before the Orca build is downloaded, and “Use it” starts the download', async () => {
+  const t = await machine({ fresh: true })
+  try {
+    await looks(t)
+    const before = await t.worker.request('status.get', { fresh: true })
+    assert.equal(before.askBuild, true)
+    assert.equal(before.build, undefined)
+    assert.deepEqual(t.updaterRuns, [], 'nothing is downloaded before the answer')
+    await assert.rejects(stat(join(t.shared, 'bridge', 'config.json')), 'nothing starts Plannotator in Orca mode yet')
+    assert.match(String(await t.worker.command('inbox.status')), /not in use yet; the Plannotator Inbox panel asks/)
+    assert.deepEqual(await t.worker.request('build.check'), { ok: false, message: 'The Orca build is not in use yet. Press “Use it” in the Plannotator Inbox panel first.' })
+    assert.deepEqual(t.updaterRuns, [])
+
+    assert.deepEqual(await t.worker.request('build.choose', { use: true }), { ok: true, message: 'Getting the Orca build of Plannotator. This panel shows when it is in use.' })
+    await until(() => t.updaterRuns.length >= 1, 'the download after “Use it”')
+    const after = await t.worker.request('status.get', { fresh: true })
+    assert.equal(after.askBuild, undefined)
+    assert.equal(after.build?.mode, 'stock')
+    assert.equal(t.host.data().storage['build.asked'], true)
+    assert.notEqual(t.host.data().settings.orcaBuild, false)
+    await stat(join(t.shared, 'bridge', 'config.json'))
+    assert.deepEqual(t.worker.refusals, [])
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('“Not now” switches the setting off, downloads nothing, and the question is not asked again', async () => {
+  const t = await machine({ fresh: true })
+  try {
+    assert.equal((await t.worker.request('status.get', { fresh: true })).askBuild, true)
+    assert.deepEqual(await t.worker.request('build.choose', { use: false }), { ok: true, message: 'Your own Plannotator stays in use. You can switch the Orca build on in Settings.' })
+    assert.equal(t.host.data().settings.orcaBuild, false)
+    assert.equal(t.host.data().storage['build.asked'], true)
+    await looks(t)
+    const status = await t.worker.request('status.get', { fresh: true })
+    assert.deepEqual([status.askBuild, status.build], [undefined, undefined])
+    assert.deepEqual(t.updaterRuns, [])
+    assert.deepEqual(t.worker.refusals, [])
+  } finally {
+    await t.worker.deactivate()
+  }
+})
+
+test('where the plugin already keeps an Orca build, an update of the plugin does not ask', { skip: process.platform === 'win32' ? 'POSIX file modes' : false }, async () => {
+  const root = await tempDir()
+  await installBuild(join(root, 'shared'))
+  const t = await machine({ fresh: true }, root)
+  try {
+    const status = await t.worker.request('status.get', { fresh: true })
+    assert.equal(status.askBuild, undefined)
+    assert.equal(status.build?.mode, 'orca-build')
+    assert.equal(t.host.data().storage['build.asked'], true)
+  } finally {
+    await t.worker.deactivate()
   }
 })

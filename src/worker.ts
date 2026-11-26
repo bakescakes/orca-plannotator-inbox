@@ -28,6 +28,8 @@ const BUILD_LOOK_MS = 5_000
 const CHECK_ANSWER_MS = 8_000
 /** How often the chats the Inbox started are checked against what Orca still shows. */
 const OWNED_EVERY_MS = 60_000
+/** Storage: the person said whether to use the Orca build, or it was in use before the plugin asked. */
+const BUILD_ASKED = 'build.asked'
 
 /** What the worker takes from the machine. Tests replace parts of it; Orca uses the defaults. */
 export type Runtime = {
@@ -96,7 +98,15 @@ export function readProjects(value: unknown, home: string): string[] {
     .map((entry) => (entry === '~' ? home : /^~[\\/]/.test(entry) ? join(home, entry.slice(2)) : entry))
 }
 
-function readSettings(raw: Record<string, unknown>, home: string): EngineSettings & { notifyBlocked: boolean; links: boolean; orcaBuild: boolean } {
+/**
+ * `orcaBuild`: the setting is on and the person has answered the first-run question. `askBuild`: the
+ * setting is on and they have not, so nothing is downloaded yet. `buildSwitch`: the setting itself.
+ */
+function readSettings(
+  raw: Record<string, unknown>,
+  home: string,
+  asked: boolean
+): EngineSettings & { notifyBlocked: boolean; links: boolean; orcaBuild: boolean; askBuild: boolean; buildSwitch: boolean } {
   const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
   return {
     enabled: raw.enabled !== false,
@@ -106,7 +116,9 @@ function readSettings(raw: Record<string, unknown>, home: string): EngineSetting
     pictures: raw.pictures !== false,
     agentIcons: raw.agentIcons !== false,
     links: raw.links !== false,
-    orcaBuild: raw.orcaBuild !== false,
+    orcaBuild: raw.orcaBuild !== false && asked,
+    askBuild: raw.orcaBuild !== false && !asked,
+    buildSwitch: raw.orcaBuild !== false,
     notifyBlocked: raw.notifyBlocked !== false
   }
 }
@@ -129,6 +141,7 @@ function summary(status: Status): string {
     if (build.mode === 'orca-build' && build.reduced) lines.push(reducedLine(build.reduced))
     if (build.lastError) lines.push(`Orca build: ${build.lastError}`)
   }
+  if (status.askBuild) lines.push('The Orca build of Plannotator is not in use yet; the Plannotator Inbox panel asks whether to use it.')
   if (status.projects && status.projects.length > 0) lines.push(`Only these projects: ${status.projects.join(', ')}`)
   for (const agent of status.agents) lines.push(`${agent.name}: ${agent.detail}`)
   return lines.join('\n')
@@ -144,7 +157,9 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     set: (key, value: Json) => orca.storage.set(key, value),
     delete: (key) => orca.storage.delete(key)
   }
-  const settings = async (): Promise<ReturnType<typeof readSettings>> => readSettings(await orca.settings.get().catch(() => ({})), runtime.home)
+  // A new install asks once before the Orca build is downloaded (set below, once the build store can be read).
+  let buildAsked = true
+  const settings = async (): Promise<ReturnType<typeof readSettings>> => readSettings(await orca.settings.get().catch(() => ({})), runtime.home, buildAsked)
   const connectDeps: ConnectDeps = {
     home: runtime.home,
     env: runtime.env,
@@ -201,6 +216,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     orca.panels.handle('delivery.retry', () => unavailable)
     orca.panels.handle('inbox.restartOnBuild', () => unavailable)
     orca.panels.handle('build.check', () => unavailable)
+    orca.panels.handle('build.choose', () => unavailable)
     orca.commands.register('inbox.restartOnBuild', () => unavailable.message)
     orca.commands.register('build.check', () => unavailable.message)
     orca.commands.register('inbox.open', () => unavailable.message)
@@ -236,6 +252,14 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   let build: BuildInfo | undefined
   let server: ServerMode | undefined
   let buildLookedAt = 0
+  // Where the plugin already kept a build, or looked for one, before it asked, that stands as a yes.
+  buildAsked = (await store.get(BUILD_ASKED).catch(() => null)) === true
+  if (!buildAsked && (await builds.used().catch(() => false))) {
+    buildAsked = true
+    await store.set(BUILD_ASKED, true).catch(() => undefined)
+  }
+  let askBuild = (await settings()).askBuild
+  let buildSwitch = (await settings()).buildSwitch
 
   // The bridge: what the Orca build of Plannotator calls to start, stop, resume and open Orca chats.
   let bridge: Bridge | null = null
@@ -278,15 +302,16 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     ...runtime.engine
   })
 
-  const whole = (status: EngineStatus): Status => ({ ...status, agents, ...(build ? { build } : {}), ...(server ? { server } : {}) })
+  const whole = (status: EngineStatus): Status => ({ ...status, agents, ...(build ? { build } : {}), ...(server ? { server } : {}), ...(askBuild ? { askBuild } : {}) })
 
   /** Reads which Plannotator is installed and running; publishes when that changed. */
   const lookAtBuild = async (force: boolean): Promise<void> => {
     const now = Date.now()
     if (!force && now - buildLookedAt < BUILD_LOOK_MS) return
     buildLookedAt = now
-    const { dataDir, orcaBuild } = await settings()
-    const before = JSON.stringify([build, server])
+    const { dataDir, orcaBuild, askBuild: ask } = await settings()
+    const before = JSON.stringify([build, server, askBuild])
+    askBuild = ask
     if (orcaBuild) {
       const [nextBuild, nextServer] = await Promise.all([builds.status(), builds.serverMode(resolveDataDir(dataDir, runtime.env, runtime.home))])
       build = nextBuild
@@ -295,7 +320,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
       build = undefined
       server = undefined
     }
-    if (JSON.stringify([build, server]) !== before) publish(whole(engine.status()))
+    if (JSON.stringify([build, server, askBuild]) !== before) publish(whole(engine.status()))
   }
   /**
    * A standard Inbox while the Orca build of its release is in use: after a login Plannotator's own
@@ -346,7 +371,9 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
     return result
   }
   const checkBuild = async (): Promise<ActionResult> => {
-    if (!(await settings()).orcaBuild) return { ok: false, message: 'The Orca build is switched off in this plugin’s settings.' }
+    const now = await settings()
+    if (now.askBuild) return { ok: false, message: 'The Orca build is not in use yet. Press “Use it” in the Plannotator Inbox panel first.' }
+    if (!now.orcaBuild) return { ok: false, message: 'The Orca build is switched off in this plugin’s settings.' }
     const work = builds.ensure({ force: true })
     void lookAtBuild(true).catch(() => undefined)
     const done = await Promise.race([work, new Promise<null>((resolve) => setTimeout(() => resolve(null), CHECK_ANSWER_MS))])
@@ -393,6 +420,7 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   orca.panels.handle('agents.disconnect', (input) => connect(disconnectAllAgents, input?.agent))
   orca.panels.handle('inbox.restartOnBuild', restartOnBuild)
   orca.panels.handle('build.check', checkBuild)
+  orca.panels.handle('build.choose', (input) => chooseBuild(input?.use === true))
   orca.panels.handle('delivery.retry', async (input) => {
     const done = await engine.retry(input.key).catch(() => false)
     return done
@@ -480,6 +508,32 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   }
   await applyBridge()
 
+  /** The question is answered, by a press in the panel or by the person switching the setting on themselves. */
+  const answerBuild = async (): Promise<void> => {
+    buildAsked = true
+    await store.set(BUILD_ASKED, true).catch(() => undefined)
+    await applyBridge().catch(() => undefined)
+    await lookAtBuild(true).catch(() => undefined)
+  }
+  /**
+   * The one question a new install asks. "Use it": the build is downloaded and kept up to date from
+   * here on. "Not now": the setting is switched off, so Settings shows what was chosen and is where
+   * to change it; replies are delivered either way.
+   */
+  const chooseBuild = async (use: boolean): Promise<ActionResult> => {
+    if (!use) {
+      try {
+        await orca.settings.set('orcaBuild', false)
+      } catch (error) {
+        return { ok: false, message: `The setting was not changed: ${errorText(error)}` }
+      }
+    }
+    await answerBuild()
+    if (!use) return { ok: true, message: 'Your own Plannotator stays in use. You can switch the Orca build on in Settings.' }
+    keepBuild()
+    return { ok: true, message: 'Getting the Orca build of Plannotator. This panel shows when it is in use.' }
+  }
+
   // "Open in Orca" links: a listener on this computer only, which the launcher signs links for.
   // While it is not running the launcher adds no link, so switching the setting off removes them.
   let navigation: Navigation | null = null
@@ -508,9 +562,18 @@ export async function start(orca: OrcaWorkerApi, overrides: Partial<Runtime> = {
   await applyLinks(null)
 
   const settingsWatch = orca.settings.onDidChange(() => {
-    void engine.refresh().catch(() => undefined)
-    void applyLinks(null).catch(() => undefined)
-    void applyBridge().catch(() => undefined)
+    void (async () => {
+      // Switching the setting on in Settings is the person's own yes: the panel does not ask again.
+      const was = buildSwitch
+      buildSwitch = (await settings()).buildSwitch
+      if (buildSwitch && !was && !buildAsked) await answerBuild()
+    })()
+      .catch(() => undefined)
+      .then(() => {
+        void engine.refresh().catch(() => undefined)
+        void applyLinks(null).catch(() => undefined)
+        void applyBridge().catch(() => undefined)
+      })
   })
   engine.start()
   stopRunning = async () => {

@@ -45,6 +45,8 @@ export default defineCheck({
       }
     }
   },
+  // A new install: the one question about the Orca build, before anything is downloaded.
+  askBuild: { storage: { 'preview.status': (({ build: _build, server: _server, ...rest }) => ({ ...rest, askBuild: true }))(ready) } },
   noBuild: {
     storage: {
       'preview.status': {
