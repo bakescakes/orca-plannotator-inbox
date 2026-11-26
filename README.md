@@ -26,6 +26,8 @@ Then, in Orca:
    with its own `plannotator inbox --open`. See
    [Which agents are connected](docs/how-it-works.md#which-agents-are-connected).
 3. Start a new chat. Connections apply to chats started afterwards.
+4. The panel asks once whether to use the Orca build of Plannotator, which lets the Inbox start
+   and stop Orca chats. Press **Use it** or **Not now**; replies reach your chats either way.
 
 The status bar shows an **Inbox** item; pressing it opens the Inbox window.
 
@@ -47,13 +49,14 @@ The status bar shows an **Inbox** item; pressing it opens the Inbox window.
 ## The Orca build of Plannotator
 
 Starting, stopping and opening Orca chats from the Inbox, and the per-agent icons, need a build of
-Plannotator with a few small changes for Orca. The plugin downloads it from this repository's
-releases, checks its size and SHA-256 before using it, and keeps it on the version of the
-Plannotator installed on your computer. It is the same Plannotator release with those changes,
+Plannotator with a few small changes for Orca. The panel asks once before anything is downloaded.
+After **Use it**, the plugin downloads the build from this repository's releases, checks its size
+and SHA-256 before using it, and keeps it on the version of the Plannotator installed on your
+computer. It is the same Plannotator release with those changes,
 built in public by this repository's CI. Nothing is installed over your own `plannotator`, and
-your Inbox and its data stay as they are. If you would rather not use it, switch off **Use the
-Orca build of Plannotator** in Settings: then nothing is downloaded and your own Plannotator is
-used as it is, and replies still come back to the chat that asked. Read more in
+your Inbox and its data stay as they are. If you would rather not use it, press **Not now**, or
+switch off **Use the Orca build of Plannotator** in Settings: then nothing is downloaded and your
+own Plannotator is used as it is, and replies still come back to the chat that asked. Read more in
 [The Orca build of Plannotator](docs/orca-build.md).
 
 ## Settings

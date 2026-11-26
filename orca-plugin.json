@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "plannotator-inbox",
   "name": "Plannotator Inbox",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Brings your Plannotator Inbox replies back into the Orca chat that asked, and lets the Inbox start, stop, resume and open Orca chats. Keeps itself and its Plannotator up to date.",
   "author": {
     "name": "bakescakes",

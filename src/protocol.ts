@@ -102,6 +102,11 @@ export type Status = {
   /** Absent from older workers and when the Orca build is switched off in Settings. */
   build?: BuildInfo
   server?: ServerMode
+  /**
+   * True on a new install until the person says whether to use the Orca build: nothing is downloaded
+   * before that. Absent from older workers, and once answered.
+   */
+  askBuild?: boolean
 }
 
 export type ActionResult = { ok: boolean; message: string }
@@ -120,6 +125,8 @@ declare module 'orca' {
     'inbox.restartOnBuild': { output: ActionResult }
     /** Looks for a newer Orca build now and installs it. */
     'build.check': { output: ActionResult }
+    /** The person's answer to the one question a new install asks: use the Orca build, or not now. */
+    'build.choose': { input: { use: boolean }; output: ActionResult }
     /** A person chose to send a blocked reply again. */
     'delivery.retry': { input: { key: string }; output: ActionResult }
   }
